@@ -120,6 +120,7 @@ class RoleResult(BaseModel):
     role: str
     status: Literal["completed", "blocked", "failed", "skipped"]
     output: dict[str, Any] = Field(default_factory=dict)
+    usage: TokenUsage | None = None
     cost: float = 0
 
 

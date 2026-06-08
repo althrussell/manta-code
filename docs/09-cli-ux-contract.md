@@ -57,6 +57,14 @@ Cost
   total:    $0.593 / $1.000
 ```
 
+## Dry-run vs. real execution
+
+`manta run "..."` defaults to `--dry-run` (offline mock runtime, no model
+credentials). Pass `--no-dry-run` to execute the pipeline through the Deep
+Agents runtime (Sprint 3), which records token usage into the budget ledger and
+enforces hard caps. If the optional `[agent]` extra is not installed, the CLI
+prints a friendly message and falls back to the dry-run scaffold.
+
 ## Machine-readable output
 
 `--json` should output:

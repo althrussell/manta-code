@@ -59,20 +59,31 @@ def run(
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Run a task through the Manta pipeline."""
-    if not dry_run:
-        console.print("[yellow]Real model runtime is planned for Sprint 3. Running dry-run scaffold.[/yellow]")
-    result = MantaPipeline().dry_run(prompt, max_usd=max_usd)
+    pipeline = MantaPipeline()
+    if dry_run:
+        result = pipeline.dry_run(prompt, max_usd=max_usd)
+    else:
+        try:
+            result = pipeline.run(prompt, max_usd=max_usd)
+        except RuntimeError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+            console.print("[yellow]Falling back to dry-run scaffold.[/yellow]")
+            result = pipeline.dry_run(prompt, max_usd=max_usd)
     if json_output:
         console.print(json.dumps(result, indent=2))
         return
     route_info = result["route"]
+    cost = result["cost"]
     console.print("[bold]Manta run[/bold]")
     console.print(f"Session: {result['session_id']}")
     console.print(f"Route: {route_info['route']}")
     console.print(f"Pipeline: {' → '.join(route_info['pipeline'])}")
     console.print(f"Budget: ${route_info['max_budget_usd']:.2f}")
     console.print(f"Reason: {route_info['reason']}")
-    console.print("[green]Dry-run completed.[/green]")
+    console.print(f"Cost: ${cost['used_usd']:.4f} / ${cost['max_usd']:.2f}")
+    if result.get("stopped_reason"):
+        console.print(f"[yellow]Stopped: {result['stopped_reason']}[/yellow]")
+    console.print("[green]Dry-run completed.[/green]" if dry_run else "[green]Run completed.[/green]")
 
 
 @app.command()

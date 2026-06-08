@@ -82,6 +82,26 @@ User-global:
 }
 ```
 
+## Role result
+
+Each role invocation returns a structured result. `usage` is populated by
+model-backed runtimes and drives ledger recording; the dry-run mock runtime
+leaves it `null`.
+
+```json
+{
+  "role": "builder",
+  "status": "completed",
+  "output": {"message": "implemented change"},
+  "usage": {"input_tokens": 12000, "output_tokens": 2500},
+  "cost": 0.24
+}
+```
+
+`status` is one of `completed`, `blocked`, `failed`, `skipped`. A `blocked`
+reviewer or an exhausted budget stops the remaining pipeline (downstream roles
+are recorded as `skipped`).
+
 ## Cost ledger
 
 Append-only JSONL.
