@@ -1,0 +1,36 @@
+[paths]
+project_root_only = true
+protected_globs = [
+  ".env",
+  ".env.*",
+  "**/*secret*",
+  "**/*credential*",
+  "**/*private_key*",
+  "**/id_rsa",
+  "**/id_ed25519"
+]
+
+[shell]
+mode = "allowlisted"
+allow = [
+  "pytest",
+  "python -m pytest",
+  "uv run pytest",
+  "ruff check",
+  "mypy",
+  "npm test",
+  "npm run test",
+  "npm run lint",
+  "pnpm test",
+  "pnpm lint",
+  "yarn test",
+  "yarn lint"
+]
+
+[network]
+allow = false
+allowed_domains = []
+
+[git]
+commit = "approval"
+push = "deny"

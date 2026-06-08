@@ -1,0 +1,11 @@
+{
+  "intent": "code_change",
+  "complexity": "medium",
+  "risk": "low",
+  "needs_planning": false,
+  "needs_review": true,
+  "needs_security_review": false,
+  "pipeline": ["builder", "code_reviewer"],
+  "max_budget_usd": 1.0,
+  "reason": "Feature request appears scoped and does not touch security-sensitive areas."
+}

@@ -1,0 +1,13 @@
+{
+  "approved": false,
+  "findings": [
+    {
+      "file": "src/settings.py",
+      "line": 88,
+      "severity": "medium",
+      "category": "correctness",
+      "issue": "Validation accepts an empty API key.",
+      "required_fix": "Reject empty or whitespace-only API keys and add a test."
+    }
+  ]
+}

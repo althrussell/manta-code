@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.manta/sessions/
+.manta/memory/
+.manta/ledger.jsonl
+.env
+.env.*
+.DS_Store

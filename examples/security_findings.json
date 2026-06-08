@@ -1,0 +1,14 @@
+{
+  "approved": false,
+  "highest_severity": "high",
+  "findings": [
+    {
+      "file": "src/webhook.py",
+      "line": 34,
+      "severity": "high",
+      "category": "auth",
+      "issue": "Webhook endpoint accepts unsigned requests.",
+      "required_fix": "Verify provider signature before processing payload."
+    }
+  ]
+}
