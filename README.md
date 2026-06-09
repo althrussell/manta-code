@@ -30,10 +30,25 @@ manta -r                 # resume most recent thread (deepagents-code flag, forw
 Databricks:
 
 - **Model** — Manta registers a Databricks provider in `~/.deepagents/config.toml`
-  (`class_path = "databricks_langchain:ChatDatabricks"`) and launches with
-  `-M databricks:<default_endpoint>` from your `.manta/config.toml`.
+  (`class_path = "manta_code.databricks_chat:MantaChatDatabricks"`, a thin
+  `ChatDatabricks` subclass that unpacks reasoning-model content) and launches
+  with `-M databricks:<default_endpoint>` from your `.manta/config.toml`.
 - **Auth** — `-p/--profile` (or `MANTA_PROFILE` / `DATABRICKS_CONFIG_PROFILE`)
   selects the `~/.databrickscfg` profile; the Databricks SDK handles unified auth.
+- **Agents** — on first launch Manta provisions three default subagents
+  (`planning`, `swe`, `review`) the main agent can delegate to via its `task`
+  tool. They live as editable markdown under `~/.deepagents/agent/agents/`, and
+  each pins the right Databricks model for its role:
+
+  | Role | Agent | Databricks endpoint |
+  | --- | --- | --- |
+  | Orchestrator (main) | — | `databricks-gpt-oss-120b` |
+  | Planning | `planning` | `databricks-claude-opus-4-8` |
+  | Build / SWE | `swe` | `databricks-gpt-5-5` |
+  | Review | `review` | `databricks-gemini-3-1-pro` |
+
+  Provisioned once — your edits and deletions stick. Inspect them with
+  `manta agents` (table) or `manta agents <name>` (full config).
 - **Passthrough** — flags Manta doesn't define (`-r`, `-a <agent>`,
   `--skill <name>`, `-M databricks:<other-endpoint>`, …) are forwarded verbatim to
   `deepagents-code`.
@@ -48,6 +63,8 @@ manta            # launch the interactive TUI
 manta -p <name>  # launch with a specific Databricks profile
 manta doctor     # preflight: deps, Databricks auth, model wiring
 manta init       # write .manta/config.toml (launcher endpoints)
+manta agents     # list provisioned subagents + their models
+manta agents swe # show one subagent's full markdown config
 ```
 
 ## Configuration
@@ -59,19 +76,25 @@ manta init       # write .manta/config.toml (launcher endpoints)
 provider = "databricks"
 
 [interactive]
-default_endpoint = "databricks-claude-sonnet-4-5"
-extra_endpoints = ["databricks-meta-llama-3-3-70b-instruct"]
+default_endpoint = "databricks-gpt-oss-120b"
+extra_endpoints = [
+    "databricks-claude-opus-4-8",
+    "databricks-gpt-5-5",
+    "databricks-gemini-3-1-pro",
+]
 ```
 
-`default_endpoint` is launched on start; every endpoint is registered in the
-`deepagents-code` `/model` switcher. See `docs/10-config-schema.md`.
+`default_endpoint` is the orchestrator model launched on start; `extra_endpoints`
+registers the subagent role models so all of them appear in the `deepagents-code`
+`/model` switcher. See `docs/10-config-schema.md`.
 
 ## Layout
 
 ```text
 .
 ├── docs/                 # CLI contract, config schema, integration, ADRs
-├── src/manta_code/       # main.py (CLI), dcode.py (launcher), auth.py, config.py
+├── src/manta_code/       # main.py (CLI), dcode.py (launcher), auth.py, config.py,
+│                         #   databricks_chat.py (model), subagents.py, _boot.py
 ├── tests/                # unit tests
 ├── configs/              # example .manta/config.toml
 ├── scripts/              # bootstrap and local-run helpers

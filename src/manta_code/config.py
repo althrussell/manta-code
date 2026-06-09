@@ -19,10 +19,15 @@ provider = "databricks"
 # endpoint that `manta` launches with (passed as `databricks:<endpoint>`).
 # `extra_endpoints` are also registered in deepagents-code's `/model` switcher
 # so you can switch between them in-session.
+# The default is the orchestration model; `extra_endpoints` includes the models
+# Manta's planning/swe/review subagents use (see manta_code.subagents) so they
+# are all available in deepagents-code's `/model` switcher.
 [interactive]
-default_endpoint = "databricks-claude-sonnet-4-5"
+default_endpoint = "databricks-gpt-oss-120b"
 extra_endpoints = [
-    "databricks-meta-llama-3-3-70b-instruct",
+    "databricks-claude-opus-4-8",
+    "databricks-gpt-5-5",
+    "databricks-gemini-3-1-pro",
 ]
 """
 
@@ -32,9 +37,13 @@ class RuntimeConfig(BaseModel):
 
 
 class InteractiveConfig(BaseModel):
-    default_endpoint: str = "databricks-claude-sonnet-4-5"
+    default_endpoint: str = "databricks-gpt-oss-120b"
     extra_endpoints: list[str] = Field(
-        default_factory=lambda: ["databricks-meta-llama-3-3-70b-instruct"]
+        default_factory=lambda: [
+            "databricks-claude-opus-4-8",
+            "databricks-gpt-5-5",
+            "databricks-gemini-3-1-pro",
+        ]
     )
 
 

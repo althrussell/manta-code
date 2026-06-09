@@ -107,6 +107,37 @@ def resolve_workspace_client(profile: str | None = None) -> "WorkspaceClient":
     return WorkspaceClient()
 
 
+#: Serving-endpoint task that identifies a chat-completions model. Foundation
+#: Model APIs (pay-per-token), provisioned-throughput, and external-model chat
+#: endpoints all report this task; embeddings/completions/custom endpoints do
+#: not, so filtering on it keeps ``/model`` to models the agent can actually use.
+CHAT_ENDPOINT_TASK = "llm/v1/chat"
+
+
+def list_serving_chat_endpoints(profile: str | None = None) -> list[str]:
+    """Return names of chat-capable Databricks serving endpoints.
+
+    Queries the workspace Serving Endpoints API and keeps endpoints whose task
+    is chat (:data:`CHAT_ENDPOINT_TASK`). Returns an empty list on any failure
+    (SDK missing, auth error, network) so callers can fall back to the
+    configured defaults rather than blocking launch.
+    """
+    try:
+        client = resolve_workspace_client(profile)
+        endpoints = client.serving_endpoints.list()
+    except Exception:  # noqa: BLE001 - discovery is best-effort; never block launch
+        return []
+
+    names: list[str] = []
+    for endpoint in endpoints:
+        name = getattr(endpoint, "name", None)
+        if not name:
+            continue
+        if getattr(endpoint, "task", None) == CHAT_ENDPOINT_TASK:
+            names.append(name)
+    return names
+
+
 def is_authenticated(profile: str | None = None) -> bool:
     """Return ``True`` if a quick ``current_user.me()`` call succeeds."""
     try:

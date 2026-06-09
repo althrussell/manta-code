@@ -10,7 +10,13 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config import init_project, interactive_endpoints, load_config, project_manta_dir
+from .config import (
+    MantaConfig,
+    init_project,
+    interactive_endpoints,
+    load_config,
+    project_manta_dir,
+)
 
 app = typer.Typer(
     help="Manta Code — Databricks-preconfigured launcher for the deepagents-code coding agent",
@@ -19,7 +25,7 @@ console = Console()
 
 #: Manta's own subcommands. Anything else (bare invocation, unknown flags) is
 #: treated as a request to launch the interactive runtime and is forwarded.
-KNOWN_SUBCOMMANDS = frozenset({"doctor", "init"})
+KNOWN_SUBCOMMANDS = frozenset({"doctor", "init", "agents"})
 
 
 def classify_args(argv: list[str]) -> tuple[str, Optional[str], list[str]]:
@@ -132,12 +138,30 @@ def _launch_interactive(*, profile: Optional[str], passthrough: list[str]) -> No
         dcode.launch(
             profile=profile,
             default_endpoint=cfg.interactive.default_endpoint,
-            endpoints=interactive_endpoints(cfg),
+            endpoints=_resolve_endpoints(cfg, profile),
             passthrough=passthrough,
         )
     except dcode.LauncherError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
+
+
+def _resolve_endpoints(cfg: MantaConfig, profile: Optional[str]) -> list[str]:
+    """Merge configured endpoints with chat endpoints discovered in the workspace.
+
+    The configured ``default_endpoint`` stays first (it is what ``manta``
+    launches with) and the explicit ``extra_endpoints`` follow, so a curated
+    ordering is preserved even when discovery succeeds. Every chat-capable
+    serving endpoint found in the workspace is then appended (deduped), so
+    ``/model`` reflects the live Databricks AI Gateway rather than a hardcoded
+    pair. Discovery is best-effort: on any failure the configured endpoints are
+    used unchanged.
+    """
+    from .auth import list_serving_chat_endpoints
+
+    configured = interactive_endpoints(cfg)
+    discovered = list_serving_chat_endpoints(profile)
+    return list(dict.fromkeys([*configured, *discovered]))
 
 
 @app.command()
@@ -219,6 +243,59 @@ def init(overwrite: bool = typer.Option(False, help="Overwrite existing .manta/c
     """Initialize .manta project config (launcher settings: endpoints)."""
     path = init_project(overwrite=overwrite)
     console.print(f"Initialized Manta config: [bold]{path}[/bold]")
+
+
+@app.command()
+def agents(
+    name: Optional[str] = typer.Argument(
+        None, help="Show the full config for one subagent (otherwise list all)"
+    ),
+) -> None:
+    """List Manta's subagents and their pinned models, or show one's full config.
+
+    Subagents are markdown configs under `~/.deepagents/agent/agents/<name>/AGENTS.md`
+    (user) and `.deepagents/agents/<name>/AGENTS.md` (project). The main agent
+    delegates to them via its `task` tool; edit the files to customize them.
+    """
+    from .subagents import discover_subagents, user_subagents_dir
+
+    infos = discover_subagents()
+    if not infos:
+        console.print(
+            "No subagents found yet — they're provisioned on first "
+            "[bold]manta[/bold] launch.\n"
+            f"Looked in: [dim]{user_subagents_dir()}[/dim]"
+        )
+        return
+
+    if name is not None:
+        info = next((i for i in infos if i.name == name), None)
+        if info is None:
+            known = ", ".join(i.name for i in infos)
+            console.print(
+                f"[red]No subagent named '{name}'.[/red] Known: {known}"
+            )
+            raise typer.Exit(code=1)
+        console.print(f"[bold]{info.name}[/bold] [dim]({info.source})[/dim]")
+        console.print(f"Model: {info.model or '[dim](inherits orchestrator)[/dim]'}")
+        console.print(f"Path:  [dim]{info.path}[/dim]\n")
+        console.print(info.raw)
+        return
+
+    table = Table(title="Manta subagents")
+    table.add_column("Name")
+    table.add_column("Model")
+    table.add_column("Source")
+    table.add_column("Description")
+    for info in infos:
+        table.add_row(
+            info.name,
+            info.model or "[dim](inherits orchestrator)[/dim]",
+            info.source,
+            (info.description or "").strip(),
+        )
+    console.print(table)
+    console.print("[dim]Run 'manta agents <name>' to see a subagent's full config.[/dim]")
 
 
 if __name__ == "__main__":

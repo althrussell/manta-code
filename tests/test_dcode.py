@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tomllib
 
 import pytest
@@ -254,6 +255,57 @@ def test_rebrand_auth_screen_replaces_screen_internals():
         screen.compose = original_compose
         screen.on_mount = original_on_mount
         screen.on_option_list_option_selected = original_selected
+
+
+def test_rebrand_model_selector_footer_neutralizes_databricks(monkeypatch):
+    model_selector = pytest.importorskip("deepagents_code.widgets.model_selector")
+    screen = model_selector.ModelSelectorScreen
+    original = screen._update_footer
+    try:
+        assert _boot.rebrand_model_selector_footer() is True
+        assert screen._update_footer is not original
+
+        class _FakeStatic:
+            def __init__(self):
+                self.content = None
+
+            def update(self, content):
+                self.content = content
+
+        class _FakeSelector:
+            def __init__(self):
+                self._filtered_models = [("databricks:foo", "databricks")]
+                self._selected_index = 0
+                self._profiles = {}
+                self._static = _FakeStatic()
+
+            def query_one(self, _selector, *_args):
+                return self._static
+
+        fake = _FakeSelector()
+        screen._update_footer(fake)
+        assert "Databricks AI Gateway endpoint" in fake._static.content.plain
+    finally:
+        screen._update_footer = original
+
+
+def test_allow_blocking_server_appends_flag(monkeypatch):
+    server = pytest.importorskip("deepagents_code.server")
+    original = server._build_server_cmd
+    try:
+        monkeypatch.setattr(
+            server,
+            "_build_server_cmd",
+            lambda *_a, **_k: [sys.executable, "-m", "langgraph_cli", "dev"],
+            raising=True,
+        )
+        assert _boot.allow_blocking_server() is True
+        cmd = server._build_server_cmd(object(), host="127.0.0.1", port=1234)
+        assert "--allow-blocking" in cmd
+        # Idempotent: re-applying the patch must not duplicate the flag.
+        assert cmd.count("--allow-blocking") == 1
+    finally:
+        server._build_server_cmd = original
 
 
 class _FakeApp:

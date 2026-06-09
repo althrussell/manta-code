@@ -363,11 +363,95 @@ def rebrand_auth_screen() -> bool:
     return True
 
 
+def rebrand_model_selector_footer() -> bool:
+    """Show a neutral footer for profile-less Databricks endpoints in ``/model``.
+
+    Databricks AI Gateway endpoints carry no upstream model profile (context
+    window, modalities, capabilities), so the selector's detail footer renders
+    "Model profile not available :(". Manta deliberately does not fabricate
+    those values (a wrong ``max_input_tokens`` would drive real truncation), so
+    instead this wraps ``_update_footer`` to print a neutral
+    "Databricks AI Gateway endpoint" line for Databricks specs that lack a
+    profile, delegating to the upstream footer for everything else (including
+    Databricks endpoints the user has annotated with a profile in config).
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from textual.content import Content
+        from textual.widgets import Static
+
+        from deepagents_code.widgets.model_selector import ModelSelectorScreen
+    except Exception:
+        return False
+
+    original_update_footer = ModelSelectorScreen._update_footer
+
+    def _update_footer(self: object) -> None:
+        if self._filtered_models:
+            index = min(self._selected_index, len(self._filtered_models) - 1)
+            spec, _ = self._filtered_models[index]
+            entry = self._profiles.get(spec)
+            profile = entry.get("profile") if entry else None
+            if spec.startswith(f"{DATABRICKS_PROVIDER}:") and not profile:
+                footer = self.query_one("#model-detail-footer", Static)
+                footer.update(
+                    Content.styled("Databricks AI Gateway endpoint\n\n\n", "dim")
+                )
+                return
+        original_update_footer(self)
+
+    ModelSelectorScreen._update_footer = _update_footer
+    return True
+
+
+def allow_blocking_server() -> bool:
+    """Let the LangGraph dev server tolerate Databricks' blocking auth.
+
+    ``deepagents-code`` runs the agent in a ``langgraph dev`` subprocess whose
+    in-memory runtime arms ``blockbuster`` to raise on any synchronous I/O on
+    the event loop. The Databricks SDK's ``databricks-cli`` auth is genuinely
+    blocking — it resolves the ``databricks`` binary via ``os.readlink`` and
+    shells out for an OAuth token — and exposes no async driver, so the first
+    ``ChatDatabricks`` request inside the server trips ``blockbuster`` with
+    ``ValueError: ... Blocking call to os.readlink``.
+
+    ``langgraph dev`` only disables that detector when invoked with
+    ``--allow-blocking`` (it sets ``LANGGRAPH_ALLOW_BLOCKING`` itself, so an
+    inherited env var is overwritten — the flag is the sole seam). This wraps
+    :func:`deepagents_code.server._build_server_cmd` to append the flag. The
+    detector is a deployment-hygiene aid for multi-tenant ASGI servers;
+    disabling it is the upstream-recommended remedy (option 3) and benign for
+    this single-user local dev server.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code import server
+    except Exception:
+        return False
+
+    original_build_cmd = getattr(server, "_build_server_cmd", None)
+    if original_build_cmd is None:
+        return False
+
+    def _build_server_cmd(*args: object, **kwargs: object) -> list[str]:
+        cmd = original_build_cmd(*args, **kwargs)
+        if "--allow-blocking" not in cmd:
+            cmd.append("--allow-blocking")
+        return cmd
+
+    server._build_server_cmd = _build_server_cmd
+    return True
+
+
 def main() -> None:
     """Apply branding and Databricks scoping, then run the upstream CLI."""
     apply_branding()
     restrict_models_to_databricks()
     rebrand_auth_screen()
+    rebrand_model_selector_footer()
+    allow_blocking_server()
     from deepagents_code.main import cli_main
 
     cli_main()

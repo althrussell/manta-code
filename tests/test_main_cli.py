@@ -44,7 +44,42 @@ def test_classify_args_bare_launch():
 def test_classify_args_delegates_subcommands_and_help():
     assert main_mod.classify_args(["doctor"])[0] == "delegate"
     assert main_mod.classify_args(["-p", "s1", "init"])[0] == "delegate"
+    assert main_mod.classify_args(["agents"])[0] == "delegate"
     assert main_mod.classify_args(["--help"])[0] == "delegate"
+
+
+def _patch_discover_to_tmp(monkeypatch, tmp_path):
+    from manta_code import subagents
+
+    marker = tmp_path / ".state" / "marker"
+    subagents.ensure_manta_subagents(base_dir=tmp_path, marker_path=marker)
+    original = subagents.discover_subagents
+    monkeypatch.setattr(
+        subagents,
+        "discover_subagents",
+        lambda: original(base_dir=tmp_path, project_root=tmp_path / "none"),
+    )
+
+
+def test_agents_command_lists_subagents(monkeypatch, tmp_path):
+    _patch_discover_to_tmp(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["agents"])
+    assert result.exit_code == 0
+    assert "planning" in result.stdout
+    assert "swe" in result.stdout
+    assert "review" in result.stdout
+
+
+def test_agents_command_shows_one_config(monkeypatch, tmp_path):
+    _patch_discover_to_tmp(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["agents", "planning"])
+    assert result.exit_code == 0
+    assert "databricks-claude-opus-4-8" in result.stdout
+
+    missing = runner.invoke(app, ["agents", "nope"])
+    assert missing.exit_code == 1
 
 
 def test_main_entry_launches_when_no_subcommand(monkeypatch):
@@ -86,11 +121,31 @@ def test_launch_interactive_invokes_dcode(monkeypatch):
     # runs in CI environments that only install the base/dev deps.
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(dcode, "launch", fake_dcode_launch)
+    # Keep the test hermetic: don't hit the workspace for endpoint discovery.
+    monkeypatch.setattr(auth, "list_serving_chat_endpoints", lambda profile=None: [])
     main_mod._launch_interactive(profile="s2", passthrough=["-r"])
     assert calls["profile"] == "s2"
     assert calls["passthrough"] == ["-r"]
     assert calls["default_endpoint"]  # non-empty endpoint string
-    assert "databricks-claude-sonnet-4-5" in calls["endpoints"]
+    assert "databricks-gpt-oss-120b" in calls["endpoints"]
+
+
+def test_resolve_endpoints_merges_discovered(monkeypatch):
+    from manta_code.config import MantaConfig
+
+    monkeypatch.setattr(
+        auth,
+        "list_serving_chat_endpoints",
+        lambda profile=None: [
+            "databricks-gpt-oss-120b",  # duplicate of the configured default
+            "databricks-claude-sonnet-4-5",  # genuinely new, discovered endpoint
+        ],
+    )
+    out = main_mod._resolve_endpoints(MantaConfig(), "s2")
+    assert out[0] == "databricks-gpt-oss-120b"  # configured default stays first
+    assert "databricks-claude-opus-4-8" in out  # configured extra kept
+    assert "databricks-claude-sonnet-4-5" in out  # discovered endpoint added
+    assert out.count("databricks-gpt-oss-120b") == 1  # deduped
 
 
 def test_doctor_reports_checks(monkeypatch):

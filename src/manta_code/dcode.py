@@ -7,9 +7,10 @@ points:
 
 - **Model** — Databricks is registered as a ``deepagents-code`` *provider* in
   ``~/.deepagents/config.toml`` via a ``class_path`` that points at
-  :class:`databricks_langchain.ChatDatabricks`. ``deepagents-code``'s
-  ``create_model("databricks:<endpoint>")`` then instantiates it directly, with
-  no fork of its model registry.
+  :class:`manta_code.databricks_chat.MantaChatDatabricks` (a thin
+  ``ChatDatabricks`` subclass that unpacks reasoning-model content blocks).
+  ``deepagents-code``'s ``create_model("databricks:<endpoint>")`` then
+  instantiates it directly, with no fork of its model registry.
 - **Auth / profile** — the active Databricks profile is selected by exporting
   ``DATABRICKS_CONFIG_PROFILE``; the Databricks SDK (and therefore
   ``ChatDatabricks``) reads it for unified auth from ``~/.databrickscfg``. This
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from .auth import resolve_profile
+from .subagents import ensure_manta_subagents
 
 #: Boot shim run instead of ``deepagents_code`` directly, so Manta can rebrand
 #: the splash wordmark in-process before handing off to upstream's CLI entry.
@@ -45,7 +47,11 @@ DATABRICKS_PROVIDER = "databricks"
 DEFAULT_SUPPRESSED_WARNINGS = ("tavily",)
 
 #: ``module:ClassName`` that ``deepagents-code`` instantiates for the provider.
-DATABRICKS_CLASS_PATH = "databricks_langchain:ChatDatabricks"
+#: Manta's :class:`manta_code.databricks_chat.MantaChatDatabricks` subclass
+#: (not stock ``ChatDatabricks``) so reasoning-model endpoints that return
+#: content as a serialized reasoning/text block list render their answer
+#: cleanly instead of dumping raw JSON.
+DATABRICKS_CLASS_PATH = "manta_code.databricks_chat:MantaChatDatabricks"
 
 #: Location of ``deepagents-code``'s user config (hard-coded upstream).
 DEEPAGENTS_CONFIG_DIR = Path.home() / ".deepagents"
@@ -269,6 +275,10 @@ def launch(
 ) -> int:
     """Provision config + env and launch the deepagents-code TUI.
 
+    Also provisions Manta's default planning/SWE/review subagents on first run
+    (see :func:`manta_code.subagents.ensure_manta_subagents`); this is
+    marker-gated so user edits are never clobbered.
+
     When ``exec_replace`` is true (the default) the current process is replaced
     via :func:`os.execvpe` so the TUI owns the terminal cleanly and this call
     never returns. When false (used by tests), the launcher runs the subprocess
@@ -281,6 +291,7 @@ def launch(
         default_endpoint=default_endpoint,
     )
     mark_onboarding_complete()
+    ensure_manta_subagents()
     env = build_launch_env(profile)
     argv = build_dcode_argv(default_endpoint, passthrough)
     if exec_replace:

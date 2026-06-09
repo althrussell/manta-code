@@ -36,11 +36,13 @@ names**. Manta wires the selected endpoint into `deepagents-code` as the
 provider = "databricks"   # fixed; Manta is Databricks-only
 
 [interactive]
-# Endpoint `manta` launches with (passed as `databricks:<endpoint>`).
-default_endpoint = "databricks-claude-sonnet-4-5"
-# Also registered in the deepagents-code `/model` switcher for in-session switching.
+# Orchestrator endpoint `manta` launches with (passed as `databricks:<endpoint>`).
+default_endpoint = "databricks-gpt-oss-120b"
+# Subagent role models, also registered in the deepagents-code `/model` switcher.
 extra_endpoints = [
-    "databricks-meta-llama-3-3-70b-instruct",
+    "databricks-claude-opus-4-8",
+    "databricks-gpt-5-5",
+    "databricks-gemini-3-1-pro",
 ]
 ```
 
@@ -66,8 +68,13 @@ Manta idempotently merges a Databricks provider into this file (see `dcode.py`):
 
 ```toml
 [providers.databricks]
-class_path = "databricks_langchain:ChatDatabricks"
-models = ["databricks-claude-sonnet-4-5", "databricks-meta-llama-3-3-70b-instruct"]
+class_path = "manta_code.databricks_chat:MantaChatDatabricks"
+models = [
+    "databricks-gpt-oss-120b",
+    "databricks-claude-opus-4-8",
+    "databricks-gpt-5-5",
+    "databricks-gemini-3-1-pro",
+]
 ```
 
 Everything else in that file (approval policy, budget, theme, sessions) is owned

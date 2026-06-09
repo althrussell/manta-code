@@ -1,0 +1,234 @@
+"""A ``ChatDatabricks`` that unpacks reasoning-model content blocks.
+
+Some Databricks serving endpoints (e.g. the Qwen "thinking" models) return the
+assistant turn as a *list* of OpenAI-style content blocks — a ``reasoning``
+block (the model's private chain-of-thought) followed by a ``text`` block (the
+visible answer)::
+
+    [
+      {"type": "reasoning", "summary": [{"type": "summary_text", "text": "..."}]},
+      {"type": "text", "text": "Hi! How can I help you today?"}
+    ]
+
+``databricks-langchain`` does not understand that shape on the chat-completions
+path: :func:`databricks_langchain.chat_models._convert_dict_to_message` (and its
+streaming sibling) ``json.dumps`` any non-string content into a string to keep
+output parsers happy. The agent — and the ``deepagents-code`` TUI, which renders
+``message.content_blocks`` — then sees one text block whose text is the raw JSON
+array, so the user sees ``[{"type": "reasoning", ...}]`` instead of the answer.
+
+This subclass post-processes every assistant message (streamed and
+non-streamed): it parses that serialized block list, drops the private
+``reasoning`` blocks, and keeps only the visible ``text``. Tool calls, usage
+metadata, ids, and ordinary string content all pass through untouched. It is
+wired in as the Databricks provider's ``class_path`` (see
+:data:`manta_code.dcode.DATABRICKS_CLASS_PATH`) so it runs inside the LangGraph
+server subprocess where the model actually executes — fixing the agent's own
+message history, not merely the display.
+
+Importing this module also installs a small resolver shim (see
+:func:`_install_subagent_databricks_resolver`) so Manta's per-subagent
+``databricks:<endpoint>`` model pins resolve to ``MantaChatDatabricks`` too —
+deepagents resolves subagent models through langchain's ``init_chat_model``,
+which has no ``databricks`` provider, so without this they fail with
+"Unable to infer model provider". Because the server subprocess imports this
+module to build the main agent's model (the provider ``class_path``), the shim
+is in place before any subagent is resolved.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
+
+from databricks_langchain import ChatDatabricks
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
+
+#: Content-block ``type`` values this shim recognizes. A serialized list is only
+#: treated as reasoning-model content when *every* element is one of these, so
+#: a model that legitimately answers with some other JSON array is left alone.
+_KNOWN_BLOCK_TYPES = frozenset({"text", "reasoning"})
+
+
+def _coerce_block_list(content: object) -> list[dict[str, Any]] | None:
+    """Return ``content`` as a content-block list, or ``None`` if it isn't one.
+
+    Accepts either an already-parsed list or the ``json.dumps`` string that
+    ``databricks-langchain`` produces. Returns ``None`` (caller leaves content
+    untouched) unless the value is a non-empty list whose every element is a
+    dict with a recognized block ``type`` — a deliberately strict check so
+    ordinary string answers, or a model emitting unrelated JSON, are not
+    mangled.
+    """
+    if isinstance(content, list):
+        blocks = content
+    elif isinstance(content, str):
+        stripped = content.strip()
+        if not stripped.startswith("[") or '"type"' not in stripped:
+            return None
+        try:
+            blocks = json.loads(stripped)
+        except (ValueError, TypeError):
+            return None
+    else:
+        return None
+
+    if not isinstance(blocks, list) or not blocks:
+        return None
+    if not all(
+        isinstance(block, dict) and block.get("type") in _KNOWN_BLOCK_TYPES
+        for block in blocks
+    ):
+        return None
+    return blocks
+
+
+def _visible_text(content: object) -> str | None:
+    """Extract the user-visible text from reasoning/text content blocks.
+
+    Returns ``None`` when ``content`` is not a recognized block list (so the
+    caller leaves the message unchanged); otherwise returns the concatenated
+    text of the ``text`` blocks, discarding ``reasoning`` blocks (the model's
+    private chain-of-thought, which the TUI never renders).
+    """
+    blocks = _coerce_block_list(content)
+    if blocks is None:
+        return None
+    return "".join(
+        str(block.get("text", "")) for block in blocks if block.get("type") == "text"
+    )
+
+
+def _normalize_message(message: BaseMessage) -> BaseMessage:
+    """Return ``message`` with serialized reasoning content reduced to its text.
+
+    A no-op (returns the same instance) for ordinary content. When rewriting,
+    ``model_copy`` preserves tool calls, usage metadata, and ids — only
+    ``content`` changes.
+    """
+    text = _visible_text(message.content)
+    if text is None:
+        return message
+    return message.model_copy(update={"content": text})
+
+
+def _normalize_chat_result(result: ChatResult) -> ChatResult:
+    for generation in result.generations:
+        generation.message = _normalize_message(generation.message)
+    return result
+
+
+def _normalize_chunk(chunk: ChatGenerationChunk) -> ChatGenerationChunk:
+    message = _normalize_message(chunk.message)
+    if message is chunk.message:
+        return chunk
+    return ChatGenerationChunk(
+        message=message,  # type: ignore[arg-type]
+        generation_info=chunk.generation_info,
+    )
+
+
+class MantaChatDatabricks(ChatDatabricks):
+    """``ChatDatabricks`` that strips reasoning blocks from assistant turns.
+
+    Overrides only the four generation entry points to normalize content after
+    delegating to the upstream implementation; everything else (auth, request
+    shaping, tool calling, streaming transport) is inherited unchanged.
+    """
+
+    def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        return _normalize_chat_result(super()._generate(*args, **kwargs))
+
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        return _normalize_chat_result(await super()._agenerate(*args, **kwargs))
+
+    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        for chunk in super()._stream(*args, **kwargs):
+            yield _normalize_chunk(chunk)
+
+    async def _astream(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        async for chunk in super()._astream(*args, **kwargs):
+            yield _normalize_chunk(chunk)
+
+
+#: ``provider:`` prefix that identifies a Databricks model spec (matches
+#: :data:`manta_code.subagents.DATABRICKS_PROVIDER`).
+_DATABRICKS_MODEL_PREFIX = "databricks:"
+
+#: Guards :func:`_install_subagent_databricks_resolver` against re-patching.
+_resolver_installed = False
+
+
+def _install_subagent_databricks_resolver() -> bool:
+    """Route subagent ``databricks:<endpoint>`` specs through Manta's provider.
+
+    deepagents resolves a subagent's ``model`` string with
+    ``deepagents._models.resolve_model`` -> langchain ``init_chat_model``, which
+    has no ``databricks`` provider; a markdown subagent pinned to
+    ``databricks:<endpoint>`` (Manta's planning/swe/review agents) would raise
+    "Unable to infer model provider". The main agent avoids this because
+    deepagents-code's ``create_model`` honors the provider ``class_path``.
+
+    This wraps ``resolve_model`` so a ``databricks:<endpoint>`` spec instantiates
+    :class:`MantaChatDatabricks` directly — mirroring how deepagents-code's
+    ``_create_model_from_class`` builds the main agent (``cls(model=endpoint)``)
+    — while every other spec defers to the original resolver.
+
+    Patching is applied in **two** places because some deepagents modules bind
+    the function by name at import time. ``deepagents.graph`` does a top-level
+    ``from deepagents._models import resolve_model`` and is imported *before*
+    this shim runs (via ``create_cli_agent``'s import chain), so rebinding only
+    the ``_models`` attribute would miss it. We therefore (1) patch
+    ``_models.resolve_model`` — picked up by the function-local importers
+    (``middleware.subagents``/``summarization``/``rubric``) and any module
+    imported later — and (2) rebind the name on every already-imported
+    ``deepagents`` module that still points at the original. Idempotent, and a
+    no-op when deepagents is unavailable (returns ``False``).
+    """
+    global _resolver_installed
+    if _resolver_installed:
+        return True
+    try:
+        from deepagents import _models
+    except Exception:
+        return False
+
+    original_resolve_model = _models.resolve_model
+
+    def resolve_model(model: Any) -> Any:
+        if isinstance(model, str) and model.startswith(_DATABRICKS_MODEL_PREFIX):
+            endpoint = model[len(_DATABRICKS_MODEL_PREFIX) :]
+            return MantaChatDatabricks(model=endpoint)
+        return original_resolve_model(model)
+
+    _models.resolve_model = resolve_model
+    _rebind_imported_resolvers(original_resolve_model, resolve_model)
+    _resolver_installed = True
+    return True
+
+
+def _rebind_imported_resolvers(original: Any, replacement: Any) -> None:
+    """Rebind ``resolve_model`` on deepagents modules that imported it by name.
+
+    A module-level ``from deepagents._models import resolve_model`` (as in
+    ``deepagents.graph``) binds the original function into that module's
+    namespace, so patching ``_models.resolve_model`` alone does not reach it.
+    This swaps any such binding that still references ``original`` for
+    ``replacement``.
+    """
+    import sys
+
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        if not getattr(module, "__name__", "").startswith("deepagents"):
+            continue
+        if getattr(module, "resolve_model", None) is original:
+            module.resolve_model = replacement
+
+
+_install_subagent_databricks_resolver()

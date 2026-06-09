@@ -52,6 +52,42 @@ def test_list_profiles_missing_file(tmp_path: Path, monkeypatch):
     assert auth.list_profiles() == []
 
 
+class _FakeEndpoint:
+    def __init__(self, name, task):
+        self.name = name
+        self.task = task
+
+
+def test_list_serving_chat_endpoints_filters_to_chat(monkeypatch):
+    class _FakeServing:
+        def list(self):
+            return [
+                _FakeEndpoint("databricks-claude-sonnet-4-5", "llm/v1/chat"),
+                _FakeEndpoint("databricks-gte-large-en", "llm/v1/embeddings"),
+                _FakeEndpoint("databricks-meta-llama-3-3-70b-instruct", "llm/v1/chat"),
+                _FakeEndpoint("custom-pyfunc", None),
+                _FakeEndpoint("", "llm/v1/chat"),
+            ]
+
+    class _FakeClient:
+        serving_endpoints = _FakeServing()
+
+    monkeypatch.setattr(auth, "resolve_workspace_client", lambda profile=None: _FakeClient())
+    names = auth.list_serving_chat_endpoints()
+    assert names == [
+        "databricks-claude-sonnet-4-5",
+        "databricks-meta-llama-3-3-70b-instruct",
+    ]
+
+
+def test_list_serving_chat_endpoints_empty_on_error(monkeypatch):
+    def _boom(profile=None):
+        raise RuntimeError("no auth")
+
+    monkeypatch.setattr(auth, "resolve_workspace_client", _boom)
+    assert auth.list_serving_chat_endpoints() == []
+
+
 def test_is_authenticated_false_on_error(monkeypatch):
     def boom(_profile=None):
         raise auth.AuthError("no sdk")
