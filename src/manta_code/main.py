@@ -185,7 +185,10 @@ def doctor(ctx: typer.Context) -> None:
             from . import dcode
             from .auth import resolve_profile
 
-            path = dcode.ensure_dcode_config(interactive_endpoints(cfg))
+            path = dcode.ensure_dcode_config(
+                interactive_endpoints(cfg), default_endpoint=endpoint
+            )
+            dcode.mark_onboarding_complete()
             add("dcode config", True, str(path))
             try:
                 from deepagents_code.config import create_model

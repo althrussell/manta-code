@@ -31,8 +31,18 @@ from typing import Mapping, Sequence
 
 from .auth import resolve_profile
 
+#: Boot shim run instead of ``deepagents_code`` directly, so Manta can rebrand
+#: the splash wordmark in-process before handing off to upstream's CLI entry.
+DCODE_BOOT_MODULE = "manta_code._boot"
+
 #: Provider key registered in ``deepagents-code``'s ``config.toml``.
 DATABRICKS_PROVIDER = "databricks"
+
+#: ``deepagents-code`` startup warnings Manta suppresses by default. Tavily
+#: web search is not part of Manta's Databricks-focused offering, so the
+#: "TAVILY_API_KEY is not set" notice is noise. Suppressed via
+#: ``[warnings].suppress``; user-added entries are always preserved.
+DEFAULT_SUPPRESSED_WARNINGS = ("tavily",)
 
 #: ``module:ClassName`` that ``deepagents-code`` instantiates for the provider.
 DATABRICKS_CLASS_PATH = "databricks_langchain:ChatDatabricks"
@@ -41,8 +51,16 @@ DATABRICKS_CLASS_PATH = "databricks_langchain:ChatDatabricks"
 DEEPAGENTS_CONFIG_DIR = Path.home() / ".deepagents"
 DEEPAGENTS_CONFIG_PATH = DEEPAGENTS_CONFIG_DIR / "config.toml"
 
-#: Light-touch branding: overrides the startup splash subheader. Deeper
-#: rebranding would require forking the TUI, which is out of scope for now.
+#: deepagents-code's state dir and first-run onboarding marker. Writing the
+#: marker suppresses the onboarding wizard (whose model picker only offers
+#: upstream's curated providers, not Manta's Databricks ``class_path`` provider).
+DEEPAGENTS_STATE_DIR = DEEPAGENTS_CONFIG_DIR / ".state"
+ONBOARDING_MARKER_PATH = DEEPAGENTS_STATE_DIR / "onboarding_complete"
+
+#: Branding: the startup splash subheader is overridden via this upstream env
+#: hook; the splash wordmark is rebranded in-process by ``manta_code._boot``
+#: (see :data:`DCODE_BOOT_MODULE`). In-app help text and tips still reference
+#: "Deep Agents" — rebranding those would require forking the TUI.
 SPLASH_SUBHEADER_ENV = "DEEPAGENTS_CODE_DANGEROUSLY_OVERRIDE_STARTUP_SUBHEADER"
 SPLASH_SUBHEADER = "Manta - Databricks coding agent"
 
@@ -61,6 +79,7 @@ def merge_databricks_provider(
     endpoints: Sequence[str],
     *,
     params: Mapping[str, object] | None = None,
+    default_endpoint: str | None = None,
 ) -> dict:
     """Merge Manta's Databricks provider into an existing config dict.
 
@@ -68,6 +87,11 @@ def merge_databricks_provider(
     are preserved. Manta owns ``class_path`` and unions ``models`` with whatever
     the user already had; user ``params`` are preserved and shallow-overridden
     by ``params`` when provided.
+
+    When ``default_endpoint`` is given and the user has not already set
+    ``[models].default``, it is set to ``databricks:<default_endpoint>`` so
+    ``deepagents-code`` resolves a Databricks model without prompting for an
+    Anthropic/Google key. An existing user default is never overwritten.
     """
     result = copy.deepcopy(existing) if existing else {}
     models_tbl = result.setdefault("models", {})
@@ -94,6 +118,21 @@ def merge_databricks_provider(
     if params:
         provider["params"] = {**previous.get("params", {}), **dict(params)}
     providers[DATABRICKS_PROVIDER] = provider
+    if default_endpoint and not models_tbl.get("default"):
+        models_tbl["default"] = f"{DATABRICKS_PROVIDER}:{default_endpoint}"
+
+    warnings_tbl = result.setdefault("warnings", {})
+    if not isinstance(warnings_tbl, dict):
+        raise LauncherError(
+            "Existing [warnings] section in ~/.deepagents/config.toml is not a table; "
+            "refusing to overwrite. Please fix or remove it."
+        )
+    existing_suppress = warnings_tbl.get("suppress", [])
+    if not isinstance(existing_suppress, list):
+        existing_suppress = []
+    warnings_tbl["suppress"] = _dedupe(
+        [*existing_suppress, *DEFAULT_SUPPRESSED_WARNINGS]
+    )
     return result
 
 
@@ -131,15 +170,38 @@ def ensure_dcode_config(
     *,
     config_path: Path | None = None,
     params: Mapping[str, object] | None = None,
+    default_endpoint: str | None = None,
 ) -> Path:
     """Idempotently ensure the Databricks provider exists in deepagents-code config.
 
     Reads the user's existing ``~/.deepagents/config.toml`` (if any), merges in
-    Manta's Databricks provider, and writes it back. Returns the config path.
+    Manta's Databricks provider (and a Databricks ``[models].default`` when
+    ``default_endpoint`` is given and the user has not set one), and writes it
+    back. Returns the config path.
     """
     path = config_path or DEEPAGENTS_CONFIG_PATH
-    merged = merge_databricks_provider(_read_toml(path), endpoints, params=params)
+    merged = merge_databricks_provider(
+        _read_toml(path),
+        endpoints,
+        params=params,
+        default_endpoint=default_endpoint,
+    )
     _write_toml(path, merged)
+    return path
+
+
+def mark_onboarding_complete(*, marker_path: Path | None = None) -> Path:
+    """Suppress ``deepagents-code``'s first-run onboarding wizard.
+
+    Writes the onboarding-complete marker so the upstream wizard — whose model
+    picker only lists upstream's curated providers (Anthropic, Google) and would
+    otherwise force the user to configure an Anthropic key — does not run. Manta
+    has already provisioned the Databricks provider and default model, so the
+    wizard adds nothing here. Idempotent.
+    """
+    path = marker_path or ONBOARDING_MARKER_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1\n", encoding="utf-8")
     return path
 
 
@@ -180,12 +242,14 @@ def build_dcode_argv(
     *,
     python: str | None = None,
 ) -> list[str]:
-    """Build the argv to launch deepagents-code via ``python -m deepagents_code``.
+    """Build the argv to launch deepagents-code via Manta's branded boot shim.
 
-    Injects ``-M databricks:<endpoint>`` only when the user did not pass their
-    own ``-M/--model``. Extra args are forwarded verbatim.
+    Runs ``python -m manta_code._boot`` (which rebrands the splash then hands
+    off to ``deepagents-code``'s CLI). Injects ``-M databricks:<endpoint>`` only
+    when the user did not pass their own ``-M/--model``. Extra args are
+    forwarded verbatim.
     """
-    argv = [python or sys.executable, "-m", "deepagents_code"]
+    argv = [python or sys.executable, "-m", DCODE_BOOT_MODULE]
     extras = list(passthrough)
     if default_endpoint and not _has_model_flag(extras):
         argv += ["-M", f"{DATABRICKS_PROVIDER}:{default_endpoint}"]
@@ -210,7 +274,13 @@ def launch(
     never returns. When false (used by tests), the launcher runs the subprocess
     and returns its exit code.
     """
-    ensure_dcode_config(endpoints, config_path=config_path, params=params)
+    ensure_dcode_config(
+        endpoints,
+        config_path=config_path,
+        params=params,
+        default_endpoint=default_endpoint,
+    )
+    mark_onboarding_complete()
     env = build_launch_env(profile)
     argv = build_dcode_argv(default_endpoint, passthrough)
     if exec_replace:

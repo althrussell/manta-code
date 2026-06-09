@@ -82,6 +82,10 @@ def list_profiles() -> list[ProfileInfo]:
     if parser.defaults().get("host"):
         profiles.append(ProfileInfo(name="DEFAULT", host=parser.defaults().get("host")))
     for section in parser.sections():
+        # Skip reserved sections (e.g. ``[__settings__]`` written by the
+        # Databricks CLI) — they are not authenticatable workspace profiles.
+        if section.startswith("__") and section.endswith("__"):
+            continue
         profiles.append(ProfileInfo(name=section, host=parser.get(section, "host", fallback=None)))
     return profiles
 

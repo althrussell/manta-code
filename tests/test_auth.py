@@ -33,6 +33,20 @@ def test_list_profiles_parses_cfg(tmp_path: Path, monkeypatch):
     assert profiles["prod"] == "https://prod.example.com"
 
 
+def test_list_profiles_skips_reserved_sections(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / ".databrickscfg"
+    cfg.write_text(
+        "[DEFAULT]\nhost = https://default.example.com\ntoken = x\n\n"
+        "[__settings__]\nfoo = bar\n\n"
+        "[prod]\nhost = https://prod.example.com\ntoken = y\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    names = {p.name for p in auth.list_profiles()}
+    assert names == {"DEFAULT", "prod"}
+    assert "__settings__" not in names
+
+
 def test_list_profiles_missing_file(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "nope.cfg"))
     assert auth.list_profiles() == []
