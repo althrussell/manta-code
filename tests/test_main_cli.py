@@ -82,6 +82,9 @@ def test_launch_interactive_invokes_dcode(monkeypatch):
         calls.update(kwargs)
         return 0
 
+    # deepagents-code is an optional extra; pretend it is installed so this test
+    # runs in CI environments that only install the base/dev deps.
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(dcode, "launch", fake_dcode_launch)
     main_mod._launch_interactive(profile="s2", passthrough=["-r"])
     assert calls["profile"] == "s2"
