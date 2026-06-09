@@ -1,36 +1,28 @@
-# Manta CLI v1 Docs Index
+# Manta Code Docs Index
 
-## Product docs
+Manta Code is a thin, Databricks-preconfigured launcher for the
+[`deepagents-code`](https://pypi.org/project/deepagents-code/) interactive coding
+agent. Type `manta` and you get the `deepagents-code` TUI, wired to Databricks
+Model Serving / Foundation Model API endpoints and authenticated via your
+Databricks profile. See [ADR 0007](adr/0007-adopt-deepagents-code-tui.md).
 
-- `01-product-requirements.md` — PRD and product promise.
-- `02-v1-scope-and-non-goals.md` — what v1 is and is not.
-- `17-release-plan.md` — alpha, beta, v1 release path.
+## Docs
 
-## Architecture docs
-
-- `03-system-architecture.md` — end-to-end architecture.
-- `04-agent-role-architecture.md` — router, planner, builder, reviewers, release agent.
-- `05-routing-and-budgeting.md` — cheap router, escalation, token ledger.
-- `06-context-management.md` — context broker and manifests.
-- `07-tools-permissions-security.md` — permissions, policy, shell, network, git safety.
-- `08-autonomous-loop.md` — plan/build/test/review/fix lifecycle.
-- `09-cli-ux-contract.md` — command contract and output experience.
-- `10-config-schema.md` — config files and schemas.
-- `11-state-data-model.md` — sessions, ledgers, manifests, reports.
-- `12-observability-and-evals.md` — metrics, evals, traces.
-- `13-deepagents-integration.md` — how Deep Agents should be integrated.
-- `14-goose-lessons.md` — what to borrow from Goose.
-- `15-risk-register.md` — major product/technical risks.
-- `16-open-questions.md` — decisions to close during build.
+- `09-cli-ux-contract.md` — the `manta` command surface (launch, `doctor`, `init`).
+- `10-config-schema.md` — `.manta/config.toml` and the deepagents-code provider config.
+- `13-deepagents-integration.md` — how Manta wires Databricks into deepagents-code.
 
 ## Architecture decision records
 
-See `docs/adr/`.
+See `docs/adr/`. ADRs 0001 and 0003–0006 describe an earlier multi-agent /
+router / budget / policy architecture and are **superseded by ADR 0007**; they
+are retained as historical context. ADR 0002 (do not fork Goose) still holds.
 
-## Sprint plans
+## Source
 
-See `sprint-plans/`.
+See `src/manta_code/`:
 
-## Implementation scaffold
-
-See `src/manta_cli/`.
+- `main.py` — CLI entry (`manta`, `doctor`, `init`) and argument routing.
+- `dcode.py` — provisions the Databricks provider and launches the TUI.
+- `auth.py` — Databricks profile resolution (SDK unified auth).
+- `config.py` — launcher config schema and `.manta/config.toml` handling.

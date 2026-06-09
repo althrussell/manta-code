@@ -1,5 +1,10 @@
 # Config Schema
 
+Manta's config is intentionally small: it configures which Databricks endpoints
+the `deepagents-code` TUI launches with and registers. All in-session behavior
+(approval, budget, sessions, skills) is owned by `deepagents-code` and its own
+config at `~/.deepagents/config.toml`.
+
 ## Config locations
 
 Project config:
@@ -20,88 +25,50 @@ Precedence:
 CLI flags > project config > user config > defaults
 ```
 
-## Example
+## Schema
+
+Endpoint names are **Databricks Model Serving / Foundation Model API endpoint
+names**. Manta wires the selected endpoint into `deepagents-code` as the
+`databricks` provider (`ChatDatabricks`), authenticated with the active profile.
 
 ```toml
-[models]
-router = "openai:gpt-5-nano"
-cheap_responder = "openai:gpt-5-mini"
-planner = "anthropic:claude-opus"
-builder = "openai:gpt-builder"
-reviewer = "google:gemini-pro"
-security_reviewer = "google:gemini-pro"
-release = "openai:gpt-5-mini"
+[runtime]
+provider = "databricks"   # fixed; Manta is Databricks-only
 
-[budgets]
-default_task_usd = 1.00
-hard_max_task_usd = 5.00
-max_iterations = 3
-max_turns = 30
-show_cost_always = true
-
-[autonomy]
-mode = "smart_approve"
-allow_file_writes = true
-allow_shell = "allowlisted"
-allow_network = false
-allow_git_commit = "approval"
-allow_git_push = false
-
-[context]
-strategy = "brokered"
-auto_compact = true
-store_full_history = true
-repo_index = true
-max_router_tokens = 4000
-max_builder_tokens = 64000
-max_reviewer_tokens = 128000
-
-[review]
-code_review_required = true
-security_review_on_risk = true
-block_on_high_severity = true
+[interactive]
+# Endpoint `manta` launches with (passed as `databricks:<endpoint>`).
+default_endpoint = "databricks-claude-sonnet-4-5"
+# Also registered in the deepagents-code `/model` switcher for in-session switching.
+extra_endpoints = [
+    "databricks-meta-llama-3-3-70b-instruct",
+]
 ```
 
-## Price table
+`manta init` writes this file with sensible defaults; `manta init --overwrite`
+regenerates it.
 
-Path:
+## Authentication
+
+Manta authenticates to Databricks through the SDK `WorkspaceClient` (unified
+auth). Profile selection precedence:
 
 ```text
-~/.manta/price_table.toml
+-p/--profile flag > MANTA_PROFILE > DATABRICKS_CONFIG_PROFILE > default profile
 ```
 
-Schema:
+The resolved profile is exported as `DATABRICKS_CONFIG_PROFILE` before launching
+the TUI, so `ChatDatabricks` (via the SDK) picks it up for unified auth from
+`~/.databrickscfg`. `manta doctor` validates the profile and the model wiring.
+
+## deepagents-code config (`~/.deepagents/config.toml`)
+
+Manta idempotently merges a Databricks provider into this file (see `dcode.py`):
 
 ```toml
-[models."openai:gpt-builder"]
-input_per_million = 1.25
-output_per_million = 10.00
-context_window = 200000
-
-[models."anthropic:claude-opus"]
-input_per_million = 15.00
-output_per_million = 75.00
-context_window = 200000
+[providers.databricks]
+class_path = "databricks_langchain:ChatDatabricks"
+models = ["databricks-claude-sonnet-4-5", "databricks-meta-llama-3-3-70b-instruct"]
 ```
 
-Prices change often. The price table must be user-editable and should be refreshed intentionally.
-
-## Policy config
-
-```toml
-[paths]
-project_root_only = true
-protected_globs = [".env", ".env.*", "**/*secret*", "**/*credential*"]
-
-[shell]
-mode = "allowlisted"
-allow = ["pytest", "python -m pytest", "npm test", "npm run lint"]
-
-[network]
-allow = false
-allowed_domains = []
-
-[git]
-commit = "approval"
-push = "deny"
-```
+Everything else in that file (approval policy, budget, theme, sessions) is owned
+by `deepagents-code`; Manta does not manage it.

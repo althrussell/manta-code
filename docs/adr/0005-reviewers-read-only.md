@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Superseded by [ADR 0007](0007-adopt-deepagents-code-tui.md). The reviewer roles
+are parked along with the rest of the role pipeline. Retained for historical
+context.
 
 ## Decision
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for v1 bootstrap.
+Superseded by [ADR 0007](0007-adopt-deepagents-code-tui.md). Manta adopts the
+`deepagents-code` TUI rather than building on the raw Deep Agents SDK. Retained
+for historical context.
 
 ## Context
 

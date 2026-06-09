@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "manta-cli"
+name = "manta-code"
 version = "0.1.0"
-description = "Budget-aware multi-model autonomous developer CLI"
+description = "Databricks-preconfigured launcher for the deepagents-code coding agent"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Manta Team" }]
@@ -23,13 +23,21 @@ dev = [
   "mypy>=1.10",
 ]
 agent = [
-  "deepagents>=0.6.8",
-  "langchain>=1.0",
-  "langgraph>=1.0",
+  # Interactive coding-agent TUI (the `manta` runtime surface). Manta launches
+  # this preconfigured for Databricks; we do not fork its model layer.
+  "deepagents-code>=0.1.7",
+  # Databricks model + auth: ChatDatabricks is wired into deepagents-code via a
+  # `class_path` provider in ~/.deepagents/config.toml; the SDK resolves the
+  # active profile from DATABRICKS_CONFIG_PROFILE.
+  "databricks-langchain>=0.4",
+  "databricks-sdk>=0.40",
+  # Used by the launcher to safely merge the Databricks provider into the
+  # user's deepagents-code config.toml (tomllib reads, tomli-w writes).
+  "tomli-w>=1.0",
 ]
 
 [project.scripts]
-manta = "manta_cli.main:app"
+manta = "manta_code.main:main_entry"
 
 [tool.setuptools.packages.find]
 where = ["src"]

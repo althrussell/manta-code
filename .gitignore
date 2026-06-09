@@ -7,9 +7,7 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-.manta/sessions/
-.manta/memory/
-.manta/ledger.jsonl
+.manta/
 .env
 .env.*
 .DS_Store

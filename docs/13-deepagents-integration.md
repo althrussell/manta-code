@@ -1,110 +1,69 @@
-# Deep Agents Integration Plan
+# deepagents-code Integration
 
-## Why Deep Agents
+As of [ADR 0007](adr/0007-adopt-deepagents-code-tui.md), Manta's interactive
+surface **is** the upstream
+[`deepagents-code`](https://pypi.org/project/deepagents-code/) TUI. Manta does
+not build, fork, or wrap the agent — it provisions a Databricks model provider,
+resolves the Databricks profile, and launches the TUI. This keeps Manta tiny and
+lets it inherit `deepagents-code`'s approval/HITL, budget, sessions, skills, and
+model switcher for free.
 
-Deep Agents gives Manta a programmable harness for:
+## How it wires together
 
-- long-running tasks,
-- subagents,
-- model overrides by subagent,
-- tools,
-- filesystem access,
-- skills,
-- context management,
-- memory,
-- human-in-the-loop interruptions.
+Everything lives in two modules:
 
-## Integration strategy
+### `src/manta_code/dcode.py` — the launcher
 
-Do not couple every Manta module directly to Deep Agents.
+- `ensure_dcode_config(endpoints)` idempotently merges a `databricks` provider
+  into `~/.deepagents/config.toml`:
 
-Use an adapter:
+  ```toml
+  [providers.databricks]
+  class_path = "databricks_langchain:ChatDatabricks"
+  models = ["databricks-claude-sonnet-4-5", "databricks-meta-llama-3-3-70b-instruct"]
+  ```
 
-```text
-Manta pipeline → AgentRuntime interface → DeepAgentsRuntime implementation
-```
+  All other user settings in that file are preserved. `deepagents-code`'s
+  `create_model("databricks:<endpoint>")` then instantiates `ChatDatabricks`
+  directly — **no fork of its model registry**.
+- `build_launch_env(profile)` sets `DATABRICKS_CONFIG_PROFILE` so the Databricks
+  SDK (and therefore `ChatDatabricks`) authenticates against the right
+  `~/.databrickscfg` profile. This is how `-p/--profile` reaches the model.
+- `build_dcode_argv(default_endpoint, passthrough)` builds
+  `python -m deepagents_code -M databricks:<endpoint> <passthrough…>` (the
+  default `-M` is only injected if the user didn't pass their own).
+- `launch(...)` provisions config + env and `os.execvpe`s into the TUI so the
+  terminal is handed over cleanly.
 
-This keeps Manta free to:
+The pure helpers (config merge, env build, argv build) are unit-tested in
+`tests/test_dcode.py` without launching a subprocess; only `launch()` has side
+effects.
 
-- use Deep Agents SDK directly,
-- drop to LangGraph for custom flows,
-- call Deep Agents Code where useful,
-- or create a custom runtime later.
+### `src/manta_code/main.py` — argument routing
 
-## Adapter interface
+`main_entry()` + `classify_args()` route Manta's own subcommands (`doctor`,
+`init`) through Typer and send bare invocations and unknown/forwarded flags
+(`-r`, `--skill`, `-M …`) straight to the launcher.
 
-```python
-class AgentRuntime(Protocol):
-    def run_role(self, role: RoleSpec, context: ContextPack) -> RoleResult:
-        ...
-```
+## Authentication
 
-## Deep Agents subagent mapping
+`src/manta_code/auth.py` resolves the active profile (`-p/--profile` > env >
+default) using the Databricks SDK's unified auth. Manta does not re-implement
+auth; it only resolves the profile name and exports it as
+`DATABRICKS_CONFIG_PROFILE` before exec.
 
-Manta role fields map to Deep Agents subagent fields:
+## Scope: defer to upstream
 
-| Manta role field | Deep Agents field |
-|---|---|
-| role name | `name` |
-| role purpose | `description` |
-| role prompt | `system_prompt` |
-| model binding | `model` |
-| allowed tools | `tools` |
-| role skills | `skills` |
-| output schema | `response_format` |
-| filesystem rules | `permissions` |
-| approval gates | `interrupt_on` + Manta policy |
+Per ADR 0007, Manta defers in-session orchestration to `deepagents-code`: its
+native approval/HITL and budget UX apply. Manta's earlier router / budget
+hard-caps / policy engine are removed from the active codebase; if they are ever
+needed, they would be re-introduced as `deepagents-code` runtime middleware
+rather than a parallel pipeline.
 
-## Manta-specific controls not delegated to Deep Agents
+## Known gaps
 
-Manta owns:
-
-- budget hard caps,
-- model price table,
-- context broker,
-- shell policy,
-- network policy,
-- git policy,
-- tool-call audit log,
-- security review activation,
-- route-to-pipeline decision.
-
-## First implementation milestone
-
-Sprint 3 should implement a minimal `DeepAgentsRuntime` that:
-
-- creates role-specific subagents,
-- runs a builder role,
-- runs a reviewer role,
-- captures structured output,
-- records model usage if available,
-- respects Manta policy wrapper for tools.
-
-### Status: implemented (Sprint 3, S3-1 → S3-3)
-
-The milestone is implemented behind the adapter:
-
-- `src/manta_cli/agents/base.py` — `AgentRuntime` protocol (the boundary).
-- `src/manta_cli/agents/factory.py` — `get_runtime(dry_run=...)` selects the
-  offline `MockRuntime` (default) or the `DeepAgentsRuntime`. The Deep Agents
-  import is deferred until a real run, so the CLI and tests work without the
-  `[agent]` extra.
-- `src/manta_cli/agents/deepagents_adapter.py` — the **only** module that
-  imports Deep Agents. Maps a `RoleSpec` to `create_deep_agent(model=...,
-  system_prompt=...(from prompts/roles), tools=..., response_format=ReviewReport
-  for reviewers)`, invokes it, aggregates `usage_metadata` into `TokenUsage`,
-  and parses output into a `RoleResult` (reviewers → structured `ReviewReport`).
-- `src/manta_cli/agents/tools.py` — policy-wrapped tool callables. Every
-  side-effecting tool routes through `PolicyEngine`; reviewers receive
-  read-only tools only (ADR 0005).
-- `src/manta_cli/pipeline.py` — `MantaPipeline.run()` records each role's token
-  usage into the `BudgetLedger` and stops the pipeline when a hard cap would be
-  exceeded or a reviewer blocks.
-
-Run a real pipeline with `manta run "..." --no-dry-run` (requires
-`pip install -e '.[agent]'` and provider credentials). Without the extra, the
-CLI prints a friendly message and falls back to the dry-run scaffold.
-
-## Caution
-
-Deep Agents filesystem permissions do not protect custom tools, MCP tools, or arbitrary shell execution by themselves. Manta's policy engine must wrap all side-effecting tools regardless of runtime.
+- `deepagents-code -n` (non-interactive one-shot) can hang on startup in some
+  environments; the interactive TUI is the supported surface.
+- `deepagents-code` pulls `protobuf` 6.x, which conflicts with
+  `databricks-vectorsearch` (not a Manta dependency). Resolve at the environment
+  level only if both are needed together.

@@ -23,13 +23,11 @@ docs/<short-description>
 Every PR should include:
 
 - a clear summary,
-- test evidence,
-- budget/cost impact if model routing changes,
-- security impact if tools, shell, network, or permissions change,
-- docs updates for config/schema changes.
+- test evidence (`pytest` + `ruff check .`),
+- docs updates for config/schema or CLI changes,
+- a note if the change affects how Manta launches or configures `deepagents-code`.
 
 ## Review gates
 
-- Code reviewer approval required for source changes.
-- Security reviewer approval required for policy, shell, secrets, network, MCP, sandbox, or dependency changes.
+- At least one reviewer approval for source changes.
 - No direct commits to main.

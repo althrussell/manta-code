@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Superseded by [ADR 0007](0007-adopt-deepagents-code-tui.md). The role
+pipeline / router / budget engine are parked; `deepagents-code` owns
+orchestration. Retained for historical context.
 
 ## Decision
 

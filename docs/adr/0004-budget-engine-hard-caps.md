@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Superseded by [ADR 0007](0007-adopt-deepagents-code-tui.md). Manta's budget
+engine is parked; `deepagents-code` provides its own budget UX. Retained for
+historical context.
 
 ## Decision
 
