@@ -252,22 +252,34 @@ def _agent_memory_middleware_class() -> type:
             bullets = "\n".join(f"- {n}" for n in notes)
             return f"\n\n## Remembered context (private to this agent)\n{bullets}"
 
-        def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        def _with_recall(self, request: Any) -> Any:
+            """Return ``request`` with remembered notes appended, or unchanged.
+
+            Never raises: recall is best-effort, so any failure falls back to the
+            original request.
+            """
             try:
                 store = self._resolve_store()
                 if store is None:
-                    return handler(request)
+                    return request
                 block = self._recall_block(store)
                 if not block:
-                    return handler(request)
+                    return request
                 base = getattr(request, "system_message", None)
                 base_text = base.content if base is not None else ""
-                new_request = request.override(
+                return request.override(
                     system_message=SystemMessage(content=str(base_text) + block)
                 )
-                return handler(new_request)
             except Exception:  # noqa: BLE001 - recall is best-effort
-                return handler(request)
+                return request
+
+        def wrap_model_call(self, request: Any, handler: Any) -> Any:
+            return handler(self._with_recall(request))
+
+        async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+            # deepagents runs the agent in an async context (astream/ainvoke), so
+            # the async variant must exist or it raises NotImplementedError.
+            return await handler(self._with_recall(request))
 
     return AgentMemoryMiddleware
 

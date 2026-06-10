@@ -90,6 +90,23 @@ launch, by `clean_legacy_subagents()` (only when unmodified). Run
 into an *enforced* `deepagents` `SubAgent` dict (tool policy, filesystem rules,
 memory, budget) and injects them so the orchestrator can delegate to them.
 
+**Plan requests are auto-delegated (deterministically).** deepagents gives the
+orchestrator its own `write_todos` planning tool and its default prompt prefers
+planning inline, so *no* orchestrator model reliably delegates "make a plan" to
+the `planning` agent on its own — a prompt nudge can't beat a built-in tool.
+`middleware/delegation.py` closes the gap without relying on model compliance:
+on the base orchestrator (no profile selected), when a fresh human turn is a
+plan request (`plan_intent()`), `PlanDelegationMiddleware` short-circuits the
+model call and returns a synthesized `task(subagent_type="planning", …)` call,
+so the real planning agent runs. It fires only on the first model call of the
+turn (the last message is the human plan request), so after the `task` result
+comes back it never re-fires — no loop. The intent match is conservative (it
+skips "implement the plan…" and references to an existing plan), it's the
+outermost orchestrator middleware (no accounting noise for a call that never
+runs), and it's fully guarded. Disable with `MANTA_AUTODELEGATE_PLANNING=0` to
+fall back to inline planning. Selecting a profile in the picker bypasses this
+entirely (if you pick `planning`, it already *is* the planner).
+
 **Top-level enforcement.** When you select a Manta agent in the picker,
 `deepagents-code` passes its name to the server as
 `DEEPAGENTS_CODE_SERVER_ASSISTANT_ID`. The build hook's `active_agent_name()`

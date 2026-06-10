@@ -111,6 +111,38 @@ def test_recall_middleware_injects_notes(tmp_path):
     assert "prefers tabs over spaces" in captured["text"]
 
 
+def test_recall_middleware_async_injects_notes(tmp_path):
+    # deepagents invokes the agent asynchronously (astream/ainvoke), so the async
+    # path must also inject recall — not raise NotImplementedError.
+    import asyncio
+
+    store = memory.open_store(tmp_path / "m.db")
+    memory.write_memory(store, ("memories", "rev"), "k", "prefers tabs over spaces")
+    mw = memory.agent_memory_middleware(AgentDef(name="rev"), store=store)
+
+    from langchain_core.messages import SystemMessage
+
+    class _Req:
+        def __init__(self):
+            self.system_message = SystemMessage(content="Base prompt.")
+
+        def override(self, **kwargs):
+            new = _Req()
+            new.system_message = kwargs.get("system_message", self.system_message)
+            return new
+
+    captured = {}
+
+    async def handler(req):
+        captured["text"] = req.system_message.content
+        return "ok"
+
+    out = asyncio.run(mw.awrap_model_call(_Req(), handler))
+    assert out == "ok"
+    assert "Base prompt." in captured["text"]
+    assert "prefers tabs over spaces" in captured["text"]
+
+
 def test_recall_middleware_noop_with_empty_store(tmp_path):
     # An agent with memory enabled but no notes yet must pass through untouched.
     empty = memory.open_store(tmp_path / "empty.db")

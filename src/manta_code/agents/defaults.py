@@ -31,10 +31,11 @@ def _model(endpoint: str) -> str:
 PLANNING = AgentDef(
     name="planning",
     description=(
-        "Use this agent whenever the user asks to plan, design, scope, or break "
-        "down work, and before any large or multi-step change. It turns an "
-        "ambiguous request into a clear, ordered implementation plan. Plans only; "
-        "does not modify code."
+        "Deliberate, deep-planning specialist for large, cross-cutting, or "
+        "high-stakes work that warrants a rigorous, read-only plan on a stronger "
+        "model. Turns an ambiguous request into a clear, ordered implementation "
+        "plan. Routine planning can be done inline with write_todos; reach for "
+        "this agent for the hard cases. Plans only; does not modify code."
     ),
     model=_model("databricks-claude-opus-4-8"),
     read_only=True,

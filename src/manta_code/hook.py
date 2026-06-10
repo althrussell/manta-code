@@ -36,23 +36,24 @@ logger = logging.getLogger("manta.hook")
 _installed = False
 
 #: Delegation policy appended to the *orchestrator's* system prompt (only when no
-#: specific Manta profile is the primary agent). deepagents' default prompt steers
-#: the main agent to plan inline with ``write_todos`` and treats the ``task`` tool
-#: as optional, so without this nudge the orchestrator rarely delegates. This is a
-#: *nudge*, not a hard route — the model still decides — but it materially raises
-#: the delegation rate for planning/review work. Kept short so it doesn't crowd
-#: out the base prompt.
+#: specific Manta profile is the primary agent). Plan requests are handled
+#: deterministically by :class:`~manta_code.middleware.delegation.PlanDelegationMiddleware`
+#: (the model can't reliably be nudged past its built-in ``write_todos``), so this
+#: prompt nudge covers the things the model *does* decide: independent ``review``
+#: delegation (no competing built-in) and optional ``swe`` delegation. Kept short
+#: so it doesn't crowd out the base prompt.
 ORCHESTRATOR_DELEGATION_POLICY = """\
 
 ## Delegating to specialist agents (Manta)
 
-You have specialist subagents available through the `task` tool. Prefer delegating instead of doing everything yourself:
+You have specialist subagents available through the `task` tool:
 
-- When the user asks you to **plan, design, scope, or break down** work, call `task` with `subagent_type="planning"` to produce the plan *before* implementing.
-- For **code review** of a change, call `task` with `subagent_type="review"`.
-- For a **well-scoped implementation** task, you may delegate to `subagent_type="swe"`.
+- **Code review:** after a non-trivial change, delegate to `subagent_type="review"` for an independent, read-only review.
+- **Well-scoped implementation:** you may delegate to `subagent_type="swe"`.
 
-Each subagent is isolated: it does **not** see this conversation, so put everything it needs (files, goal, constraints) in the `task` `description`. Handle small or trivial requests yourself rather than delegating."""
+(Requests to *make a plan* are routed to the `planning` agent automatically before they reach you — you don't need to handle them yourself.)
+
+Each subagent is isolated: it does **not** see this conversation, so put everything it needs (files, goal, constraints) in the `task` `description`. Handle small or routine requests yourself rather than delegating."""
 
 
 def _warn(message: str) -> None:
@@ -197,6 +198,16 @@ def build_orchestrator_middleware() -> list[Any]:
         except Exception:  # noqa: BLE001
             pass
     else:
+        # Deterministic plan-request delegation, outermost so it can short-circuit
+        # the model call entirely (no accounting noise for a call that never runs).
+        try:
+            from .middleware.delegation import plan_delegation_middleware
+
+            mw = plan_delegation_middleware()
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from .middleware.economy import orchestrator_middleware
 
