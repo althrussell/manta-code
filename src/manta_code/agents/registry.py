@@ -116,6 +116,11 @@ class AgentDef(BaseModel):
     #: ``["uc_catalog", "sql", "jobs", "system_tables"]``).
     databricks_tools: list[str] = Field(default_factory=list)
 
+    #: Named Manta control-plane tool groups for this agent. ``"tasks"``
+    #: grants the background-task tools (submit/status/output/list/cancel) —
+    #: what the ``chief`` built-in uses to delegate and collect.
+    manta_tools: list[str] = Field(default_factory=list)
+
     @field_validator("name")
     @classmethod
     def _validate_name(cls, value: str) -> str:

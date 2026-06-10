@@ -72,7 +72,7 @@ DEFAULT_PRICING: dict[str, Price] = {
     "gpt-5": Price(input=1.25, output=10.0),
     "gpt-oss-120b": Price(input=0.15, output=0.60),
     "gpt-oss": Price(input=0.10, output=0.40),
-    "gemini-3-1-pro": Price(input=1.25, output=10.0),
+    "gemini-2-5-pro": Price(input=1.25, output=10.0),
     "gemini": Price(input=0.50, output=3.0),
     "llama": Price(input=0.20, output=0.60),
 }

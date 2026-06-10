@@ -26,7 +26,7 @@ console = Console()
 #: Manta's own subcommands. Anything else (bare invocation, unknown flags) is
 #: treated as a request to launch the interactive runtime and is forwarded.
 KNOWN_SUBCOMMANDS = frozenset(
-    {"doctor", "init", "agents", "cost", "budget", "run", "watch"}
+    {"doctor", "init", "agents", "cost", "budget", "run", "watch", "task", "status"}
 )
 
 
@@ -262,6 +262,33 @@ def doctor(ctx: typer.Context) -> None:
             add("databricks auth", authed, who or "")
         except Exception as exc:  # noqa: BLE001
             add("databricks auth", False, str(exc))
+
+        # Validate every agent's Databricks model pin against the live
+        # workspace. A pin to a nonexistent serving endpoint otherwise only
+        # surfaces mid-run as a cryptic NotFoundError from the server.
+        try:
+            from .agents.defaults import merged_agents
+            from .agents.registry import list_agents
+            from .auth import list_serving_chat_endpoints
+
+            live = set(list_serving_chat_endpoints(profile))
+            if live:
+                for defn in merged_agents(list_agents()):
+                    pin = defn.model or ""
+                    if not pin.startswith("databricks:"):
+                        continue
+                    endpoint_name = pin.split(":", 1)[1]
+                    ok = endpoint_name in live
+                    add(
+                        f"agent pin: {defn.name}",
+                        ok,
+                        endpoint_name
+                        if ok
+                        else f"{endpoint_name} not found in workspace — "
+                        f"fix with `manta agents edit {defn.name}`",
+                    )
+        except Exception:  # noqa: BLE001 - validation is best-effort
+            pass
 
     # Control-plane hooks: Manta monkeypatches a few internal upstream symbols
     # (ADR 0008). If a pinned-version bump moved one, the build hook degrades to
@@ -777,6 +804,224 @@ def run(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     raise typer.Exit(code=code)
+
+
+task_app = typer.Typer(
+    help="Background agent tasks: submit, watch, collect, cancel (ADR 0010).",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(task_app, name="task")
+
+
+def _fmt_age(ts: Optional[float]) -> str:
+    if not ts:
+        return "-"
+    import time
+
+    seconds = max(0, int(time.time() - ts))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+_STATE_STYLES = {
+    "queued": "yellow",
+    "running": "cyan",
+    "done": "green",
+    "failed": "red",
+    "cancelled": "dim",
+}
+
+
+def _task_table(tasks: list) -> Table:
+    table = Table(title="Manta background tasks")
+    table.add_column("Id", style="bold")
+    table.add_column("Agent")
+    table.add_column("State")
+    table.add_column("Age", justify="right")
+    table.add_column("Prompt")
+    for t in tasks:
+        style = _STATE_STYLES.get(t.state, "")
+        state = f"[{style}]{t.state}[/{style}]" if style else t.state
+        table.add_row(t.id, f"@{t.agent}", state, _fmt_age(t.created_at), t.prompt[:70])
+    return table
+
+
+@task_app.callback(invoke_without_command=True)
+def task_main(ctx: typer.Context) -> None:
+    """List background tasks when run with no subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _task_list(state=None)
+
+
+def _task_list(state: Optional[str]) -> None:
+    from .tasks.store import list_tasks
+
+    tasks = list_tasks(state=state, limit=30)
+    if not tasks:
+        console.print(
+            "[dim]No background tasks yet. Submit one with "
+            "`manta task submit <agent> \"...\"` or `@<agent> ... &` in-session.[/dim]"
+        )
+        return
+    console.print(_task_table(tasks))
+    console.print("[dim]manta task status <id> • output <id> • cancel <id>[/dim]")
+
+
+@task_app.command("submit")
+def task_submit(
+    agent: str = typer.Argument(..., help="Agent to run the task (e.g. swe)."),
+    prompt: str = typer.Argument(..., help="The task, in plain English."),
+    timeout: int = typer.Option(
+        None, "--timeout", help="Wall-clock cap in seconds (default 1800)."
+    ),
+    max_turns: int = typer.Option(
+        None, "--max-turns", help="Agentic turn cap (default 80)."
+    ),
+    profile: Optional[str] = typer.Option(None, "-p", "--profile", help="Databricks profile."),
+) -> None:
+    """Hand a long-running task to a named agent; returns immediately with an id."""
+    from .tasks import executor
+
+    kwargs: dict = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if max_turns is not None:
+        kwargs["max_turns"] = max_turns
+    try:
+        record = executor.submit_task(agent, prompt, profile=profile, **kwargs)
+    except executor.TaskError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        f"Submitted task [bold]{record.id}[/bold] to [bold]@{record.agent}[/bold] "
+        f"(pid {record.pid})."
+    )
+    console.print(
+        f"[dim]manta task status {record.id} • manta task output {record.id} • "
+        f"manta task cancel {record.id}[/dim]"
+    )
+
+
+@task_app.command("list")
+def task_list_cmd(
+    state: Optional[str] = typer.Option(None, "--state", help="Filter by state."),
+) -> None:
+    """List recent background tasks."""
+    _task_list(state=state)
+
+
+@task_app.command("status")
+def task_status(task_id: str = typer.Argument(..., help="Task id.")) -> None:
+    """Show one task's state, timing, and exit code."""
+    from .tasks.store import get_task
+
+    record = get_task(task_id)
+    if record is None:
+        console.print(f"[red]No task '{task_id}'.[/red]")
+        raise typer.Exit(code=1)
+    style = _STATE_STYLES.get(record.state, "")
+    state = f"[{style}]{record.state}[/{style}]" if style else record.state
+    console.print(f"Task [bold]{record.id}[/bold] — @{record.agent} — {state}")
+    console.print(f"Submitted: {_fmt_age(record.created_at)} ago")
+    if record.started_at:
+        console.print(f"Started:   {_fmt_age(record.started_at)} ago")
+    if record.finished_at:
+        console.print(f"Finished:  {_fmt_age(record.finished_at)} ago "
+                      f"(exit {record.exit_code})")
+    console.print(f"Prompt:    {record.prompt}")
+    if record.log_path:
+        console.print(f"Log:       [dim]{record.log_path}[/dim]")
+
+
+@task_app.command("output")
+def task_output_cmd(task_id: str = typer.Argument(..., help="Task id.")) -> None:
+    """Print a task's result (or its log tail while it is still running)."""
+    from .tasks import executor
+
+    try:
+        output = executor.task_output(task_id)
+    except executor.TaskError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    if not output:
+        console.print("[dim](no output yet)[/dim]")
+        return
+    console.print(output)
+
+
+@task_app.command("cancel")
+def task_cancel(task_id: str = typer.Argument(..., help="Task id.")) -> None:
+    """Cancel a queued or running background task."""
+    from .tasks import executor
+
+    try:
+        record = executor.cancel_task(task_id)
+    except executor.TaskError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Cancelled task [bold]{record.id}[/bold] (@{record.agent}).")
+
+
+@app.command()
+def status(
+    days: Optional[int] = typer.Option(1, "--days", help="Spend window in days."),
+    events: int = typer.Option(12, "--events", help="Recent events to show."),
+) -> None:
+    """The chief-of-staff pane: tasks, recent activity, and spend in one view."""
+    from .agents import usage
+    from .tasks.store import list_tasks, recent_events
+
+    active = [t for t in list_tasks(limit=50) if t.state in ("queued", "running")]
+    finished = [t for t in list_tasks(limit=8) if t.state not in ("queued", "running")]
+    shown = [*active, *finished][:12]
+    if shown:
+        console.print(_task_table(shown))
+    else:
+        console.print("[dim]No background tasks.[/dim]")
+
+    recent = recent_events(limit=events)
+    if recent:
+        table = Table(title="Recent activity")
+        table.add_column("When", justify="right")
+        table.add_column("Agent")
+        table.add_column("Event")
+        table.add_column("Detail")
+        for e in recent:
+            kind_style = {"denied": "red", "approved": "yellow"}.get(e.kind, "")
+            kind = f"[{kind_style}]{e.kind}[/{kind_style}]" if kind_style else e.kind
+            table.add_row(
+                f"{_fmt_age(e.ts)} ago",
+                e.agent + (f" [dim]task {e.task_id}[/dim]" if e.task_id else ""),
+                kind,
+                e.detail[:60],
+            )
+        console.print(table)
+
+    since = _since_timestamp(days)
+    rows = usage.aggregate(by="agent", since=since)
+    if rows:
+        total = usage.totals(since=since)
+        table = Table(title=f"Spend — last {days} day(s)")
+        table.add_column("Agent", style="bold")
+        table.add_column("Calls", justify="right")
+        table.add_column("Tokens", justify="right")
+        table.add_column("Cost (USD)", justify="right")
+        for r in rows:
+            table.add_row(
+                r.key, str(r.calls), _fmt_tokens(r.total_tokens),
+                _fmt_cost(r.cost_usd, r.cost_known),
+            )
+        table.add_section()
+        table.add_row(
+            "[bold]TOTAL[/bold]", str(total.calls),
+            _fmt_tokens(total.total_tokens), _fmt_cost(total.cost_usd, total.cost_known),
+        )
+        console.print(table)
 
 
 @app.command()

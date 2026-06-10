@@ -185,3 +185,29 @@ def test_databricks_tools_built_when_configured(monkeypatch):
 
     monkeypatch.setattr(dbt, "build_default_databricks_tools", lambda: sentinel)
     assert hook.build_databricks_tools() == sentinel
+
+
+def test_orchestrator_middleware_includes_agent_addressing(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    mw_names = {type(m).__name__ for m in hook.build_orchestrator_middleware()}
+    assert "AgentAddressMiddleware" in mw_names
+    # And the status-feed event log rides along.
+    assert "EventLogMiddleware" in mw_names
+
+
+def test_addressing_active_for_manta_profile_too(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "review")
+    mw_names = {type(m).__name__ for m in hook.build_orchestrator_middleware()}
+    assert "AgentAddressMiddleware" in mw_names
+
+
+def test_enrich_injects_task_tools(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    kwargs: dict = {}
+    hook.enrich_kwargs(kwargs)
+    names = {getattr(t, "name", "") for t in (kwargs.get("tools") or [])}
+    assert "manta_task_submit" in names
+    assert "manta_task_status" in names

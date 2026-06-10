@@ -6,7 +6,7 @@ from manta_code.agents.authoring import draft_agent_from_description, slugify
 def test_review_description_infers_read_only_and_gemini():
     defn = draft_agent_from_description("auditor", "review pull requests for security issues")
     assert defn.read_only is True
-    assert defn.model == "databricks:databricks-gemini-3-1-pro"
+    assert defn.model == "databricks:databricks-claude-sonnet-4-5"
     assert "READ-ONLY" in defn.system_prompt
 
 
