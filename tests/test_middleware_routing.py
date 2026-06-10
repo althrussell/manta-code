@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+import pytest
 
-from manta_code.middleware import routing as R
+pytest.importorskip("langchain.agents.middleware.types")
+
+from langchain_core.messages import HumanMessage  # noqa: E402
+
+from manta_code.middleware import routing as R  # noqa: E402
 
 
 def test_should_escalate_keywords():

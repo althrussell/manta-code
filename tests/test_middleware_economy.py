@@ -6,10 +6,14 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+import pytest
 
-from manta_code.agents import usage as U
-from manta_code.middleware import economy as E
+pytest.importorskip("langchain.agents.middleware.types")
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: E402
+
+from manta_code.agents import usage as U  # noqa: E402
+from manta_code.middleware import economy as E  # noqa: E402
 
 
 @dataclass

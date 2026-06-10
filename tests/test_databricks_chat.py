@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import json
 
-from langchain_core.messages import AIMessage, AIMessageChunk
-from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+import pytest
 
-from manta_code import databricks_chat as dc
+pytest.importorskip("langchain_core")
+
+from langchain_core.messages import AIMessage, AIMessageChunk  # noqa: E402
+from langchain_core.outputs import (  # noqa: E402
+    ChatGeneration,
+    ChatGenerationChunk,
+    ChatResult,
+)
+
+from manta_code import databricks_chat as dc  # noqa: E402
 
 REASONING_AND_TEXT = json.dumps(
     [
