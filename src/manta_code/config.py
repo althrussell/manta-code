@@ -20,7 +20,7 @@ provider = "databricks"
 # `extra_endpoints` are also registered in deepagents-code's `/model` switcher
 # so you can switch between them in-session.
 # The default is the orchestration model; `extra_endpoints` includes the models
-# Manta's planning/swe/review subagents use (see manta_code.subagents) so they
+# Manta's planning/swe/review agents use (see manta_code.agents.defaults) so they
 # are all available in deepagents-code's `/model` switcher.
 [interactive]
 default_endpoint = "databricks-gpt-oss-120b"

@@ -324,8 +324,37 @@ def _agents_list() -> None:
     console.print(table)
     console.print(
         "[dim]manta agents show <name> • create <name> • edit <name> • "
-        "delete <name> • import[/dim]"
+        "delete <name> • import • sync[/dim]"
     )
+    console.print(
+        "[dim]These agents are also selectable in-app via the /agents picker.[/dim]"
+    )
+
+
+@agents_app.command("sync")
+def agents_sync() -> None:
+    """Regenerate the in-app ``/agents`` profiles from the registry.
+
+    Manta keeps a top-level deepagents profile for every agent (built-in +
+    yours) so they appear in the in-app ``/agents`` picker. This runs
+    automatically on launch; run it manually to refresh after editing agents.
+    """
+    from .agents.defaults import merged_agents
+    from .agents.profiles import sync_agent_profiles
+    from .agents.registry import list_agents
+
+    result = sync_agent_profiles(merged_agents(list_agents()))
+    console.print(
+        f"Profiles: {len(result.written)} written, "
+        f"{len(result.pruned)} pruned, {len(result.skipped)} skipped."
+    )
+    for label, names in (
+        ("written", result.written),
+        ("pruned", result.pruned),
+        ("skipped (non-Manta)", result.skipped),
+    ):
+        if names:
+            console.print(f"[dim]{label}: {', '.join(sorted(names))}[/dim]")
 
 
 def _resolve_agent(name: str):
@@ -485,7 +514,7 @@ def agents_memory(
         console.print(f"[red]Memory unavailable: {exc}[/red] (install the [agent] extra)")
         raise typer.Exit(code=1) from exc
 
-    store = mem.build_memory_store()
+    store = mem.shared_memory_store()
     if store is None:
         console.print("[red]Could not open the memory store.[/red]")
         raise typer.Exit(code=1)

@@ -41,12 +41,14 @@ FilesystemOp = Literal["read", "write"]
 
 
 class FsRule(BaseModel):
-    """One filesystem permission rule (compiled to ``FilesystemPermission``).
+    """One filesystem path rule (enforced by ``ToolPolicyMiddleware``).
 
     Rules are evaluated in declaration order, first match wins — the same
-    semantics the ``deepagents`` ``FilesystemMiddleware`` applies. ``deepagents``
-    matches glob patterns against absolute paths and requires a leading ``/``,
-    so :meth:`_normalize_paths` rewrites convenient relative patterns
+    semantics the ``deepagents`` ``FilesystemMiddleware`` applies. Manta enforces
+    them in its tool-policy ``wrap_tool_call`` (not via ``FilesystemPermission``,
+    which the execute-capable sandbox backend rejects), matching glob patterns
+    against the absolute ``file_path`` argument. Patterns require a leading
+    ``/``, so :meth:`_normalize_paths` rewrites convenient relative patterns
     (``src/**``) into depth-anywhere absolute globs (``/**/src/**``) and leaves
     already-absolute patterns (``/tmp/**``) untouched.
     """

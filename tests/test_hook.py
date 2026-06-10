@@ -40,6 +40,89 @@ def test_enrich_preserves_unrelated_subagents(monkeypatch, tmp_path):
     assert "planning" in names  # Manta built-in -> added
 
 
+def test_active_agent_name_reads_env(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "review")
+    assert hook.active_agent_name() == "review"
+    # The base profile is not a Manta agent.
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "agent")
+    assert hook.active_agent_name() is None
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    assert hook.active_agent_name() is None
+
+
+def test_enrich_enforces_active_profile_top_level(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    # Select the read-only built-in 'review' as the top-level profile.
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "review")
+    kwargs: dict = {}
+    hook.enrich_kwargs(kwargs)
+    mw_names = {type(m).__name__ for m in (kwargs.get("middleware") or [])}
+    # review is read_only -> its tool policy is enforced on the primary loop.
+    assert "ToolPolicyMiddleware" in mw_names
+
+
+def test_enrich_pins_model_for_active_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "planning")
+    # Force the resolver so the test doesn't depend on the Databricks chat import.
+    from manta_code.middleware import routing as R
+
+    monkeypatch.setattr(R, "databricks_model_resolver", lambda: (lambda name: f"m::{name}"))
+    kwargs: dict = {}
+    hook.enrich_kwargs(kwargs)
+    mw_names = {type(m).__name__ for m in (kwargs.get("middleware") or [])}
+    # planning pins databricks-claude-opus-4-8 -> the primary loop is pinned.
+    assert "ModelPinMiddleware" in mw_names
+
+
+def test_enrich_base_agent_no_top_level_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    kwargs: dict = {}
+    hook.enrich_kwargs(kwargs)
+    mw_names = {type(m).__name__ for m in (kwargs.get("middleware") or [])}
+    # No active Manta profile -> no top-level tool-policy enforcement.
+    assert "ToolPolicyMiddleware" not in mw_names
+
+
+def test_delegation_policy_appended_for_base_orchestrator(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    kwargs: dict = {"system_prompt": "You are a coding agent."}
+    hook.enrich_kwargs(kwargs)
+    assert "Delegating to specialist agents (Manta)" in kwargs["system_prompt"]
+    # Base prompt is preserved (append, not replace).
+    assert kwargs["system_prompt"].startswith("You are a coding agent.")
+
+
+def test_delegation_policy_not_appended_when_profile_active(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "swe")
+    kwargs: dict = {"system_prompt": "You are a coding agent."}
+    hook.enrich_kwargs(kwargs)
+    # A specific profile is primary -> no circular "delegate to swe" nudge.
+    assert "Delegating to specialist agents (Manta)" not in kwargs["system_prompt"]
+
+
+def test_delegation_policy_skipped_without_system_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    # No system_prompt (None sentinel) -> never fabricate one; leave it for
+    # create_deep_agent to compute its rich default.
+    kwargs: dict = {}
+    hook.enrich_kwargs(kwargs)
+    assert "system_prompt" not in kwargs or kwargs["system_prompt"] is None
+
+
+def test_delegation_policy_not_duplicated(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    kwargs: dict = {"system_prompt": "base"}
+    hook.enrich_kwargs(kwargs)
+    hook.enrich_kwargs(kwargs)  # idempotent: applying twice adds it once
+    assert kwargs["system_prompt"].count("Delegating to specialist agents (Manta)") == 1
+
+
 def test_install_is_idempotent_and_wraps(monkeypatch):
     import deepagents_code.agent as dc_agent
 

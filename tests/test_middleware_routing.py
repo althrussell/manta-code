@@ -100,3 +100,51 @@ def test_resolver_failure_falls_back():
     req = _Request(messages=[HumanMessage(content="debug the crash")])
     # Must not raise; falls back to the original request.
     assert mw.wrap_model_call(req, lambda r: "ok") == "ok"
+
+
+@dataclass
+class _Defn:
+    model: Any = None
+
+
+def test_model_pin_overrides_every_call():
+    resolved = []
+
+    def resolver(name):
+        resolved.append(name)
+        return f"model::{name}"
+
+    mw = R.ModelPinMiddleware(endpoint="databricks-claude-opus-4-8", resolve_model=resolver)
+    captured = {}
+
+    def handler(r):
+        captured["overridden"] = getattr(r, "_overridden", None)
+        return "ok"
+
+    # Unconditional: even an "easy" step is pinned (unlike routing escalation).
+    mw.wrap_model_call(_Request(messages=[HumanMessage(content="add a docstring")]), handler)
+    assert captured["overridden"] == {"model": "model::databricks-claude-opus-4-8"}
+    # Endpoint is resolved once and cached across calls.
+    mw.wrap_model_call(_Request(messages=[HumanMessage(content="another")]), handler)
+    assert resolved == ["databricks-claude-opus-4-8"]
+
+
+def test_model_pin_failure_falls_back():
+    def resolver(name):
+        raise RuntimeError("nope")
+
+    mw = R.ModelPinMiddleware(endpoint="x", resolve_model=resolver)
+    req = _Request(messages=[HumanMessage(content="hi")])
+    assert mw.wrap_model_call(req, lambda r: "ok") == "ok"
+    assert req._overridden is None
+
+
+def test_agent_model_pin_middleware_strips_provider(monkeypatch):
+    monkeypatch.setattr(R, "databricks_model_resolver", lambda: (lambda name: f"m::{name}"))
+    mw = R.agent_model_pin_middleware(_Defn(model="databricks:databricks-claude-opus-4-8"))
+    assert isinstance(mw, R.ModelPinMiddleware)
+    assert mw._endpoint == "databricks-claude-opus-4-8"
+
+
+def test_agent_model_pin_middleware_none_without_model():
+    assert R.agent_model_pin_middleware(_Defn(model=None)) is None

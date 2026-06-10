@@ -113,6 +113,73 @@ class ModelRoutingMiddleware(AgentMiddleware):
         return await handler(self._route(request))
 
 
+class ModelPinMiddleware(AgentMiddleware):
+    """Force every model call onto a fixed endpoint (a profile's ``model`` pin).
+
+    Used when a Manta agent with a pinned model is the **primary** (top-level)
+    agent: deepagents keeps the session's launch model for the primary loop, so
+    without this the planner/review profile would run on the orchestrator's model.
+    This overrides the model per call (the same ``request.override(model=...)``
+    mechanism :class:`ModelRoutingMiddleware` uses), resolving the endpoint once
+    and caching it. Fully guarded — if the model can't be resolved it leaves the
+    request untouched, so a bad pin degrades to "use the session model" rather
+    than breaking the call.
+    """
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        resolve_model: Callable[[str], Any],
+    ) -> None:
+        super().__init__()
+        self._endpoint = endpoint
+        self._resolve_model = resolve_model
+        self._model: Any = None
+
+    @property
+    def name(self) -> str:
+        return "Manta.ModelPin"
+
+    def _pin(self, request: Any) -> Any:
+        if not self._endpoint:
+            return request
+        try:
+            if self._model is None:
+                self._model = self._resolve_model(self._endpoint)
+            if self._model is None:
+                return request
+            return request.override(model=self._model)
+        except Exception:  # noqa: BLE001 - pin must never break a call
+            return request
+
+    def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return handler(self._pin(request))
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return await handler(self._pin(request))
+
+
+def _strip_provider(model: str) -> str:
+    """Return the bare endpoint name from a ``provider:endpoint`` model spec."""
+    return model.split(":", 1)[1] if ":" in model else model
+
+
+def agent_model_pin_middleware(defn: Any) -> AgentMiddleware | None:
+    """Model-pin middleware for a profile's ``model``, or ``None`` if unset.
+
+    Returns ``None`` when the agent has no model pin or the Databricks resolver is
+    unavailable, so it is always safe to call and append.
+    """
+    model = getattr(defn, "model", None)
+    if not model:
+        return None
+    resolver = databricks_model_resolver()
+    if resolver is None:
+        return None
+    return ModelPinMiddleware(endpoint=_strip_provider(model), resolve_model=resolver)
+
+
 def databricks_model_resolver() -> Callable[[str], Any] | None:
     """Return a resolver building a Databricks chat model from an endpoint name.
 

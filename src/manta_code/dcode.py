@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from .auth import resolve_profile
-from .subagents import ensure_manta_subagents
 
 #: Boot shim run instead of ``deepagents_code`` directly, so Manta can rebrand
 #: the splash wordmark in-process before handing off to upstream's CLI entry.
@@ -69,6 +68,21 @@ ONBOARDING_MARKER_PATH = DEEPAGENTS_STATE_DIR / "onboarding_complete"
 #: "Deep Agents" — rebranding those would require forking the TUI.
 SPLASH_SUBHEADER_ENV = "DEEPAGENTS_CODE_DANGEROUSLY_OVERRIDE_STARTUP_SUBHEADER"
 SPLASH_SUBHEADER = "Manta - Databricks coding agent"
+
+#: Branding theme key + definition. ``deepagents-code`` natively loads custom
+#: themes from ``[themes.<name>]`` in its ``config.toml`` and applies them across
+#: the whole TUI (splash banner, borders, links, spinner). Manta registers a
+#: Databricks-red theme so the console is on-brand out of the box; ``primary`` is
+#: Databricks "lava 600" red and the rest of the fields inherit the upstream dark
+#: palette. Only ``primary`` is overridden to keep success/warning/error
+#: semantics legible. Updated each launch so the brand colour stays current.
+MANTA_THEME_KEY = "manta"
+DATABRICKS_RED = "#FF3621"
+MANTA_THEME = {
+    "label": "Manta (Databricks)",
+    "dark": True,
+    "primary": DATABRICKS_RED,
+}
 
 
 class LauncherError(RuntimeError):
@@ -139,7 +153,31 @@ def merge_databricks_provider(
     warnings_tbl["suppress"] = _dedupe(
         [*existing_suppress, *DEFAULT_SUPPRESSED_WARNINGS]
     )
+
+    _merge_branding_theme(result)
     return result
+
+
+def _merge_branding_theme(result: dict) -> None:
+    """Register the Databricks-red ``manta`` theme and make it the default.
+
+    Mutates ``result`` in place. Manta owns the ``[themes.manta]`` definition
+    (rewritten each launch so the brand colour stays current) but preserves any
+    other user themes. ``[ui].theme`` is set to ``manta`` **only when the user
+    has no saved preference**, so switching themes via ``/theme`` is always
+    respected. Non-table ``[themes]`` / ``[ui]`` sections are left untouched
+    rather than overwritten (defensive: never clobber a hand-edited config).
+    """
+    themes_tbl = result.setdefault("themes", {})
+    if not isinstance(themes_tbl, dict):
+        return
+    themes_tbl[MANTA_THEME_KEY] = dict(MANTA_THEME)
+
+    ui_tbl = result.setdefault("ui", {})
+    if not isinstance(ui_tbl, dict):
+        return
+    if not ui_tbl.get("theme"):
+        ui_tbl["theme"] = MANTA_THEME_KEY
 
 
 def _read_toml(path: Path) -> dict:
@@ -315,6 +353,29 @@ def build_run_argv(
     return argv
 
 
+def sync_agent_profiles() -> None:
+    """Project the Manta registry into deepagents profiles (best-effort).
+
+    Generates a top-level ``~/.deepagents/<name>/`` profile for every registry
+    agent (built-ins + user-created) so they appear in the in-app ``/agents``
+    picker, prunes profiles for deleted agents, and one-time-cleans the legacy
+    prompt-only markdown subagents this replaces. Fully guarded: a failure here
+    must never block a launch.
+    """
+    try:
+        from .agents.defaults import merged_agents
+        from .agents.profiles import (
+            clean_legacy_subagents,
+            sync_agent_profiles as _sync,
+        )
+        from .agents.registry import list_agents
+
+        clean_legacy_subagents()
+        _sync(merged_agents(list_agents()))
+    except Exception:  # noqa: BLE001 - reliability: launch regardless
+        pass
+
+
 def run_headless(
     *,
     profile: str | None,
@@ -335,8 +396,8 @@ def run_headless(
 
     Unlike :func:`launch`, this never replaces the process (so the caller — a CI
     script or ``manta run``) gets the exit code), and it provisions the same
-    Databricks config/onboarding/subagents so Manta's control plane (enforced
-    agents, token economy) applies in headless mode too.
+    Databricks config/onboarding/agent profiles so Manta's control plane
+    (enforced agents, token economy) applies in headless mode too.
     """
     ensure_dcode_config(
         endpoints,
@@ -345,7 +406,7 @@ def run_headless(
         default_endpoint=default_endpoint,
     )
     mark_onboarding_complete()
-    ensure_manta_subagents()
+    sync_agent_profiles()
     env = build_launch_env(profile)
     argv = build_run_argv(
         default_endpoint,
@@ -374,9 +435,11 @@ def launch(
 ) -> int:
     """Provision config + env and launch the deepagents-code TUI.
 
-    Also provisions Manta's default planning/SWE/review subagents on first run
-    (see :func:`manta_code.subagents.ensure_manta_subagents`); this is
-    marker-gated so user edits are never clobbered.
+    Also syncs the Manta registry into top-level deepagents profiles (see
+    :func:`sync_agent_profiles`), so built-in and user-created agents appear in
+    the in-app ``/agents`` picker. Profiles are generated artifacts (refreshed
+    each launch); user-authored profiles and the base ``agent`` are never
+    touched.
 
     When ``exec_replace`` is true (the default) the current process is replaced
     via :func:`os.execvpe` so the TUI owns the terminal cleanly and this call
@@ -390,7 +453,7 @@ def launch(
         default_endpoint=default_endpoint,
     )
     mark_onboarding_complete()
-    ensure_manta_subagents()
+    sync_agent_profiles()
     env = build_launch_env(profile)
     argv = build_dcode_argv(default_endpoint, passthrough)
     if exec_replace:

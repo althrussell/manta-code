@@ -1,7 +1,7 @@
 """Manta's built-in agents, in the enforced :class:`AgentDef` format.
 
-These are the successors to the prompt-only markdown ``planning`` / ``swe`` /
-``review`` subagents (``manta_code.subagents``). The difference is enforcement:
+These are the successors to the original prompt-only markdown ``planning`` /
+``swe`` / ``review`` subagents. The difference is enforcement:
 ``planning`` and ``review`` are ``read_only=True``, so the factory denies all
 filesystem writes *and* blocks ``execute`` via the tool-policy middleware —
 their read-only contract is a real boundary, not a line in the prompt.
@@ -31,9 +31,10 @@ def _model(endpoint: str) -> str:
 PLANNING = AgentDef(
     name="planning",
     description=(
-        "Turn an ambiguous or multi-step request into a clear, ordered "
-        "implementation plan. Delegate here before large changes or when "
-        "requirements are unclear; it plans only and does not modify code."
+        "Use this agent whenever the user asks to plan, design, scope, or break "
+        "down work, and before any large or multi-step change. It turns an "
+        "ambiguous request into a clear, ordered implementation plan. Plans only; "
+        "does not modify code."
     ),
     model=_model("databricks-claude-opus-4-8"),
     read_only=True,
@@ -79,8 +80,9 @@ Return a concise summary of what changed, why, and exactly how you verified it (
 REVIEW = AgentDef(
     name="review",
     description=(
-        "Read-only code review: inspect diffs and files for bugs, security "
-        "issues, and style problems, and report findings. Does not modify code."
+        "Use this agent to review a code change. Read-only: inspects diffs and "
+        "files for bugs, security issues, and style problems and reports findings "
+        "(with severity and locations). Does not modify code."
     ),
     model=_model("databricks-gemini-3-1-pro"),
     read_only=True,

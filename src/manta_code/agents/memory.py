@@ -5,8 +5,13 @@ for a Databricks user the top fear is data leakage. So memory here is built
 privacy-first:
 
 - **Durability:** a persistent LangGraph ``SqliteStore`` at
-  ``~/.manta/.state/memory.db`` is injected into the agent graph (via the build
-  hook's ``store=``), so memories survive process restarts.
+  ``~/.manta/.state/memory.db`` backs the memory. The recall middleware reads it
+  *directly* (a per-process cached handle), not via the agent graph's ``store=``.
+  This is deliberate: the ``langgraph dev`` API server that ``deepagents-code``
+  runs the agent in **rejects** graphs that carry a custom ``BaseStore`` (it
+  manages persistence itself), so injecting our store there crashes the server
+  at startup. Reading our own store from the middleware keeps memory durable
+  without fighting the platform's persistence.
 - **Redaction is mandatory and structural:** the store is wrapped in a
   :class:`RedactingStore` that scrubs secrets/PII from *every* value before it is
   written. Because all writes funnel through ``BaseStore.batch``, there is no
@@ -141,16 +146,32 @@ def open_store(path: Path | None = None) -> Any:
     return _redacting_store_class()(inner)
 
 
-def build_memory_store() -> Any | None:
-    """Return the durable redacting store for the build hook, or ``None``.
+#: Per-process cached durable store, opened lazily on first recall. We do NOT
+#: inject this into the agent graph (``langgraph dev`` rejects custom stores);
+#: the recall middleware reads it directly instead.
+_SHARED_STORE: Any | None = None
+_SHARED_STORE_TRIED = False
 
-    Guarded: if langgraph's sqlite store is unavailable, returns ``None`` so the
-    hook simply injects no store (agent still runs, just without durable memory).
+
+def shared_memory_store() -> Any | None:
+    """Return a process-wide durable redacting store, or ``None``.
+
+    Opened once and cached. Guarded: if langgraph's sqlite store is unavailable
+    (or opening fails) this returns ``None`` so recall degrades to "no memory"
+    rather than raising. The underlying connection uses
+    ``check_same_thread=False`` so the langgraph server's worker threads share it.
     """
-    try:
-        return open_store()
-    except Exception:  # noqa: BLE001
+    global _SHARED_STORE, _SHARED_STORE_TRIED  # noqa: PLW0603
+    if _SHARED_STORE is not None:
+        return _SHARED_STORE
+    if _SHARED_STORE_TRIED:
         return None
+    _SHARED_STORE_TRIED = True
+    try:
+        _SHARED_STORE = open_store()
+    except Exception:  # noqa: BLE001
+        _SHARED_STORE = None
+    return _SHARED_STORE
 
 
 # --- namespacing + access helpers -----------------------------------------
@@ -205,15 +226,24 @@ def _agent_memory_middleware_class() -> type:
     from langchain_core.messages import SystemMessage
 
     class AgentMemoryMiddleware(AgentMiddleware):
-        """Inject an agent's remembered notes into the system prompt (recall-only)."""
+        """Inject an agent's remembered notes into the system prompt (recall-only).
 
-        def __init__(self, namespace: tuple[str, str]) -> None:
+        The durable store is sourced from Manta directly (an explicit handle or
+        the per-process :func:`shared_memory_store`), never from the agent graph's
+        runtime store — the ``langgraph dev`` server forbids custom graph stores.
+        """
+
+        def __init__(self, namespace: tuple[str, str], store: Any | None = None) -> None:
             super().__init__()
             self._namespace = namespace
+            self._store = store
 
         @property
         def name(self) -> str:
             return f"Manta.Memory.{self._namespace[-1]}"
+
+        def _resolve_store(self) -> Any | None:
+            return self._store if self._store is not None else shared_memory_store()
 
         def _recall_block(self, store: Any) -> str | None:
             notes = read_memories(store, self._namespace, limit=20)
@@ -224,7 +254,7 @@ def _agent_memory_middleware_class() -> type:
 
         def wrap_model_call(self, request: Any, handler: Any) -> Any:
             try:
-                store = getattr(getattr(request, "runtime", None), "store", None)
+                store = self._resolve_store()
                 if store is None:
                     return handler(request)
                 block = self._recall_block(store)
@@ -242,16 +272,18 @@ def _agent_memory_middleware_class() -> type:
     return AgentMemoryMiddleware
 
 
-def agent_memory_middleware(defn: Any) -> Any | None:
+def agent_memory_middleware(defn: Any, store: Any | None = None) -> Any | None:
     """Return a recall middleware for ``defn``, or ``None`` if memory is off.
 
-    Called by the build hook when compiling each agent. Guarded so a langchain
+    Called by the build hook when compiling each agent. ``store`` is an optional
+    explicit store (used in tests); when omitted the middleware reads the
+    per-process :func:`shared_memory_store` at call time. Guarded so a langchain
     API change degrades to "no memory middleware" rather than breaking the agent.
     """
     if not getattr(defn, "memory", False):
         return None
     try:
         cls = _agent_memory_middleware_class()
-        return cls(memory_namespace(defn))
+        return cls(memory_namespace(defn), store=store)
     except Exception:  # noqa: BLE001
         return None

@@ -156,7 +156,7 @@ class MantaChatDatabricks(ChatDatabricks):
 
 
 #: ``provider:`` prefix that identifies a Databricks model spec (matches
-#: :data:`manta_code.subagents.DATABRICKS_PROVIDER`).
+#: :data:`manta_code.dcode.DATABRICKS_PROVIDER`).
 _DATABRICKS_MODEL_PREFIX = "databricks:"
 
 #: Guards :func:`_install_subagent_databricks_resolver` against re-patching.

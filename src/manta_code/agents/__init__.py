@@ -17,6 +17,8 @@ Modules:
   guardrails.
 - :mod:`manta_code.agents.usage` — the local token/cost usage ledger.
 - :mod:`manta_code.agents.importer` — import CLAUDE.md / .cursor/rules / .mcp.json.
+- :mod:`manta_code.agents.profiles` — project the registry into top-level
+  ``deepagents`` profiles (the in-app ``/agents`` picker).
 """
 
 from __future__ import annotations

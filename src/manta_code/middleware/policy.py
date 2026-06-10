@@ -1,43 +1,81 @@
-"""Tool-level policy enforcement: allow/deny lists and read-only agents.
+"""Tool-level policy enforcement: allow/deny lists, read-only, and path rules.
 
-The ``deepagents`` SDK enforces *filesystem* read/write via
-``FilesystemPermission`` natively, but that does not cover the ``execute`` shell
-tool (on a shell backend) or arbitrary MCP/custom tools. To make a Manta agent's
-declared boundary real — "this reviewer cannot run anything that mutates state"
-— we add a ``wrap_tool_call`` middleware that rejects disallowed tool calls
-*before they run*, returning an error ``ToolMessage`` the model can read and
-react to (rather than silently dropping the call or raising).
+``deepagents`` can enforce *filesystem* read/write via ``FilesystemPermission``
+natively — but only on backends that do **not** provide command execution. The
+``deepagents-code`` runtime uses a sandbox backend with an ``execute`` tool, and
+``FilesystemMiddleware`` refuses to accept permissions on such a backend
+(``NotImplementedError`` at construction time). Compiling ``FilesystemPermission``
+onto Manta subagents therefore crashed the agent server at start.
 
-This is the second half of "enforced, not prompted" permissions; the first half
-(filesystem allow/deny) is compiled into the subagent's ``permissions`` by
-:mod:`manta_code.agents.factory`.
+So Manta enforces *all* of an agent's declared boundary here, in a
+``wrap_tool_call`` middleware that rejects a disallowed call *before it runs*,
+returning an error ``ToolMessage`` the model can read and react to:
+
+- allow / deny tool lists and ``read_only`` (covers ``execute`` and arbitrary
+  MCP/custom tools that filesystem permissions never could), and
+- per-path filesystem rules (``AgentDef.filesystem``) evaluated against the
+  ``file_path`` argument of the filesystem tools, mirroring deepagents'
+  first-match-wins glob semantics.
+
+This is the whole of "enforced, not prompted" for Manta agents.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
-#: Tools that mutate state. A ``read_only`` agent denies all of these on top of
-#: its filesystem write-deny rule, so it cannot edit files or run shell commands
-#: even if the orchestrator handed those tools down.
+#: Tools that mutate state. A ``read_only`` agent denies all of these so it
+#: cannot edit files or run shell commands even if the orchestrator handed those
+#: tools down.
 READ_ONLY_DENIED_TOOLS: frozenset[str] = frozenset(
     {"execute", "write_file", "edit_file"}
 )
 
+#: Filesystem tools whose ``file_path`` argument is checked against per-path
+#: rules, mapped to the operation they perform.
+_FS_TOOL_OPERATIONS: dict[str, Literal["read", "write"]] = {
+    "read_file": "read",
+    "ls": "read",
+    "glob": "read",
+    "write_file": "write",
+    "edit_file": "write",
+}
+
+
+def _glob_matches(path: str, pattern: str) -> bool:
+    """Match ``path`` against a deepagents-style glob ``pattern``.
+
+    Uses ``wcmatch`` with the same flags deepagents' ``FilesystemMiddleware``
+    uses (``BRACE | GLOBSTAR``) so Manta's path enforcement is consistent with
+    the SDK's. Falls back to ``fnmatch`` if ``wcmatch`` is unavailable.
+    """
+    try:
+        import wcmatch.glob as wcglob
+
+        return wcglob.globmatch(
+            path, pattern, flags=wcglob.BRACE | wcglob.GLOBSTAR
+        )
+    except Exception:  # noqa: BLE001 - matcher fallback, never crash a tool call
+        from fnmatch import fnmatch
+
+        return fnmatch(path, pattern)
+
 
 class ToolPolicyMiddleware(AgentMiddleware):
-    """Reject tool calls that violate an agent's allow/deny policy.
+    """Reject tool calls that violate an agent's allow/deny/filesystem policy.
 
-    Resolution order for a tool name:
+    Resolution order for a tool call:
 
     1. If ``read_only`` and the tool is in :data:`READ_ONLY_DENIED_TOOLS` -> deny.
     2. If it is in ``deny`` -> deny.
     3. If an ``allow`` list is set and the tool is not in it -> deny.
-    4. Otherwise -> allow (delegate to the handler).
+    4. If it is a filesystem tool and a ``filesystem`` rule denies its
+       ``file_path`` -> deny.
+    5. Otherwise -> allow (delegate to the handler).
     """
 
     def __init__(
@@ -46,12 +84,17 @@ class ToolPolicyMiddleware(AgentMiddleware):
         allow: list[str] | None = None,
         deny: list[str] | None = None,
         read_only: bool = False,
+        filesystem: list[Any] | None = None,
         agent_name: str | None = None,
     ) -> None:
         super().__init__()
         self._allow = set(allow) if allow is not None else None
         self._deny = set(deny or ())
         self._read_only = read_only
+        #: Each rule has ``.operations`` (``["read"|"write"]``), ``.paths``
+        #: (list of globs) and ``.mode`` (``"allow"|"deny"``). Stored in order;
+        #: first matching rule wins, like deepagents' ``_check_fs_permission``.
+        self._filesystem = list(filesystem or ())
         self._agent_name = agent_name
 
     @property
@@ -59,7 +102,29 @@ class ToolPolicyMiddleware(AgentMiddleware):
         suffix = f".{self._agent_name}" if self._agent_name else ""
         return f"Manta.ToolPolicy{suffix}"
 
-    def _denial_reason(self, tool_name: str) -> str | None:
+    def _fs_denial(self, tool_name: str, args: dict[str, Any]) -> str | None:
+        """Deny a filesystem tool call whose path matches a ``deny`` rule."""
+        if not self._filesystem:
+            return None
+        operation = _FS_TOOL_OPERATIONS.get(tool_name)
+        if operation is None:
+            return None
+        path = args.get("file_path") or args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        for rule in self._filesystem:
+            if operation not in getattr(rule, "operations", ()):
+                continue
+            if any(_glob_matches(path, p) for p in getattr(rule, "paths", ())):
+                if getattr(rule, "mode", "allow") == "deny":
+                    return (
+                        f"'{tool_name}' on {path!r} is blocked by this agent's "
+                        f"filesystem policy ({operation} denied)."
+                    )
+                return None  # first match is an allow -> permitted
+        return None
+
+    def _denial_reason(self, tool_name: str, args: dict[str, Any]) -> str | None:
         if self._read_only and tool_name in READ_ONLY_DENIED_TOOLS:
             return (
                 f"'{tool_name}' is blocked: this agent is read-only and may not "
@@ -74,42 +139,44 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 f"'{tool_name}' is not in this agent's allowed tools. "
                 f"Allowed: {allowed}."
             )
-        return None
+        return self._fs_denial(tool_name, args)
+
+    def _tool_call(self, request: Any) -> dict[str, Any]:
+        call = getattr(request, "tool_call", None)
+        return call if isinstance(call, dict) else {}
 
     def _tool_name(self, request: Any) -> str:
-        call = getattr(request, "tool_call", None) or {}
-        return call.get("name", "") if isinstance(call, dict) else ""
+        return self._tool_call(request).get("name", "")
+
+    def _tool_args(self, request: Any) -> dict[str, Any]:
+        args = self._tool_call(request).get("args")
+        return args if isinstance(args, dict) else {}
 
     def _tool_call_id(self, request: Any) -> str:
-        call = getattr(request, "tool_call", None) or {}
-        return call.get("id", "") if isinstance(call, dict) else ""
+        return self._tool_call(request).get("id", "")
+
+    def _blocked(self, request: Any) -> ToolMessage | None:
+        reason = self._denial_reason(self._tool_name(request), self._tool_args(request))
+        if reason is None:
+            return None
+        return ToolMessage(
+            content=f"Blocked by Manta tool policy: {reason}",
+            tool_call_id=self._tool_call_id(request),
+            status="error",
+        )
 
     def wrap_tool_call(
         self,
         request: Any,
         handler: Callable[[Any], Any],
     ) -> Any:
-        tool_name = self._tool_name(request)
-        reason = self._denial_reason(tool_name)
-        if reason is not None:
-            return ToolMessage(
-                content=f"Blocked by Manta tool policy: {reason}",
-                tool_call_id=self._tool_call_id(request),
-                status="error",
-            )
-        return handler(request)
+        blocked = self._blocked(request)
+        return blocked if blocked is not None else handler(request)
 
     async def awrap_tool_call(
         self,
         request: Any,
         handler: Callable[[Any], Any],
     ) -> Any:
-        tool_name = self._tool_name(request)
-        reason = self._denial_reason(tool_name)
-        if reason is not None:
-            return ToolMessage(
-                content=f"Blocked by Manta tool policy: {reason}",
-                tool_call_id=self._tool_call_id(request),
-                status="error",
-            )
-        return await handler(request)
+        blocked = self._blocked(request)
+        return blocked if blocked is not None else await handler(request)

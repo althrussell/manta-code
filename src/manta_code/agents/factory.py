@@ -5,52 +5,31 @@ This is where a Manta agent definition becomes something the runtime can
 ``name`` / ``description`` / ``system_prompt`` / ``model``; the factory fills in
 the fields the SDK actually acts on:
 
-- ``permissions`` — ``FilesystemPermission`` rules so read-only is a real
-  filesystem boundary (read-only agents get a deny-all-writes rule).
 - ``middleware`` — a :class:`~manta_code.middleware.policy.ToolPolicyMiddleware`
-  that rejects disallowed / mutating tool calls (covers ``execute`` and custom
-  tools, which filesystem permissions cannot).
+  that rejects disallowed / mutating / out-of-policy tool calls before they run.
+  This is where ``read_only``, allow/deny lists, **and** per-path ``filesystem``
+  rules are all enforced.
 - ``interrupt_on`` — per-tool human-in-the-loop gating from the agent's
   ``approval`` list.
 - ``model`` — the pinned ``provider:endpoint``.
 
-Heavy ``deepagents`` imports happen inside :func:`compile_subagent`, so the
-registry/CLI stay importable without the ``agent`` extra; the factory is only
-called from the build hook, which runs inside the agent server where the extra
-is present.
+Why no ``permissions``? ``deepagents``' native ``FilesystemPermission`` is only
+honoured on backends without command execution; the ``deepagents-code`` runtime
+uses a sandbox backend that *provides* ``execute``, and ``FilesystemMiddleware``
+raises ``NotImplementedError`` at construction if it sees permissions there —
+crashing the agent server. So Manta enforces filesystem boundaries through the
+tool-policy middleware's ``wrap_tool_call`` instead (see ``middleware/policy``).
+
+Heavy imports happen inside :func:`compile_subagent`, so the registry/CLI stay
+importable without the ``agent`` extra; the factory is only called from the build
+hook, which runs inside the agent server where the extra is present.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from .registry import AgentDef, FsRule
-
-
-def _filesystem_permissions(defn: AgentDef) -> list[Any]:
-    """Build the ordered ``FilesystemPermission`` rules for a definition.
-
-    Order matters (first match wins in ``FilesystemMiddleware``):
-
-    1. ``read_only`` -> deny all writes first, so nothing can re-enable them.
-    2. The definition's explicit ``filesystem`` rules.
-
-    Reads with no matching rule fall through to the SDK default (allow).
-    """
-    from deepagents.middleware.filesystem import FilesystemPermission
-
-    rules: list[FsRule] = []
-    if defn.read_only:
-        rules.append(FsRule(operations=["write"], paths=["/**"], mode="deny"))
-    rules.extend(defn.filesystem)
-    return [
-        FilesystemPermission(
-            operations=list(rule.operations),
-            paths=list(rule.paths),
-            mode=rule.mode,
-        )
-        for rule in rules
-    ]
+from .registry import AgentDef
 
 
 def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
@@ -59,6 +38,7 @@ def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
         defn.read_only
         or defn.tools_allow is not None
         or bool(defn.tools_deny)
+        or bool(defn.filesystem)
     )
     if not needs_policy:
         return []
@@ -69,6 +49,7 @@ def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
             allow=defn.tools_allow,
             deny=defn.tools_deny,
             read_only=defn.read_only,
+            filesystem=defn.filesystem,
             agent_name=defn.name,
         )
     ]
@@ -98,10 +79,6 @@ def compile_subagent(
     }
     if defn.model:
         subagent["model"] = defn.model
-
-    permissions = _filesystem_permissions(defn)
-    if permissions:
-        subagent["permissions"] = permissions
 
     middleware = _tool_policy_middleware(defn)
     if extra_middleware:

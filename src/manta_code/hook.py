@@ -8,8 +8,10 @@ We wrap that one symbol so Manta can, in a single place, enrich the agent with:
 
 - **subagents** — Manta's compiled, *enforced* agents (built-ins + the user's
   registry), replacing any markdown subagent of the same name.
-- **middleware** — orchestrator-level middleware (token economy / usage ledger).
-- **store** — a persistent ``BaseStore`` for durable per-agent memory.
+- **middleware** — orchestrator-level middleware (token economy / usage ledger)
+  and per-agent recall middleware (durable memory is read by that middleware from
+  Manta's own SQLite store, *not* injected as a graph ``store=``: the
+  ``langgraph dev`` server rejects custom graph stores).
 - **tools** — Databricks-native tools (UC / SQL / jobs / system tables).
 
 Reliability is non-negotiable (ADR 0008): the wrapper degrades gracefully. If
@@ -32,6 +34,25 @@ logger = logging.getLogger("manta.hook")
 
 #: Guards against re-wrapping ``create_deep_agent``.
 _installed = False
+
+#: Delegation policy appended to the *orchestrator's* system prompt (only when no
+#: specific Manta profile is the primary agent). deepagents' default prompt steers
+#: the main agent to plan inline with ``write_todos`` and treats the ``task`` tool
+#: as optional, so without this nudge the orchestrator rarely delegates. This is a
+#: *nudge*, not a hard route — the model still decides — but it materially raises
+#: the delegation rate for planning/review work. Kept short so it doesn't crowd
+#: out the base prompt.
+ORCHESTRATOR_DELEGATION_POLICY = """\
+
+## Delegating to specialist agents (Manta)
+
+You have specialist subagents available through the `task` tool. Prefer delegating instead of doing everything yourself:
+
+- When the user asks you to **plan, design, scope, or break down** work, call `task` with `subagent_type="planning"` to produce the plan *before* implementing.
+- For **code review** of a change, call `task` with `subagent_type="review"`.
+- For a **well-scoped implementation** task, you may delegate to `subagent_type="swe"`.
+
+Each subagent is isolated: it does **not** see this conversation, so put everything it needs (files, goal, constraints) in the `task` `description`. Handle small or trivial requests yourself rather than delegating."""
 
 
 def _warn(message: str) -> None:
@@ -87,20 +108,102 @@ def build_manta_subagents() -> list[dict[str, Any]]:
     return [compile_subagent(d, extra_middleware=_agent_extra_middleware(d)) for d in defs]
 
 
-def build_orchestrator_middleware() -> list[Any]:
-    """Orchestrator-level middleware: token economy/ledger, then cost-aware routing.
+def active_agent_name() -> str | None:
+    """Return the active top-level profile name, or ``None`` for the base agent.
 
-    Order matters: economy (accounting/budget) is outermost so it sees the final
-    model choice; routing runs closer to the call so its escalation is what gets
-    priced. Each piece is guarded so a missing module is simply skipped.
+    ``deepagents-code`` passes the selected profile to the server subprocess as
+    ``DEEPAGENTS_CODE_SERVER_ASSISTANT_ID``. When the user picks a Manta agent in
+    the ``/agents`` picker, this is how the build hook learns which one is the
+    *primary* agent so it can enforce that agent's boundaries at the top level.
+    The base ``agent`` profile is not a Manta agent, so it returns ``None``.
+    """
+    import os
+
+    try:
+        from deepagents_code._env_vars import SERVER_ENV_PREFIX
+
+        key = f"{SERVER_ENV_PREFIX}ASSISTANT_ID"
+    except Exception:  # noqa: BLE001 - fall back to the literal env var name
+        key = "DEEPAGENTS_CODE_SERVER_ASSISTANT_ID"
+    name = os.environ.get(key)
+    if not name or name == "agent":
+        return None
+    return name
+
+
+def _active_profile_def() -> Any | None:
+    """Resolve the active profile name to a merged :class:`AgentDef`, or ``None``."""
+    name = active_agent_name()
+    if not name:
+        return None
+    try:
+        from .agents.defaults import merged_agents
+        from .agents.registry import list_agents
+
+        return next((a for a in merged_agents(list_agents()) if a.name == name), None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def build_orchestrator_middleware() -> list[Any]:
+    """Top-level (primary agent) middleware: enforcement + economy + routing.
+
+    When the active profile is a Manta agent (the user selected it in the
+    ``/agents`` picker), this enforces *that agent's* boundaries on the primary
+    loop — its model pin, tool policy (read-only / allow / deny / filesystem),
+    memory recall for its namespace, and economy attributed to it (with its
+    budget caps). Otherwise it applies the generic orchestrator accounting.
+    Routing (cost-aware escalation) is applied in both cases.
+
+    Economy is attributed to the active profile *instead of* a separate
+    orchestrator instance so a call is never double-counted in the ledger. Each
+    piece is guarded so a missing module is simply skipped.
     """
     middleware: list[Any] = []
-    try:
-        from .middleware.economy import orchestrator_middleware
+    defn = _active_profile_def()
 
-        middleware.extend(orchestrator_middleware())
-    except Exception:  # noqa: BLE001
-        pass
+    if defn is not None:
+        # Model pin first (outermost) so accounting/routing below see the pinned
+        # model, and the primary loop actually runs on the profile's model — not
+        # just delegated subagents.
+        try:
+            from .middleware.routing import agent_model_pin_middleware
+
+            mw = agent_model_pin_middleware(defn)
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .agents.factory import _tool_policy_middleware
+
+            middleware.extend(_tool_policy_middleware(defn))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .agents.memory import agent_memory_middleware
+
+            mw = agent_memory_middleware(defn)
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .middleware.economy import agent_budget_middleware
+
+            mw = agent_budget_middleware(defn)
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        try:
+            from .middleware.economy import orchestrator_middleware
+
+            middleware.extend(orchestrator_middleware())
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         from .middleware.routing import default_routing_middleware
 
@@ -108,16 +211,6 @@ def build_orchestrator_middleware() -> list[Any]:
     except Exception:  # noqa: BLE001
         pass
     return middleware
-
-
-def build_store() -> Any | None:
-    """The persistent ``BaseStore`` for durable memory (Phase 3)."""
-    try:
-        from .agents.memory import build_memory_store
-
-        return build_memory_store()
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def build_databricks_tools() -> list[Any]:
@@ -130,12 +223,43 @@ def build_databricks_tools() -> list[Any]:
         return []
 
 
+def _maybe_add_delegation_policy(kwargs: dict[str, Any]) -> None:
+    """Append the delegation nudge to the orchestrator's system prompt.
+
+    Only applies to the **base orchestrator** (no specific Manta profile selected
+    as primary): when the user has picked an agent like ``swe`` as the primary
+    loop, that agent's own prompt governs and a "delegate to swe" nudge would be
+    circular. Appends rather than replaces, and only when ``create_cli_agent``
+    already supplied a non-empty ``system_prompt`` string — so we never clobber
+    deepagents' rich default by turning a ``None`` (compute-the-default sentinel)
+    into our short policy. Guarded; a failure leaves the prompt untouched.
+    """
+    try:
+        if active_agent_name() is not None:
+            return
+        prompt = kwargs.get("system_prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return
+        if "Delegating to specialist agents (Manta)" in prompt:
+            return
+        kwargs["system_prompt"] = prompt + "\n" + ORCHESTRATOR_DELEGATION_POLICY
+    except Exception:  # noqa: BLE001 - steering is best-effort, never block launch
+        logger.debug("Manta delegation-policy injection failed", exc_info=True)
+
+
 def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Inject Manta's subagents, middleware, store, and tools into ``kwargs``.
+    """Inject Manta's subagents, middleware, and tools into ``kwargs``.
 
     Mutates and returns ``kwargs`` (the dict passed to ``create_deep_agent``).
     Pure enough to unit-test directly: no global state beyond the registry it
-    reads. Manta subagents replace any inherited subagent of the same name.
+    reads. Manta subagents replace any inherited subagent of the same name. For
+    the base orchestrator it also appends a short delegation policy to the system
+    prompt so planning/review work is routed to the specialist agents.
+
+    Note: Manta does **not** inject a graph ``store=``. Durable memory is read by
+    the per-agent recall middleware from Manta's own SQLite store. The
+    ``langgraph dev`` server that runs the agent rejects graphs that carry a
+    custom ``BaseStore``, so injecting one here would crash the server at startup.
     """
     manta_subagents = build_manta_subagents()
     if manta_subagents:
@@ -151,9 +275,7 @@ def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         # everything below.
         kwargs["middleware"] = [*orchestrator_mw, *list(kwargs.get("middleware") or ())]
 
-    store = build_store()
-    if store is not None and kwargs.get("store") is None:
-        kwargs["store"] = store
+    _maybe_add_delegation_policy(kwargs)
 
     extra_tools = build_databricks_tools()
     if extra_tools:

@@ -37,17 +37,34 @@ fork — composed of:
    (model, tools allow/deny, filesystem permissions, approval policy, skills,
    subagents, memory, budget, Databricks scopes) plus CRUD CLI.
 2. **A factory** that compiles a Manta agent definition into the SDK's full
-   `SubAgent` dict — so "read-only" is *enforced* via `FilesystemPermission`,
-   not merely prompted.
+   `SubAgent` dict — so "read-only" and per-path filesystem rules are *enforced*
+   by a tool-policy middleware's `wrap_tool_call` (not merely prompted). We
+   deliberately do **not** emit `FilesystemPermission`: `deepagents`'
+   `FilesystemMiddleware` raises `NotImplementedError` when given permissions on
+   an execute-capable sandbox backend (the one `deepagents-code` runs), which
+   would crash the agent server at start.
 3. **A build hook** that wraps the module-level
    `deepagents_code.agent.create_deep_agent` binding (the same monkeypatch
    pattern already used by `_install_subagent_databricks_resolver`) to inject
-   Manta's compiled agents, middleware, a persistent `store`, and Databricks
-   tools — with a **fallback to vanilla launch** if the patch target is missing.
+   Manta's compiled agents, middleware, and Databricks tools — with a
+   **fallback to vanilla launch** if the patch target is missing. Durable memory
+   is **not** injected as a graph `store=`: the `langgraph dev` API server that
+   `deepagents-code` runs rejects graphs carrying a custom `BaseStore`, so the
+   recall middleware reads Manta's own SQLite store directly instead.
 4. **Middleware** for a trust-first token economy (accounting, warn →
    approve-to-continue, cost-aware routing) and policy enforcement.
 5. **Databricks-native tools** (UC catalog/lineage, SQL, jobs/DABs, system
    tables), governed by the caller's UC permissions.
+6. **Profile sync** (`agents/profiles.py`): the registry is projected into both
+   `deepagents-code` agent tiers from one source of truth — *subagents*
+   (delegation, via the build hook) and *profiles* (`~/.deepagents/<name>/`, the
+   in-app `/agents` picker). Profiles are generated artifacts, refreshed each
+   launch and pruned when an agent is deleted; user-authored profiles and the
+   base `agent` are never touched. This **retires** the legacy prompt-only
+   markdown subagents (cleaned up once, on first launch). When a Manta agent is
+   selected as the top-level profile, the build hook reads
+   `DEEPAGENTS_CODE_SERVER_ASSISTANT_ID` and enforces *its* policy/memory/budget
+   on the primary loop (not just on delegated subagents).
 
 The single seam is `create_deep_agent`. `create_cli_agent` calls it with
 `subagents=`, `middleware=`, `tools=`, `backend=`; wrapping that one symbol lets
@@ -71,12 +88,14 @@ first-class feature, not a footnote:
 ## Consequences
 
 - New modules: `manta_code/reliability.py`, `manta_code/hook.py`,
-  `manta_code/agents/` (registry, factory, memory, usage, importer, defaults),
-  `manta_code/middleware/` (economy, routing, policy), `manta_code/databricks_tools.py`,
-  and `evals/`.
-- `manta agents` grows `create`/`edit`/`delete`/`show`/`list`; new `manta cost`
-  and `manta budget` surface token/cost analytics.
-- Agent definitions live at `~/.manta/agents/<name>/` (TOML + `AGENTS.md`),
-  distinct from the upstream `~/.deepagents/agent/agents/` markdown dir.
+  `manta_code/agents/` (registry, factory, memory, usage, importer, defaults,
+  profiles), `manta_code/middleware/` (economy, routing, policy),
+  `manta_code/databricks_tools.py`, and `evals/`.
+- `manta agents` grows `create`/`edit`/`delete`/`show`/`list`/`sync`; new
+  `manta cost` and `manta budget` surface token/cost analytics.
+- Agent definitions live at `~/.manta/agents/<name>/` (TOML + `AGENTS.md`), the
+  single source of truth. They are projected into top-level
+  `~/.deepagents/<name>/` profiles (the `/agents` picker). The legacy prompt-only
+  `~/.deepagents/agent/agents/` markdown subagents are retired.
 - Enterprise/fleet management (central registry, per-user budgets, MLflow audit,
   RBAC) is explicitly **out of scope** here and sketched as a later phase.

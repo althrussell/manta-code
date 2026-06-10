@@ -51,17 +51,21 @@ The pure helpers (config merge, env build, argv build) are unit-tested in
 `tests/test_dcode.py` without launching a subprocess; only `launch()` has side
 effects.
 
-### `src/manta_code/subagents.py` — planning / SWE / review agents
+### Registry-backed agents — two tiers from one source of truth
 
-`deepagents-code` already implements multi-agent delegation: the main agent gets
-a `task` tool and dispatches to child agents defined as markdown files under
-`~/.deepagents/<agent>/agents/<name>/AGENTS.md` (YAML frontmatter +
-system-prompt body). Planning itself is the built-in `write_todos` tool on the
-main agent — not a separate agent type.
+`deepagents-code` exposes agents in **two** tiers:
 
-`ensure_manta_subagents()` provisions three opinionated defaults so `manta` has
-a plan → build → review division of labour out of the box, each pinned to the
-right Databricks model for its role:
+1. **Profiles** — a directory `~/.deepagents/<name>/AGENTS.md`. These are the
+   entries the in-app `/agents` picker lists; selecting one restarts the session
+   with that agent as the *primary* loop.
+2. **Subagents** — delegation targets the orchestrator dispatches to via the
+   `task` tool. Planning itself is the built-in `write_todos` tool on the main
+   agent — not a separate agent type.
+
+Manta's registry (`~/.manta/agents/`, the `AgentDef` schema in
+`agents/registry.py`) is the single source of truth for **both** tiers. The
+built-in plan → build → review division of labour ships out of the box, each
+pinned to the right Databricks model for its role:
 
 | Role | Agent | Model field | Notes |
 | --- | --- | --- | --- |
@@ -70,13 +74,30 @@ right Databricks model for its role:
 | Build / SWE | `swe` | `databricks:databricks-gpt-5-5` | implements changes hands-on (edit files, run tests via `execute`) |
 | Review | `review` | `databricks:databricks-gemini-3-1-pro` | read-only review that reports findings; a different vendor catches what the author model misses |
 
-Each subagent's `SubagentSpec.model` becomes a `model:` line in the rendered
-AGENTS.md frontmatter (`provider:endpoint` format), which `deepagents-code`'s
-`_parse_subagent_file` reads to run that subagent on its pinned endpoint.
-Provisioning is **once, then hands-off** — a
-`~/.deepagents/.state/manta_subagents_provisioned` marker means later user edits
-and deletions are never clobbered, and a pre-existing file of the same name is
-left untouched. `launch()` calls it alongside `ensure_dcode_config()`.
+**Profile tier (`agents/profiles.py`).** `sync_agent_profiles()` projects every
+registry agent (built-ins + user-created) into a top-level
+`~/.deepagents/<name>/AGENTS.md` so it appears in the picker. Profiles are
+**generated artifacts**: refreshed from the registry on each `launch()` /
+`run_headless()` (you edit agents with `manta agents edit`, not by hand). A
+`<!-- managed-by: manta-agents … -->` sentinel marks Manta-generated files, so a
+refresh never clobbers a user-authored profile of the same name, never touches
+the base `agent` profile, and prunes profiles for agents you've deleted. The
+legacy prompt-only markdown subagents this replaced are removed once, on first
+launch, by `clean_legacy_subagents()` (only when unmodified). Run
+`manta agents sync` to regenerate on demand.
+
+**Subagent tier (build hook).** `enrich_kwargs()` compiles each registry agent
+into an *enforced* `deepagents` `SubAgent` dict (tool policy, filesystem rules,
+memory, budget) and injects them so the orchestrator can delegate to them.
+
+**Top-level enforcement.** When you select a Manta agent in the picker,
+`deepagents-code` passes its name to the server as
+`DEEPAGENTS_CODE_SERVER_ASSISTANT_ID`. The build hook's `active_agent_name()`
+reads it and applies that agent's tool-policy + memory + economy middleware to
+the *primary* loop — so picking `review` makes the whole session read-only, not
+just a delegated subagent. Economy is attributed to the active profile (with its
+budget caps) instead of a separate `orchestrator` instance, so a call is never
+double-counted in the ledger.
 
 **Why a resolver shim is needed.** The main agent's `databricks:<endpoint>`
 model works because `deepagents-code`'s `create_model` honors the provider
@@ -102,10 +123,10 @@ importers in `middleware.subagents`/`summarization`/`rubric` and any
 later-imported module) and rebinds the name on every already-imported
 `deepagents` module that still points at the original (`_rebind_imported_resolvers`).
 
-`review`'s read-only contract is **prompt-enforced**: markdown subagents can set
-`name`/`description`/`model` but not `tools`/`permissions`, so hard tool
-sandboxing would require the Python `SubAgent(permissions=...)` path (a future
-launcher extension), not markdown.
+`review`'s read-only contract is **really enforced**, not prompt-only: the build
+hook compiles it as a Python `SubAgent` with Manta's `ToolPolicyMiddleware`,
+which blocks `execute` and all filesystem writes in `wrap_tool_call`. Selecting
+`review` as the top-level profile applies the same policy to the primary loop.
 
 ### `src/manta_code/main.py` — argument routing
 
@@ -134,7 +155,7 @@ rather than a parallel pipeline.
 (`-n`) with CI-safe defaults: a **bounded `--timeout`** (default 600s), a
 `--max-turns` cap (default 50), and quiet/buffered output for clean piping
 (`--json text|stream-json` for machine output). The same config/onboarding/
-subagent provisioning as `launch` runs first, so Manta's control plane (enforced
+profile sync as `launch` runs first, so Manta's control plane (enforced
 agents, token economy + usage ledger) applies headlessly too. `manta run` returns
 the runtime's exit code (124 on timeout) instead of replacing the process, so
 scripts and CI can branch on it.

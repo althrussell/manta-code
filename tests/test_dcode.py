@@ -82,6 +82,39 @@ def test_merge_does_not_duplicate_suppressed_warning():
     assert merged["warnings"]["suppress"] == ["tavily"]
 
 
+# --- branding theme (Databricks red) ------------------------------------------
+
+
+def test_merge_registers_manta_theme_and_sets_default():
+    merged = dcode.merge_databricks_provider({}, ["ep-a"])
+    assert merged["themes"][dcode.MANTA_THEME_KEY]["primary"] == dcode.DATABRICKS_RED
+    assert merged["themes"][dcode.MANTA_THEME_KEY]["dark"] is True
+    assert merged["ui"]["theme"] == dcode.MANTA_THEME_KEY
+
+
+def test_merge_respects_existing_theme_preference():
+    existing = {"ui": {"theme": "dracula"}}
+    merged = dcode.merge_databricks_provider(existing, ["ep-a"])
+    # User's saved theme choice is never overridden...
+    assert merged["ui"]["theme"] == "dracula"
+    # ...but the manta theme is still registered so it can be selected.
+    assert dcode.MANTA_THEME_KEY in merged["themes"]
+
+
+def test_merge_preserves_other_user_themes():
+    existing = {"themes": {"solarized": {"label": "Solarized", "primary": "#268BD2"}}}
+    merged = dcode.merge_databricks_provider(existing, ["ep-a"])
+    assert merged["themes"]["solarized"] == {"label": "Solarized", "primary": "#268BD2"}
+    assert merged["themes"][dcode.MANTA_THEME_KEY]["primary"] == dcode.DATABRICKS_RED
+
+
+def test_merge_theme_is_idempotent():
+    cfg = dcode.merge_databricks_provider({}, ["ep-a"])
+    again = dcode.merge_databricks_provider(cfg, ["ep-a"])
+    assert again["themes"][dcode.MANTA_THEME_KEY]["primary"] == dcode.DATABRICKS_RED
+    assert again["ui"]["theme"] == dcode.MANTA_THEME_KEY
+
+
 # --- build_launch_env ----------------------------------------------------------
 
 
@@ -226,6 +259,23 @@ def test_versioned_appends_matching_version_tag():
     out = _boot._versioned("ART", "9.9.9")
     assert out.startswith("ART")
     assert "v9.9.9" in out
+
+
+def test_composed_banner_stacks_ray_over_wordmark():
+    # Both splash variants carry the manta-ray mark above the wordmark.
+    assert "◆" in _boot.MANTA_UNICODE_BANNER  # layered-diamond body
+    assert _boot.MANTA_WORDMARK_UNICODE.splitlines()[-1] in _boot.MANTA_UNICODE_BANNER
+    assert "<####>" in _boot.MANTA_ASCII_BANNER  # ascii diamond body
+    assert "|_|  |_/_/" in _boot.MANTA_ASCII_BANNER  # ascii wordmark tail
+
+
+def test_compose_banner_centers_ray():
+    ray = "xx"
+    wordmark = "\n" + "#" * 10 + "\n"
+    out = _boot._compose_banner(ray, wordmark)
+    # ray (width 2) centered over wordmark (width 10) -> 4 leading spaces.
+    assert "    xx" in out
+    assert "##########" in out
 
 
 def test_apply_branding_overrides_upstream_banner():

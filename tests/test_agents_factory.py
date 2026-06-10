@@ -27,34 +27,24 @@ def test_model_pin_is_emitted():
     assert sub["model"] == "databricks:databricks-claude-opus-4-8"
 
 
-def test_read_only_denies_writes_and_adds_policy():
-    from deepagents.middleware.filesystem import FilesystemPermission
-
-    sub = compile_subagent(AgentDef(name="review", read_only=True))
-    perms = sub["permissions"]
-    assert isinstance(perms[0], FilesystemPermission)
-    # First rule denies all writes.
-    assert perms[0].mode == "deny"
-    assert "write" in perms[0].operations
-    # A tool-policy middleware enforces the non-filesystem half (execute, etc.).
+def test_read_only_adds_policy_without_permissions():
+    # We never emit FilesystemPermission: the execute-capable sandbox backend
+    # rejects it. read-only is enforced entirely by the tool-policy middleware.
     from manta_code.middleware.policy import ToolPolicyMiddleware
 
+    sub = compile_subagent(AgentDef(name="review", read_only=True))
+    assert "permissions" not in sub
     assert any(isinstance(m, ToolPolicyMiddleware) for m in sub["middleware"])
 
 
-def test_explicit_filesystem_rules_follow_read_only_rule():
-    sub = compile_subagent(
-        AgentDef(
-            name="scoped",
-            read_only=True,
-            filesystem=[FsRule(operations=["read"], paths=["/repo/src/**"], mode="allow")],
-        )
-    )
-    perms = sub["permissions"]
-    assert len(perms) == 2
-    assert perms[0].mode == "deny"  # read-only write-deny first
-    assert perms[0].paths == ["/**"]
-    assert perms[1].paths == ["/repo/src/**"]
+def test_explicit_filesystem_rules_go_to_policy_middleware():
+    from manta_code.middleware.policy import ToolPolicyMiddleware
+
+    rule = FsRule(operations=["read"], paths=["/repo/src/**"], mode="allow")
+    sub = compile_subagent(AgentDef(name="scoped", filesystem=[rule]))
+    assert "permissions" not in sub
+    policy = next(m for m in sub["middleware"] if isinstance(m, ToolPolicyMiddleware))
+    assert policy._filesystem == [rule]
 
 
 def test_allow_and_deny_lists_add_policy_middleware():
