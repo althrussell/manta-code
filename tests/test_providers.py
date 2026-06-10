@@ -114,3 +114,75 @@ def test_subagent_resolver_uses_registry_for_registered_providers():
         assert _models.resolve_model("test-gw:chat/default") == "gw::chat/default"
     finally:
         providers._RESOLVERS.pop("test-gw", None)
+
+
+# --- gateway surface (Phase D) -----------------------------------------------------
+
+
+class _Obj:
+    def __init__(self, **attrs):
+        for key, value in attrs.items():
+            setattr(self, key, value)
+
+
+def _fake_detail(name, *, usage=True, rate_limits=False, external=None, foundation=True):
+    gw = _Obj(
+        usage_tracking_config=_Obj(enabled=True) if usage else None,
+        rate_limits=["limit"] if rate_limits else [],
+        guardrails=None,
+        fallback_config=None,
+        inference_table_config=None,
+    )
+    entity = _Obj(
+        foundation_model=object() if foundation else None,
+        external_model=_Obj(provider=external) if external else None,
+    )
+    return _Obj(
+        name=name, ai_gateway=gw, config=_Obj(served_entities=[entity])
+    )
+
+
+def test_gateway_inspect_foundation_endpoint():
+    from manta_code.providers.gateway import _inspect_endpoint
+
+    info = _inspect_endpoint(_fake_detail("databricks-gpt-5-5", rate_limits=True))
+    assert info.gateway_governed
+    assert info.features == ("usage-tracking", "rate-limits")
+    assert info.external_provider is None
+    assert info.source == "databricks foundation model"
+
+
+def test_gateway_inspect_external_endpoint():
+    from manta_code.providers.gateway import _inspect_endpoint
+
+    info = _inspect_endpoint(
+        _fake_detail("my-anthropic", external="anthropic", foundation=False)
+    )
+    assert info.external_provider == "anthropic"
+    assert "external, via gateway" in info.source
+
+
+def test_gateway_surface_providers_and_governance():
+    from manta_code.providers.gateway import GatewaySurface, _inspect_endpoint
+
+    surface = GatewaySurface(
+        endpoints=[
+            _inspect_endpoint(_fake_detail("databricks-gpt-5-5")),
+            _inspect_endpoint(_fake_detail("ext-oai", external="openai", foundation=False)),
+            _inspect_endpoint(_fake_detail("bare", usage=False)),
+        ]
+    )
+    assert surface.providers == ["databricks", "openai"]
+    assert len(surface.governed) == 2
+    assert [e.name for e in surface.external] == ["ext-oai"]
+
+
+def test_gateway_discovery_empty_on_auth_failure(monkeypatch):
+    from manta_code.providers import gateway as G
+    from manta_code import auth
+
+    def _boom(profile=None):
+        raise RuntimeError("no sdk")
+
+    monkeypatch.setattr(auth, "resolve_workspace_client", _boom)
+    assert G.discover_gateway_surface().endpoints == []

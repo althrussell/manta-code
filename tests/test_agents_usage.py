@@ -202,3 +202,37 @@ def test_advise_quiet_on_healthy_ledger(tmp_path):
         path=db,
     )
     assert U.advise(path=db) == []
+
+
+def test_effective_pricing_merges_config_overrides(tmp_path, monkeypatch):
+    # ADR 0010 Phase D: pricing is pluggable via [pricing] in .manta/config.toml.
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[pricing."my-finetune"]\ninput = 2.0\noutput = 8.0\n'
+        '[pricing."claude-opus"]\ninput = 10.0\noutput = 50.0\n',
+        encoding="utf-8",
+    )
+    U.clear_pricing_cache()
+    try:
+        assert U.price_for("databricks-my-finetune-v2").input == 2.0
+        # Config overrides the built-in claude-opus rate.
+        assert U.price_for("databricks-claude-opus-4-8").input == 10.0
+        # Untouched built-ins survive the merge.
+        assert U.price_for("databricks-gpt-5-5").input == 1.25
+    finally:
+        U.clear_pricing_cache()
+
+
+def test_effective_pricing_skips_malformed_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[pricing."broken"]\nnonsense = true\n', encoding="utf-8"
+    )
+    U.clear_pricing_cache()
+    try:
+        assert U.price_for("broken-model") is None  # skipped, not fatal
+        assert U.price_for("databricks-claude-opus-4-8") is not None
+    finally:
+        U.clear_pricing_cache()

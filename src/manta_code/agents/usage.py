@@ -78,15 +78,52 @@ DEFAULT_PRICING: dict[str, Price] = {
 }
 
 
+#: Cache of the merged built-in + config pricing table (``None`` = unloaded).
+_effective_pricing_cache: dict[str, Price] | None = None
+
+
+def effective_pricing() -> dict[str, Price]:
+    """Built-in pricing merged with the user's ``[pricing]`` config overrides.
+
+    ADR 0010 Phase D: pricing is pluggable — a config entry replaces or adds a
+    substring-matched key, so private endpoints and rate changes don't need a
+    Manta release. Cached per process; guarded (a malformed config entry is
+    skipped, never fatal).
+    """
+    global _effective_pricing_cache  # noqa: PLW0603 - module-level cache
+    if _effective_pricing_cache is not None:
+        return _effective_pricing_cache
+    table = dict(DEFAULT_PRICING)
+    try:
+        from ..config import load_config
+
+        for key, fields in (load_config().pricing or {}).items():
+            try:
+                table[key.lower()] = Price(**fields)
+            except Exception:  # noqa: BLE001 - skip a malformed entry
+                continue
+    except Exception:  # noqa: BLE001 - config trouble keeps the built-ins
+        pass
+    _effective_pricing_cache = table
+    return table
+
+
+def clear_pricing_cache() -> None:
+    """Reset the merged pricing cache (tests / config reload)."""
+    global _effective_pricing_cache  # noqa: PLW0603
+    _effective_pricing_cache = None
+
+
 def price_for(model: str | None, pricing: dict[str, Price] | None = None) -> Price | None:
     """Return the best matching :class:`Price` for ``model`` or ``None``.
 
     Matching is by longest substring key so ``...claude-opus-4-8`` matches the
-    ``claude-opus`` entry before the generic ``claude`` entry.
+    ``claude-opus`` entry before the generic ``claude`` entry. With no explicit
+    ``pricing`` table, the merged built-in + config table applies.
     """
     if not model:
         return None
-    table = pricing or DEFAULT_PRICING
+    table = pricing or effective_pricing()
     name = model.lower()
     best_key: str | None = None
     for key in table:

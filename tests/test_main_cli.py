@@ -402,3 +402,32 @@ def test_cost_advise_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Spend advice" in result.stdout
     assert "Scaffolding" in result.stdout
+
+
+def test_agents_set_model_validates_against_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setattr(auth, "databricks_configured", lambda profile=None: True)
+    monkeypatch.setattr(
+        auth, "list_serving_chat_endpoints", lambda profile=None: ["databricks-gpt-5-5"]
+    )
+    result = runner.invoke(app, ["agents", "set-model", "review", "databricks:nope-model"])
+    assert result.exit_code == 1
+    assert "not found in this workspace" in result.stdout
+
+    result = runner.invoke(app, ["agents", "set-model", "review", "databricks-gpt-5-5"])
+    assert result.exit_code == 0
+    assert "Pinned" in result.stdout
+    from manta_code.agents.registry import load_agent
+
+    assert load_agent("review").model == "databricks:databricks-gpt-5-5"
+
+
+def test_agents_set_model_non_databricks_skips_verify(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    result = runner.invoke(
+        app, ["agents", "set-model", "swe", "anthropic:claude-opus-4-8"]
+    )
+    assert result.exit_code == 0
+    from manta_code.agents.registry import load_agent
+
+    assert load_agent("swe").model == "anthropic:claude-opus-4-8"

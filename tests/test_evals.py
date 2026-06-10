@@ -92,4 +92,55 @@ def test_quality_regression_is_not_a_win():
 def test_demo_main_returns_zero():
     from evals.__main__ import main
 
-    assert main() == 0
+    assert main([]) == 0
+
+
+def test_live_mode_rejects_unknown_task(capsys):
+    from evals.__main__ import main
+
+    assert main(["--live", "--task", "not-a-task"]) == 2
+    assert "no matching tasks" in capsys.readouterr().err
+
+
+def test_live_solver_grades_run_output(monkeypatch):
+    # The live solver shells out to `manta run` and prices from the ledger;
+    # stub both so the wiring is testable offline.
+    import subprocess
+
+    from evals import live as L
+    from evals.tasks import BENCHMARK
+
+    class _Done:
+        returncode = 0
+        stdout = "SELECT * FROM sales ORDER BY total DESC LIMIT 10"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr(L, "_ledger_window", lambda since: (0.0123, 456, "databricks-gpt-oss-120b"))
+
+    task = next(t for t in BENCHMARK if t.id == "readonly-sql")
+    output = L.live_solver()(task)
+    assert output.cost_usd == 0.0123
+    assert output.tokens == 456
+    grade = task.grader(output.text)
+    assert grade.score > 0.5  # the real grader runs on the captured stdout
+
+
+def test_live_mode_renders_summary(monkeypatch, capsys):
+    import subprocess
+
+    from evals import live as L
+
+    class _Done:
+        returncode = 0
+        stdout = "SELECT 1"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr(L, "_ledger_window", lambda since: (0.01, 100, "m"))
+    from evals.__main__ import main
+
+    assert main(["--live", "--task", "readonly-sql"]) == 0
+    out = capsys.readouterr().out
+    assert "Live eval" in out
+    assert "real ledger figures" in out

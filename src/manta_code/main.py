@@ -26,7 +26,18 @@ console = Console()
 #: Manta's own subcommands. Anything else (bare invocation, unknown flags) is
 #: treated as a request to launch the interactive runtime and is forwarded.
 KNOWN_SUBCOMMANDS = frozenset(
-    {"doctor", "init", "agents", "cost", "budget", "run", "watch", "task", "status"}
+    {
+        "doctor",
+        "init",
+        "agents",
+        "cost",
+        "budget",
+        "run",
+        "watch",
+        "task",
+        "status",
+        "gateway",
+    }
 )
 
 
@@ -527,6 +538,71 @@ def agents_edit(name: str = typer.Argument(..., help="Agent name")) -> None:
     console.print(f"[green]Saved edits to '{name}'.[/green]")
 
 
+@agents_app.command("set-model")
+def agents_set_model(
+    name: str = typer.Argument(..., help="Agent name."),
+    model: str = typer.Argument(
+        ..., help="Model ref (databricks:<endpoint>, anthropic:<model>, or bare endpoint)."
+    ),
+    verify: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help="Check databricks: refs against the live workspace's endpoints.",
+    ),
+) -> None:
+    """Switch an agent's pinned model — takes effect on its next call.
+
+    The pin resolves through the provider registry, so any registered provider
+    (and anything langchain resolves natively) is valid. A built-in agent is
+    materialized into your registry first so the change sticks.
+    """
+    from .agents.registry import agent_exists, save_agent
+    from .providers import parse_model_ref
+
+    defn, _source = _resolve_agent(name)
+    if defn is None:
+        console.print(f"[red]No Manta agent named '{name}'.[/red]")
+        raise typer.Exit(code=1)
+
+    ref = parse_model_ref(model)
+    if ref is None:
+        # Bare endpoint name: default to the Databricks provider.
+        model = f"databricks:{model}"
+        ref = parse_model_ref(model)
+
+    if verify and ref is not None and ref.provider == "databricks":
+        from .auth import databricks_configured, list_serving_chat_endpoints
+
+        if databricks_configured():
+            live = list_serving_chat_endpoints()
+            if live and ref.model not in live:
+                near = [e for e in live if ref.model.split("-")[-1] in e][:5]
+                console.print(
+                    f"[red]Endpoint '{ref.model}' not found in this workspace.[/red]"
+                )
+                if near:
+                    console.print(f"[dim]Close matches: {', '.join(near)}[/dim]")
+                console.print("[dim]Override with --no-verify if intentional.[/dim]")
+                raise typer.Exit(code=1)
+
+    if not agent_exists(name):
+        console.print(f"[dim]Copied built-in '{name}' into your registry.[/dim]")
+    defn.model = model
+    save_agent(defn)
+    try:
+        from .agents.defaults import merged_agents
+        from .agents.profiles import sync_agent_profiles
+        from .agents.registry import list_agents
+
+        sync_agent_profiles(merged_agents(list_agents()))
+    except Exception:  # noqa: BLE001 - profile sync is best-effort
+        pass
+    console.print(
+        f"Pinned [bold]{name}[/bold] to [bold]{model}[/bold] — applies from the "
+        "next session (or /restart in a running one)."
+    )
+
+
 @agents_app.command("delete")
 def agents_delete(
     name: str = typer.Argument(..., help="Agent name"),
@@ -824,6 +900,50 @@ def run(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     raise typer.Exit(code=code)
+
+
+@app.command()
+def gateway(
+    ctx: typer.Context,
+    limit: int = typer.Option(100, "--limit", help="Max endpoints to inspect."),
+) -> None:
+    """Show the AI Gateway surface: brokered providers and governance per endpoint.
+
+    Inspects every chat serving endpoint for its gateway posture — usage
+    tracking, rate limits, guardrails, fallbacks — and which underlying vendor
+    serves it (Databricks-hosted or an external provider brokered through the
+    gateway). One live ``get`` per endpoint, so this is an on-demand view.
+    """
+    profile = (ctx.obj or {}).get("profile")
+    from .auth import databricks_configured
+    from .providers.gateway import discover_gateway_surface
+
+    if not databricks_configured(profile):
+        console.print(
+            "[yellow]Databricks is not configured — no gateway surface to "
+            "inspect.[/yellow] `databricks auth login` to enable."
+        )
+        raise typer.Exit(code=1)
+
+    with console.status("Inspecting serving endpoints…"):
+        surface = discover_gateway_surface(profile, limit=limit)
+    if not surface.endpoints:
+        console.print("[yellow]No chat endpoints found (or not authenticated).[/yellow]")
+        raise typer.Exit(code=1)
+
+    table = Table(title="AI Gateway surface (chat endpoints)")
+    table.add_column("Endpoint", style="bold")
+    table.add_column("Source")
+    table.add_column("Gateway governance")
+    for info in surface.endpoints:
+        feats = ", ".join(info.features) if info.features else "[dim]none[/dim]"
+        table.add_row(info.name, info.source, feats)
+    console.print(table)
+    console.print(
+        f"Providers brokered: [bold]{', '.join(surface.providers)}[/bold] • "
+        f"{len(surface.governed)}/{len(surface.endpoints)} endpoints "
+        "gateway-governed"
+    )
 
 
 task_app = typer.Typer(
