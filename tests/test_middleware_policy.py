@@ -39,6 +39,21 @@ def test_read_only_blocks_execute_and_writes():
         assert "read-only" in result.content
 
 
+def test_read_only_denial_names_profile_and_exit_step():
+    # The block must be self-describing: which agent, and how to leave it.
+    mw = ToolPolicyMiddleware(read_only=True, agent_name="planning")
+    result = mw.wrap_tool_call(_Req("execute"), _ran)
+    assert "planning" in result.content  # names the active profile
+    assert "/agents" in result.content  # tells the user the exit step
+    assert "swe" in result.content  # names a writable alternative
+
+
+def test_read_only_denial_without_name_is_generic():
+    mw = ToolPolicyMiddleware(read_only=True)
+    result = mw.wrap_tool_call(_Req("execute"), _ran)
+    assert "this read-only agent" in result.content
+
+
 def test_read_only_allows_reads():
     mw = ToolPolicyMiddleware(read_only=True)
     result = mw.wrap_tool_call(_Req("read_file"), _ran)

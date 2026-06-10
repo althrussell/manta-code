@@ -126,10 +126,17 @@ class ToolPolicyMiddleware(AgentMiddleware):
 
     def _denial_reason(self, tool_name: str, args: dict[str, Any]) -> str | None:
         if self._read_only and tool_name in READ_ONLY_DENIED_TOOLS:
+            label = (
+                f"the read-only '{self._agent_name}' agent"
+                if self._agent_name
+                else "this read-only agent"
+            )
             return (
-                f"'{tool_name}' is blocked: this agent is read-only and may not "
-                "modify files or run state-changing commands. Describe the change "
-                "instead of applying it."
+                f"'{tool_name}' is blocked: {label} may not modify files or run "
+                "state-changing commands. To make changes, tell the user to switch "
+                "to a writable agent (the base agent, or `swe`) via the /agents "
+                "picker — switching restarts the session. Otherwise, describe the "
+                "change instead of applying it."
             )
         if tool_name in self._deny:
             return f"'{tool_name}' is not permitted for this agent (deny-list)."
