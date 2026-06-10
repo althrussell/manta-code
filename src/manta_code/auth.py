@@ -64,6 +64,25 @@ def resolve_profile(explicit: str | None = None) -> str | None:
     return None
 
 
+def databricks_configured(explicit_profile: str | None = None) -> bool:
+    """Return ``True`` when a Databricks auth context is plausibly available.
+
+    "Databricks-first, not Databricks-only" (ADR 0010): when this returns
+    ``False``, Manta skips endpoint discovery, the Databricks model default,
+    and Databricks tool injection, and launches against whatever other
+    providers the user has configured — Databricks features simply stay
+    dormant. Deliberately a cheap, offline check (env vars + config file
+    presence), not a live auth probe: it gates provisioning, while real auth
+    errors still surface at call time."""
+    if explicit_profile:
+        return True
+    if os.environ.get("DATABRICKS_HOST") or os.environ.get("DATABRICKS_CONFIG_PROFILE"):
+        return True
+    if os.environ.get("MANTA_PROFILE"):
+        return True
+    return bool(list_profiles())
+
+
 def list_profiles() -> list[ProfileInfo]:
     """Parse profiles from the Databricks config file.
 

@@ -168,12 +168,33 @@ def _strip_provider(model: str) -> str:
 def agent_model_pin_middleware(defn: Any) -> AgentMiddleware | None:
     """Model-pin middleware for a profile's ``model``, or ``None`` if unset.
 
-    Returns ``None`` when the agent has no model pin or the Databricks resolver is
-    unavailable, so it is always safe to call and append.
+    The pin resolves through the provider registry (:mod:`manta_code.providers`),
+    so an agent can pin any registered provider's model — ``databricks:<endpoint>``
+    today, gateway routes in Phase D — or any provider langchain resolves natively
+    (``anthropic:…``, ``openai:…``) via the registry's fallback. Returns ``None``
+    when the agent has no model pin or no resolver is available, so it is always
+    safe to call and append.
     """
     model = getattr(defn, "model", None)
     if not model:
         return None
+    try:
+        from .. import providers
+    except Exception:  # noqa: BLE001
+        return None
+
+    ref = providers.parse_model_ref(model)
+    if ref is not None:
+        resolver = providers.resolver_for(ref.provider)
+        if resolver is not None:
+            return ModelPinMiddleware(endpoint=ref.model, resolve_model=resolver)
+        # Unregistered provider: let langchain resolve the full spec lazily.
+        return ModelPinMiddleware(
+            endpoint=model,
+            resolve_model=lambda spec: providers.resolve_model_ref(spec),
+        )
+    # Bare endpoint name with no provider prefix: treat as Databricks (the
+    # historical default) so existing agent definitions keep working.
     resolver = databricks_model_resolver()
     if resolver is None:
         return None
@@ -183,18 +204,15 @@ def agent_model_pin_middleware(defn: Any) -> AgentMiddleware | None:
 def databricks_model_resolver() -> Callable[[str], Any] | None:
     """Return a resolver building a Databricks chat model from an endpoint name.
 
-    Guarded: returns ``None`` if the Databricks chat class can't be imported, so
-    routing stays a safe no-op instead of breaking model calls.
+    Backed by the provider registry; returns ``None`` if the Databricks
+    resolver is unregistered/unavailable, so routing stays a safe no-op
+    instead of breaking model calls.
     """
     try:
-        from ..databricks_chat import MantaChatDatabricks
+        from .. import providers
     except Exception:  # noqa: BLE001
         return None
-
-    def _resolve(endpoint: str) -> Any:
-        return MantaChatDatabricks(model=endpoint)
-
-    return _resolve
+    return providers.resolver_for(providers.DATABRICKS_PROVIDER)
 
 
 def default_routing_middleware(
