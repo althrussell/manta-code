@@ -128,10 +128,28 @@ hard-caps / policy engine are removed from the active codebase; if they are ever
 needed, they would be re-introduced as `deepagents-code` runtime middleware
 rather than a parallel pipeline.
 
+## Headless / CI / SDK path (`manta run`)
+
+`manta run "<task>"` wraps `deepagents-code`'s non-interactive one-shot mode
+(`-n`) with CI-safe defaults: a **bounded `--timeout`** (default 600s), a
+`--max-turns` cap (default 50), and quiet/buffered output for clean piping
+(`--json text|stream-json` for machine output). The same config/onboarding/
+subagent provisioning as `launch` runs first, so Manta's control plane (enforced
+agents, token economy + usage ledger) applies headlessly too. `manta run` returns
+the runtime's exit code (124 on timeout) instead of replacing the process, so
+scripts and CI can branch on it.
+
+`manta watch` gives a live per-agent token/cost view by tailing the local usage
+ledger — steering leverage (see where spend is going across parallel agents and
+subagents) without forking the upstream TUI.
+
 ## Known gaps
 
 - `deepagents-code -n` (non-interactive one-shot) can hang on startup in some
-  environments; the interactive TUI is the supported surface.
+  environments. **Mitigation:** `manta run` always passes a bounded `--timeout`
+  (default 600s), so a hang fails fast with exit code 124 rather than blocking a
+  scripted/CI run indefinitely; tune via `manta run --timeout`. The interactive
+  TUI remains the primary surface.
 - `deepagents-code` pulls `protobuf` 6.x, which conflicts with
   `databricks-vectorsearch` (not a Manta dependency). Resolve at the environment
   level only if both are needed together.

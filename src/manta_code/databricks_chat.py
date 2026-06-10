@@ -232,3 +232,17 @@ def _rebind_imported_resolvers(original: Any, replacement: Any) -> None:
 
 
 _install_subagent_databricks_resolver()
+
+# Install Manta's build hook here too: this module is imported by
+# ``create_model`` (via the provider ``class_path``) in the langgraph server
+# subprocess, which runs *before* ``create_cli_agent`` builds the graph. That
+# makes this the reliable seam to wrap ``create_deep_agent`` so Manta's compiled
+# agents / middleware / store / tools are injected. Best-effort and idempotent
+# (see :func:`manta_code.hook.install_build_hook`); a failure here never blocks
+# the resolver shim above or the launch.
+try:  # pragma: no cover - exercised via the live server subprocess
+    from .hook import install_build_hook as _install_build_hook
+
+    _install_build_hook()
+except Exception:  # noqa: BLE001
+    pass

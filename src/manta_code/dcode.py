@@ -263,6 +263,105 @@ def build_dcode_argv(
     return argv
 
 
+#: Default wall-clock timeout (seconds) for a headless run. A bounded timeout is
+#: deliberate: ``deepagents-code -n`` can hang on startup in some environments
+#: (docs/13 "Known gaps"), and an unbounded scripted/CI run is worse than one
+#: that fails fast with exit code 124. Override with ``manta run --timeout``.
+DEFAULT_RUN_TIMEOUT = 600
+
+#: Default agentic turn cap for a headless run (prevents runaway loops in CI).
+DEFAULT_RUN_MAX_TURNS = 50
+
+
+def build_run_argv(
+    default_endpoint: str | None,
+    message: str,
+    passthrough: Sequence[str],
+    *,
+    quiet: bool = True,
+    no_stream: bool = True,
+    max_turns: int | None = DEFAULT_RUN_MAX_TURNS,
+    timeout: int | None = DEFAULT_RUN_TIMEOUT,
+    json_output: str | None = None,
+    shell_allow_list: str | None = None,
+    python: str | None = None,
+) -> list[str]:
+    """Build argv for a headless one-shot run via Manta's boot shim.
+
+    Wraps ``deepagents-code``'s non-interactive surface (``-n/--non-interactive``)
+    with CI-safe defaults: a bounded ``--timeout`` (so a startup hang fails fast),
+    a ``--max-turns`` cap, quiet/buffered output for clean piping, and the
+    Databricks model pin. The user's ``passthrough`` is appended verbatim and can
+    override any of these.
+    """
+    argv = [python or sys.executable, "-m", DCODE_BOOT_MODULE]
+    extras = list(passthrough)
+    if default_endpoint and not _has_model_flag(extras):
+        argv += ["-M", f"{DATABRICKS_PROVIDER}:{default_endpoint}"]
+    argv += ["-n", message]
+    if quiet:
+        argv.append("-q")
+    if no_stream:
+        argv.append("--no-stream")
+    if max_turns is not None:
+        argv += ["--max-turns", str(max_turns)]
+    if timeout is not None:
+        argv += ["--timeout", str(timeout)]
+    if json_output:
+        argv += ["--json-output", json_output]
+    if shell_allow_list:
+        argv += ["--shell-allow-list", shell_allow_list]
+    argv += extras
+    return argv
+
+
+def run_headless(
+    *,
+    profile: str | None,
+    default_endpoint: str | None,
+    endpoints: Sequence[str],
+    message: str,
+    passthrough: Sequence[str] = (),
+    config_path: Path | None = None,
+    params: Mapping[str, object] | None = None,
+    timeout: int | None = DEFAULT_RUN_TIMEOUT,
+    max_turns: int | None = DEFAULT_RUN_MAX_TURNS,
+    quiet: bool = True,
+    no_stream: bool = True,
+    json_output: str | None = None,
+    shell_allow_list: str | None = None,
+) -> int:
+    """Provision config + env and run a single headless task, returning its code.
+
+    Unlike :func:`launch`, this never replaces the process (so the caller — a CI
+    script or ``manta run``) gets the exit code), and it provisions the same
+    Databricks config/onboarding/subagents so Manta's control plane (enforced
+    agents, token economy) applies in headless mode too.
+    """
+    ensure_dcode_config(
+        endpoints,
+        config_path=config_path,
+        params=params,
+        default_endpoint=default_endpoint,
+    )
+    mark_onboarding_complete()
+    ensure_manta_subagents()
+    env = build_launch_env(profile)
+    argv = build_run_argv(
+        default_endpoint,
+        message,
+        passthrough,
+        quiet=quiet,
+        no_stream=no_stream,
+        max_turns=max_turns,
+        timeout=timeout,
+        json_output=json_output,
+        shell_allow_list=shell_allow_list,
+    )
+    completed = subprocess.run(argv, env=env, check=False)  # noqa: S603
+    return completed.returncode
+
+
 def launch(
     *,
     profile: str | None,

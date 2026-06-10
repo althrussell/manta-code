@@ -136,6 +136,50 @@ def test_has_model_flag_variants():
     assert dcode._has_model_flag(["-r"]) is False
 
 
+# --- build_run_argv (headless) ------------------------------------------------
+
+
+def test_build_run_argv_defaults():
+    argv = dcode.build_run_argv("ep-a", "fix the job", [], python="py")
+    assert argv[:3] == ["py", "-m", dcode.DCODE_BOOT_MODULE]
+    assert "-M" in argv and "databricks:ep-a" in argv
+    assert argv.count("-n") == 1
+    # message immediately follows -n
+    assert argv[argv.index("-n") + 1] == "fix the job"
+    assert "-q" in argv
+    assert "--no-stream" in argv
+    assert "--max-turns" in argv
+    assert "--timeout" in argv
+    assert str(dcode.DEFAULT_RUN_TIMEOUT) in argv
+
+
+def test_build_run_argv_options_and_passthrough():
+    argv = dcode.build_run_argv(
+        "ep-a",
+        "do it",
+        ["--extra"],
+        quiet=False,
+        no_stream=False,
+        timeout=None,
+        max_turns=None,
+        json_output="stream-json",
+        shell_allow_list="ls,cat",
+        python="py",
+    )
+    assert "-q" not in argv
+    assert "--no-stream" not in argv
+    assert "--timeout" not in argv
+    assert "--max-turns" not in argv
+    assert argv[argv.index("--json-output") + 1] == "stream-json"
+    assert argv[argv.index("--shell-allow-list") + 1] == "ls,cat"
+    assert argv[-1] == "--extra"
+
+
+def test_build_run_argv_respects_user_model():
+    argv = dcode.build_run_argv("ep-a", "t", ["-M", "openai:gpt"], python="py")
+    assert "databricks:ep-a" not in argv
+
+
 # --- ensure_dcode_config (round-trip) -----------------------------------------
 
 

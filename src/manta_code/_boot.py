@@ -445,6 +445,22 @@ def allow_blocking_server() -> bool:
     return True
 
 
+def install_manta_build_hook() -> bool:
+    """Install Manta's control-plane build hook (best-effort).
+
+    Wraps ``deepagents_code.agent.create_deep_agent`` so Manta's compiled agents,
+    middleware, store, and Databricks tools are injected (ADR 0008). This covers
+    the in-process ``create_cli_agent`` path; the server-subprocess path is
+    covered by the same call in :mod:`manta_code.databricks_chat`. Never raises.
+    """
+    try:
+        from manta_code.hook import install_build_hook
+
+        return install_build_hook()
+    except Exception:  # noqa: BLE001 - reliability: launch regardless
+        return False
+
+
 def main() -> None:
     """Apply branding and Databricks scoping, then run the upstream CLI."""
     apply_branding()
@@ -452,6 +468,7 @@ def main() -> None:
     rebrand_auth_screen()
     rebrand_model_selector_footer()
     allow_blocking_server()
+    install_manta_build_hook()
     from deepagents_code.main import cli_main
 
     cli_main()

@@ -25,7 +25,14 @@ dev = [
 agent = [
   # Interactive coding-agent TUI (the `manta` runtime surface). Manta launches
   # this preconfigured for Databricks; we do not fork its model layer.
-  "deepagents-code>=0.1.7",
+  #
+  # PINNED: Manta's build hook (manta_code.hook) and resolver shim
+  # (manta_code.databricks_chat) monkeypatch internal symbols of these packages
+  # (deepagents_code.agent.create_deep_agent, deepagents._models.resolve_model).
+  # An upstream bump can move those symbols, so we pin exact versions and guard
+  # with `manta doctor` + tests/test_reliability.py. Bump deliberately, together.
+  "deepagents-code==0.1.7",
+  "deepagents==0.6.7",
   # Databricks model + auth: ChatDatabricks is wired into deepagents-code via a
   # `class_path` provider in ~/.deepagents/config.toml; the SDK resolves the
   # active profile from DATABRICKS_CONFIG_PROFILE.
