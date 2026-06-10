@@ -11,3 +11,6 @@ build/
 .env
 .env.*
 .DS_Store
+
+# Stray scratch / unrelated experiments
+space-invaders/

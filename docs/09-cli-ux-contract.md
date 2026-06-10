@@ -13,8 +13,8 @@ in `~/.deepagents/config.toml`, and execs the TUI with
 `-M databricks:<default_endpoint>`.
 
 ```text
-$ manta -p e2-demo-west
-# → launches the deepagents-code TUI, authenticated via the e2-demo-west
+$ manta -p my-profile
+# → launches the deepagents-code TUI, authenticated via the my-profile
 #   profile, default model databricks:databricks-claude-sonnet-4-5
 ```
 

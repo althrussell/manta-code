@@ -10,9 +10,20 @@ Manta stays deliberately thin: it does not fork or wrap the agent. It registers 
 Databricks model provider, resolves your profile, and hands the terminal over to
 the TUI. See [ADR 0007](docs/adr/0007-adopt-deepagents-code-tui.md).
 
+## Install
+
+Manta is not published to PyPI; install it from source.
+
+```bash
+# Use directly from GitHub
+pip install 'manta-code[agent] @ git+https://github.com/althrussell/manta-code.git'
+```
+
 ## Quick start
 
 ```bash
+# Or clone for local development
+git clone https://github.com/althrussell/manta-code.git
 cd manta-code
 python -m venv .venv
 source .venv/bin/activate
@@ -20,7 +31,7 @@ pip install -e '.[dev,agent]'
 
 manta doctor             # check deepagents-code + Databricks model wiring/auth
 manta                    # launch the interactive coding session (default profile)
-manta -p e2-demo-west    # launch against a specific Databricks profile
+manta -p my-profile      # launch against a specific Databricks profile
 manta -r                 # resume most recent thread (deepagents-code flag, forwarded)
 ```
 
