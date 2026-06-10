@@ -413,3 +413,168 @@ def totals(*, since: float | None = None, path: Path | None = None) -> AggRow:
         agg.cost_usd += r.cost_usd
         agg.cost_known = agg.cost_known and r.cost_known
     return agg
+
+
+# --- advice ledger (ADR 0010, Phase C) --------------------------------------
+
+
+@dataclass
+class AdviceRecord:
+    """One recommendation the advisor delivered (or tried to)."""
+
+    agent: str
+    kind: str  # escalate | downgrade | budget_tradeoff
+    severity: str  # note | interrupt
+    message: str
+    model: str = ""
+    thread_id: str = ""
+    delivered: str = ""  # note | interrupt | log
+    accepted: int | None = None  # 1/0 once outcomes are tracked; NULL = unknown
+    ts: float = field(default_factory=time.time)
+
+
+_ADVICE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS advice (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    agent TEXT NOT NULL,
+    thread_id TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    message TEXT NOT NULL,
+    delivered TEXT NOT NULL DEFAULT '',
+    accepted INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_advice_ts ON advice(ts);
+"""
+
+
+def record_advice(record: AdviceRecord, *, path: Path | None = None) -> None:
+    """Append one advice row. Best-effort: never raises into the model loop."""
+    try:
+        conn = connect(path)
+        conn.executescript(_ADVICE_SCHEMA)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        conn.execute(
+            "INSERT INTO advice (ts, agent, thread_id, model, kind, severity, "
+            "message, delivered, accepted) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                record.ts,
+                record.agent,
+                record.thread_id,
+                record.model,
+                record.kind,
+                record.severity,
+                record.message,
+                record.delivered,
+                record.accepted,
+            ),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        conn.close()
+
+
+def recent_advice(
+    *, since: float | None = None, limit: int = 20, path: Path | None = None
+) -> list[AdviceRecord]:
+    """Recent advisor recommendations, newest first."""
+    try:
+        conn = connect(path)
+        conn.executescript(_ADVICE_SCHEMA)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        clause, params = "", []
+        if since is not None:
+            clause = " WHERE ts >= ?"
+            params.append(since)
+        rows = conn.execute(
+            f"SELECT * FROM advice{clause} ORDER BY ts DESC LIMIT ?",  # noqa: S608
+            [*params, limit],
+        ).fetchall()
+        return [
+            AdviceRecord(
+                agent=r["agent"],
+                kind=r["kind"],
+                severity=r["severity"],
+                message=r["message"],
+                model=r["model"],
+                thread_id=r["thread_id"],
+                delivered=r["delivered"],
+                accepted=r["accepted"],
+                ts=r["ts"],
+            )
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+
+
+# --- offline advice (`manta cost --advise`) ----------------------------------
+
+#: Scaffold:net-new ratio above which the overhead recommendation fires.
+ADVISE_SCAFFOLD_RATIO = 1.5
+
+#: Cache-hit rate below which the cache recommendation fires (when the model
+#: reported cache detail at all).
+ADVISE_CACHE_HIT_FLOOR = 0.3
+
+#: Premium share of calls above which the model-mix recommendation fires.
+ADVISE_PREMIUM_SHARE = 0.5
+
+
+def advise(
+    *, since: float | None = None, path: Path | None = None
+) -> list[str]:
+    """Offline spend-optimization recommendations computed from the ledger.
+
+    Pure reads — the runtime advisor (middleware/advice.py) covers in-session
+    signals; this covers the structural ones: scaffolding overhead, cache
+    economics, and model mix.
+    """
+    recommendations: list[str] = []
+
+    sb = scaffold_breakdown(since=since, path=path)
+    ratio = sb.overhead_ratio
+    if ratio is not None and ratio >= ADVISE_SCAFFOLD_RATIO:
+        recommendations.append(
+            f"Scaffolding is {ratio:.1f}x your net-new tokens — every call pays "
+            "for system prompt + tool/skill schemas before any work. Prune "
+            "unused skills/tools and keep agent prompts tight "
+            "(`manta agents edit <name>`)."
+        )
+
+    rows = aggregate(by="model", since=since, path=path)
+    cached_rows = [r for r in rows if (r.cache_read + r.cache_creation) > 0]
+    for r in cached_rows:
+        hit = r.cache_hit_rate
+        if hit is not None and hit < ADVISE_CACHE_HIT_FLOOR:
+            recommendations.append(
+                f"Cache-hit rate on {r.key} is {hit * 100:.0f}% — prompt caching "
+                "is mostly missing. Keep the system prompt and tool list "
+                "byte-stable across turns so provider caching can engage."
+            )
+
+    if rows:
+        premium_calls = sum(
+            r.calls
+            for r in rows
+            if (price_for(r.key) or Price(0, 0)).input >= 3.0
+        )
+        total_calls = sum(r.calls for r in rows)
+        if total_calls > 10 and premium_calls / total_calls >= ADVISE_PREMIUM_SHARE:
+            recommendations.append(
+                f"{premium_calls} of {total_calls} calls ran on premium models — "
+                "check whether routine loops can run on a cheaper default "
+                "(`manta agents show <name>` for pins; /model in-session)."
+            )
+
+    return recommendations

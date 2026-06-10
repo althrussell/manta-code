@@ -141,6 +141,63 @@ def cancel_task(task_id: str, *, db_path: Path | None = None) -> store.TaskRecor
     return refreshed
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
+
+
+#: Age below which an active task is never reconciled — a submission is mid
+#: flight for a moment before its runner pid lands and reports running.
+RECONCILE_GRACE_SECONDS = 30.0
+
+
+def reconcile_stale_tasks(*, db_path: Path | None = None) -> list[store.TaskRecord]:
+    """Mark active tasks whose runner process is dead as failed.
+
+    A runner that crashes before its guarded section (or is SIGKILLed) can
+    strand a task in ``queued``/``running``. Called from the task CLI paths so
+    the user always sees truthful states; returns the tasks it repaired.
+    """
+    repaired: list[store.TaskRecord] = []
+    now = time.time()
+    for record in store.list_tasks(limit=100, path=db_path):
+        if record.state not in store.ACTIVE_STATES:
+            continue
+        if not record.pid:
+            continue  # submission still in flight; nothing to probe
+        if now - record.created_at < RECONCILE_GRACE_SECONDS:
+            continue
+        if _pid_alive(record.pid):
+            continue
+        changed = store.update_task(
+            record.id,
+            state="failed",
+            finished_at=time.time(),
+            result=record.result or "(runner process died without recording an outcome)",
+            expect_state=record.state,
+            path=db_path,
+        )
+        if changed:
+            store.record_event(
+                store.EventRecord(
+                    agent=record.agent,
+                    kind="task_failed",
+                    detail="runner died",
+                    task_id=record.id,
+                ),
+                path=db_path,
+            )
+            refreshed = store.get_task(record.id, path=db_path)
+            if refreshed is not None:
+                repaired.append(refreshed)
+    return repaired
+
+
 def task_output(task_id: str, *, db_path: Path | None = None) -> str:
     """Return a finished task's result (or the log tail while it runs)."""
     record = store.get_task(task_id, path=db_path)

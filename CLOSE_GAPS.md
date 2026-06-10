@@ -16,7 +16,15 @@ prioritized roadmap.
 >   `manta task`/`manta status` CLI, event feed with approval/denial audit,
 >   `chief` built-in agent with in-session task tools, doctor validation of
 >   agent model pins.
-> - Phases C–D in flight.
+> - **Phase C landed** — proactive advice engine (session signals + tiered
+>   delivery: inline notes / approve-to-continue interrupts), advice ledger,
+>   `manta cost --advise` offline recommendations, per-task spend attribution,
+>   and a critical accounting fix: streamed chunks carried *cumulative* usage
+>   that the chunk merge summed, inflating recorded input tokens by ~chunk-count
+>   (now rewritten as deltas in `MantaChatDatabricks`). Plus background-task
+>   robustness: cwd-safe runner, crash-proof state recording, stale-task
+>   reconciliation.
+> - Phase D in flight.
 
 **TL;DR.** The foundation is genuinely strong — the reliability seam (Pillar 7),
 the enforced agent registry (Pillar 4's bottom half), and token accounting

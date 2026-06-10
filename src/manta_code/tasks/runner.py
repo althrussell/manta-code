@@ -33,8 +33,26 @@ def _result_from_log(log_path: str) -> str:
     return ""
 
 
+def _ensure_valid_cwd() -> None:
+    """Recover when our inherited working directory has been deleted.
+
+    A task submitted from *inside* a session (the ``@agent … &`` path or the
+    chief's task tools) inherits that session's server cwd — which can be an
+    ephemeral directory that is deleted moments later when the session ends.
+    The first ``Path.cwd()`` (config loading) then dies with
+    ``FileNotFoundError`` before the task even starts. Fall back to home.
+    """
+    try:
+        os.getcwd()
+    except OSError:
+        home = str(Path.home())
+        os.chdir(home)
+        print(f"manta task runner: working directory vanished; using {home}", file=sys.stderr)
+
+
 def run_task(task_id: str) -> int:
     """Execute one stored task to completion; returns the exit code."""
+    _ensure_valid_cwd()
     record = store.get_task(task_id)
     if record is None:
         print(f"manta task runner: no task '{task_id}'", file=sys.stderr)
@@ -57,13 +75,15 @@ def run_task(task_id: str) -> int:
         store.EventRecord(agent=record.agent, kind="task_started", task_id=task_id)
     )
 
-    from .. import dcode
-    from ..auth import databricks_configured
-    from ..config import interactive_endpoints, load_config
-
-    cfg = load_config()
-    configured = databricks_configured()
+    # Everything after the running-transition is guarded: an unexpected crash
+    # must record `failed`, never strand the task in `running`.
     try:
+        from .. import dcode
+        from ..auth import databricks_configured
+        from ..config import interactive_endpoints, load_config
+
+        cfg = load_config()
+        configured = databricks_configured()
         exit_code = dcode.run_headless(
             profile=None,  # the executor exported the profile into our env
             default_endpoint=cfg.interactive.default_endpoint if configured else None,

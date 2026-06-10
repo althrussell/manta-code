@@ -211,3 +211,18 @@ def test_enrich_injects_task_tools(monkeypatch, tmp_path):
     names = {getattr(t, "name", "") for t in (kwargs.get("tools") or [])}
     assert "manta_task_submit" in names
     assert "manta_task_status" in names
+
+
+def test_orchestrator_includes_advice_middleware(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    mw_names = {type(m).__name__ for m in hook.build_orchestrator_middleware()}
+    assert "AdviceMiddleware" in mw_names
+
+
+def test_advice_disabled_by_env_everywhere(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("MANTA_ADVICE", "0")
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)
+    mw_names = {type(m).__name__ for m in hook.build_orchestrator_middleware()}
+    assert "AdviceMiddleware" not in mw_names

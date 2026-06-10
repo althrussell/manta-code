@@ -102,3 +102,25 @@ def test_run_task_requires_queued_state(tmp_path):
 
 def test_run_task_unknown_id():
     assert runner.run_task("missing1") == 2
+
+
+def test_runner_recovers_from_deleted_cwd(tmp_path, monkeypatch):
+    # A task submitted from inside a session can inherit an ephemeral cwd that
+    # is deleted before the runner boots; it must recover, not crash.
+    import subprocess
+    import sys
+
+    doomed = tmp_path / "ephemeral"
+    doomed.mkdir()
+    code = (
+        "import os, sys\n"
+        f"os.chdir({str(doomed)!r})\n"
+        f"__import__('shutil').rmtree({str(doomed)!r})\n"
+        "from manta_code.tasks.runner import _ensure_valid_cwd\n"
+        "_ensure_valid_cwd()\n"
+        "print(os.getcwd())\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip()  # a valid cwd again

@@ -106,3 +106,30 @@ def test_task_output_prefers_result_then_log(tmp_path, _fake_spawn):
     # Once a result is recorded, it wins.
     store.update_task(record.id, result="the final answer")
     assert executor.task_output(record.id) == "the final answer"
+
+
+def test_reconcile_marks_dead_runner_failed(monkeypatch, _fake_spawn):
+    record = executor.submit_task("swe", "long thing")
+    store.update_task(record.id, state="running", pid=999999)
+    monkeypatch.setattr(executor, "RECONCILE_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(executor, "_pid_alive", lambda pid: False)
+    (repaired,) = executor.reconcile_stale_tasks()
+    assert repaired.id == record.id
+    assert repaired.state == "failed"
+    assert "runner process died" in repaired.result
+
+
+def test_reconcile_leaves_live_runner_alone(monkeypatch, _fake_spawn):
+    record = executor.submit_task("swe", "long thing")
+    store.update_task(record.id, state="running", pid=999999)
+    monkeypatch.setattr(executor, "RECONCILE_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(executor, "_pid_alive", lambda pid: True)
+
+    assert executor.reconcile_stale_tasks() == []
+
+    # And fresh submissions are protected by the grace window even if their
+    # pid cannot be probed.
+    monkeypatch.setattr(executor, "RECONCILE_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(executor, "_pid_alive", lambda pid: False)
+    assert executor.reconcile_stale_tasks() == []
+    assert store.get_task(record.id).state == "running"

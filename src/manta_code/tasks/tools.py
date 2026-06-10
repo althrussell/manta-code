@@ -48,8 +48,13 @@ def manta_task_submit(agent: str, prompt: str) -> str:
 
 def manta_task_status(task_id: str) -> str:
     """Check the state of one background task by id."""
+    from .executor import reconcile_stale_tasks
     from .store import get_task
 
+    try:
+        reconcile_stale_tasks()
+    except Exception:  # noqa: BLE001 - reconciliation is best-effort
+        pass
     record = get_task(task_id.strip())
     if record is None:
         return f"No task '{task_id}'."
@@ -91,6 +96,12 @@ def manta_task_list(state: str = "") -> str:
     state = state.strip().lower()
     if state and state not in STATES:
         return f"Unknown state '{state}'. States: {', '.join(STATES)}."
+    try:
+        from .executor import reconcile_stale_tasks
+
+        reconcile_stale_tasks()
+    except Exception:  # noqa: BLE001 - reconciliation is best-effort
+        pass
     tasks = list_tasks(state=state or None, limit=20)
     if not tasks:
         return "No background tasks yet."

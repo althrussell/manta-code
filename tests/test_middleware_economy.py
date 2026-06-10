@@ -167,3 +167,20 @@ def test_orchestrator_middleware_factory():
     assert len(mws) == 1
     assert mws[0]._agent == "orchestrator"
     assert mws[0].has_budget is False
+
+
+def test_account_attributes_background_task_id(tmp_path, monkeypatch):
+    # ADR 0010 Phase C: spend inside a background task is drillable per task.
+    monkeypatch.setenv("MANTA_TASK_ID", "task7777")
+    ledger = tmp_path / "usage.db"
+    mw = E.TokenEconomyMiddleware(agent="swe", ledger_path=ledger)
+    request = _Request()
+    response = _Response(result=[_ai({"input_tokens": 100, "output_tokens": 50})])
+    mw.wrap_model_call(request, lambda r: response)
+
+    import sqlite3
+
+    conn = sqlite3.connect(ledger)
+    (task,) = conn.execute("SELECT task FROM usage").fetchone()
+    conn.close()
+    assert task == "task7777"
