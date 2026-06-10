@@ -10,6 +10,10 @@ Manta stays deliberately thin: it does not fork or wrap the agent. It registers 
 Databricks model provider, resolves your profile, and hands the terminal over to
 the TUI. See [ADR 0007](docs/adr/0007-adopt-deepagents-code-tui.md).
 
+> Where this is going: a token-optimal, multi-model, multi-provider coding agent
+> for work **on and off Databricks**, with addressable `@{agent}` long-running
+> tasks coordinated by a chief-of-staff agent. See **[VISION.md](VISION.md)**.
+
 ## Install
 
 Manta is not published to PyPI; install it from source.
