@@ -116,6 +116,12 @@ def run_task(task_id: str) -> int:
                 task_id=task_id,
             )
         )
+        try:
+            from .notify import notify_task_finished
+
+            notify_task_finished(task_id, record.agent, final_state)
+        except Exception:  # noqa: BLE001 - notifications are best-effort
+            pass
     return exit_code
 
 

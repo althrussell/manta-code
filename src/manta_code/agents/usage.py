@@ -672,3 +672,58 @@ def advise(
             )
 
     return recommendations
+
+
+# --- receipts (ADR 0012): make the economy *felt* ----------------------------
+
+
+@dataclass(frozen=True)
+class Receipts:
+    """A window's spend story: actual cost vs an all-premium baseline."""
+
+    days: int
+    calls: int
+    total_tokens: int
+    actual_usd: float
+    premium_baseline_usd: float
+    advice_delivered: int
+    advice_accepted: int
+
+    @property
+    def estimated_savings_usd(self) -> float:
+        return max(0.0, self.premium_baseline_usd - self.actual_usd)
+
+
+#: Baseline rate used for the counterfactual: "what if every call had run on
+#: the premium model" (claude-opus list prices).
+_PREMIUM_BASELINE = Price(input=15.0, output=75.0)
+
+
+def receipts(*, days: int = 7, path: Path | None = None) -> Receipts:
+    """Compute the spend receipts for the window (estimates clearly labelled).
+
+    The savings figure is a counterfactual — the same token volumes priced at
+    the premium baseline — not a measurement; it answers "what did
+    cheap-by-default routing save me" in the only honest way available.
+    """
+    since = time.time() - days * 86400
+    rows = aggregate(by="model", since=since, path=path)
+    calls = sum(r.calls for r in rows)
+    tokens = sum(r.total_tokens for r in rows)
+    actual = sum(r.cost_usd for r in rows)
+    baseline = sum(
+        (r.input_tokens * _PREMIUM_BASELINE.input + r.output_tokens * _PREMIUM_BASELINE.output)
+        / 1_000_000
+        for r in rows
+    )
+    advice = recent_advice(since=since, limit=500, path=path)
+    accepted = sum(1 for a in advice if a.delivered.startswith("interrupt:"))
+    return Receipts(
+        days=days,
+        calls=calls,
+        total_tokens=tokens,
+        actual_usd=actual,
+        premium_baseline_usd=baseline,
+        advice_delivered=len(advice),
+        advice_accepted=accepted,
+    )

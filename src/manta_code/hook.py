@@ -56,7 +56,9 @@ You have specialist subagents available through the `task` tool:
 
 For **long-running work**, use `manta_task_submit(agent, prompt)` to run it in the background: it returns a task id immediately and survives this session. Track with `manta_task_status` / `manta_task_list`; collect results with `manta_task_output`.
 
-Each subagent is isolated: it does **not** see this conversation, so put everything it needs (files, goal, constraints) in the `task` `description`. Handle small or routine requests yourself rather than delegating."""
+Each subagent is isolated: it does **not** see this conversation, so put everything it needs (files, goal, constraints) in the `task` `description`. Handle small or routine requests yourself rather than delegating.
+
+When you learn something durable — a repo convention, a decision and its reason, a gotcha, a user preference — save it with `manta_remember` so future sessions start warm."""
 
 
 def _warn(message: str) -> None:
@@ -279,6 +281,14 @@ def build_orchestrator_middleware() -> list[Any]:
         except Exception:  # noqa: BLE001
             pass
         try:
+            from .agents.memory import orchestrator_memory_middleware
+
+            mw = orchestrator_memory_middleware()
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             from .tasks.events import orchestrator_event_middleware
 
             mw = orchestrator_event_middleware()
@@ -331,6 +341,16 @@ def build_task_tools() -> list[Any]:
     """
     try:
         from .tasks.tools import build_task_tools as _build
+
+        return _build()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def build_memory_tools() -> list[Any]:
+    """Self-writing memory tool (ADR 0012): agents save durable learnings."""
+    try:
+        from .agents.memory import build_memory_tools as _build
 
         return _build()
     except Exception:  # noqa: BLE001
@@ -391,7 +411,7 @@ def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     _maybe_add_delegation_policy(kwargs)
 
-    extra_tools = [*build_databricks_tools(), *build_task_tools()]
+    extra_tools = [*build_databricks_tools(), *build_task_tools(), *build_memory_tools()]
     if extra_tools:
         kwargs["tools"] = [*list(kwargs.get("tools") or ()), *extra_tools]
 

@@ -248,6 +248,47 @@ class DatabricksTools:
             lines.append(f"URL: {url}")
         return "\n".join(lines)
 
+    def get_run_diagnostics(self, run_id: int) -> str:
+        """Diagnose a job run end-to-end: per-task states, errors, traces, log tails.
+
+        The debugging workhorse (ADR 0012): for a failed run it pulls each
+        failed task's error, error trace, and the tail of its logs so the
+        agent can correlate with the code and propose a fix.
+        """
+        try:
+            run = self.client.jobs.get_run(run_id=run_id)
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"get run {run_id}", exc)
+        lines = [self.get_run_status(run_id)]
+        tasks = list(getattr(run, "tasks", None) or [])
+        if not tasks:
+            tasks = [run]  # single-task / legacy runs: the run itself has output
+        for task in tasks:
+            task_key = getattr(task, "task_key", None) or "(run)"
+            task_run_id = getattr(task, "run_id", None) or run_id
+            state = getattr(task, "state", None)
+            result = getattr(state, "result_state", None)
+            lines.append(f"\nTask {task_key}: result={result or '-'} (run_id={task_run_id})")
+            if result is not None and str(result) in ("RunResultState.SUCCESS", "SUCCESS"):
+                continue
+            try:
+                output = self.client.jobs.get_run_output(run_id=task_run_id)
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"  (output unavailable: {exc})")
+                continue
+            error = getattr(output, "error", None)
+            if error:
+                lines.append(f"  Error: {error}")
+            trace = getattr(output, "error_trace", None)
+            if trace:
+                lines.append("  Trace (tail):")
+                lines.append("    " + "\n    ".join(str(trace).splitlines()[-15:]))
+            logs = getattr(output, "logs", None)
+            if logs:
+                lines.append("  Logs (tail):")
+                lines.append("    " + "\n    ".join(str(logs).splitlines()[-25:]))
+        return "\n".join(lines)
+
     def run_job(self, job_id: int) -> str:
         """Trigger a job run (a mutation — gate behind approval). Returns the run id."""
         try:
@@ -281,6 +322,7 @@ class DatabricksTools:
             (self.sql_query, "sql_query"),
             (self.list_jobs, "list_jobs"),
             (self.get_run_status, "get_run_status"),
+            (self.get_run_diagnostics, "get_run_diagnostics"),
         ]
         if include_run_job:
             specs.append((self.run_job, "run_job"))

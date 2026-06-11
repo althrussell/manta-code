@@ -37,6 +37,7 @@ KNOWN_SUBCOMMANDS = frozenset(
         "task",
         "status",
         "gateway",
+        "receipts",
     }
 )
 
@@ -186,7 +187,14 @@ def _resolve_endpoints(cfg: MantaConfig, profile: Optional[str]) -> list[str]:
 
 
 @app.command()
-def doctor(ctx: typer.Context) -> None:
+def doctor(
+    ctx: typer.Context,
+    probe: bool = typer.Option(
+        False,
+        "--probe",
+        help="Live-test each pinned model in the real agent loop (spends ~1 cent per model).",
+    ),
+) -> None:
     """Check local Manta setup, dependencies, and Databricks auth."""
     profile = (ctx.obj or {}).get("profile")
     console.print(f"[bold]Manta Code[/bold] {__version__}")
@@ -316,6 +324,41 @@ def doctor(ctx: typer.Context) -> None:
             )
 
     console.print(table)
+
+    # Live model-compat probe (ADR 0012): an endpoint that exists can still
+    # fail inside the agent loop (request-shape incompatibilities) — three
+    # such pins were found only by live use. Opt-in because it spends tokens.
+    if probe and dcode_ok and db_configured:
+        from . import dcode
+        from .agents.defaults import merged_agents
+        from .agents.registry import list_agents
+
+        endpoints = {endpoint}
+        for defn in merged_agents(list_agents()):
+            pin = defn.model or ""
+            if pin.startswith("databricks:"):
+                endpoints.add(pin.split(":", 1)[1])
+        console.print(f"\nProbing {len(endpoints)} model(s) in the live agent loop…")
+        for name in sorted(endpoints):
+            code = dcode.run_headless(
+                profile=profile,
+                default_endpoint=None,
+                endpoints=[],
+                message="Reply with exactly: OK",
+                passthrough=["-a", "agent", "-M", f"databricks:{name}"],
+                timeout=120,
+                max_turns=2,
+                quiet=True,
+            )
+            ok = code == 0
+            all_ok = all_ok and ok
+            mark = "[green]pass[/green]" if ok else "[red]FAIL[/red]"
+            console.print(f"  {mark}  {name}")
+        console.print(
+            "[dim]A FAIL means the endpoint rejects the agent loop's requests "
+            "— repin with `manta agents set-model`.[/dim]"
+        )
+
     console.print("[green]Status: OK[/green]" if all_ok else "[yellow]Status: issues found[/yellow]")
 
 
@@ -1146,6 +1189,42 @@ def task_cancel(task_id: str = typer.Argument(..., help="Task id.")) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     console.print(f"Cancelled task [bold]{record.id}[/bold] (@{record.agent}).")
+
+
+@app.command()
+def receipts(
+    days: int = typer.Option(7, "--days", help="Window in days."),
+) -> None:
+    """Your spend story: actual cost, estimated savings, and advisor activity.
+
+    The savings figure is a clearly-labelled counterfactual — the window's
+    token volumes priced as if every call had run on the premium model.
+    """
+    from .agents import usage
+
+    r = usage.receipts(days=days)
+    if r.calls == 0:
+        console.print(f"[dim]No usage in the last {days} day(s).[/dim]")
+        return
+    console.print(f"[bold]Manta receipts — last {r.days} day(s)[/bold]")
+    console.print(f"  Calls:            {r.calls}")
+    console.print(f"  Tokens:           {_fmt_tokens(r.total_tokens)}")
+    console.print(f"  Spend:            ${r.actual_usd:.2f}")
+    console.print(
+        f"  Premium baseline: ${r.premium_baseline_usd:.2f} "
+        "[dim](same tokens, all-opus — counterfactual)[/dim]"
+    )
+    console.print(
+        f"  Est. savings:     [green]${r.estimated_savings_usd:.2f}[/green]"
+    )
+    if r.advice_delivered:
+        console.print(
+            f"  Advisor:          {r.advice_delivered} recommendation(s), "
+            f"{r.advice_accepted} decided via pause"
+        )
+    console.print(
+        "[dim]Drill down: manta cost --by model • manta cost --advise[/dim]"
+    )
 
 
 @app.command()
