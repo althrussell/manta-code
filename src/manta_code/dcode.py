@@ -67,7 +67,7 @@ ONBOARDING_MARKER_PATH = DEEPAGENTS_STATE_DIR / "onboarding_complete"
 #: (see :data:`DCODE_BOOT_MODULE`). In-app help text and tips still reference
 #: "Deep Agents" — rebranding those would require forking the TUI.
 SPLASH_SUBHEADER_ENV = "DEEPAGENTS_CODE_DANGEROUSLY_OVERRIDE_STARTUP_SUBHEADER"
-SPLASH_SUBHEADER = "Manta - Databricks coding agent"
+SPLASH_SUBHEADER = "Tip: @<agent> to delegate - manta status for background tasks"
 
 #: Branding theme key + definition. ``deepagents-code`` natively loads custom
 #: themes from ``[themes.<name>]`` in its ``config.toml`` and applies them across
