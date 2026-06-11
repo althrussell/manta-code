@@ -35,52 +35,70 @@ import sys
 #: Config-file provider key Manta wires up for Databricks AI Gateway.
 DATABRICKS_PROVIDER = "databricks"
 
-#: Compact manta mark (Unicode half-block art): cephalic horns, swept wings,
-#: a tail — three lines tall so the splash stays tight. Rendered by the TUI in
-#: the theme's primary colour (Databricks red); the banner widget applies one
-#: style to the whole block, so no per-segment colour is possible here.
-MANTA_MARK_UNICODE: tuple[str, ...] = (
-    "▗▌  ▄▄▄  ▐▖",
-    "▝▜██▀▀▀██▛▘",
-    "  ▝▄ ▀ ▄▘",
-)
+#: Manta-ray mark for Unicode terminals: the compact half-block manta —
+#: cephalic horns, swept wings, a tail — three lines tall. Rendered in the
+#: theme's primary colour (Databricks red).
+MANTA_RAY_UNICODE = """\
+▗▌  ▄▄▄  ▐▖
+▝▜██▀▀▀██▛▘
+  ▝▄ ▀ ▄▘"""
 
-#: 7-bit fallback for ASCII-only terminals (same silhouette).
-MANTA_MARK_ASCII: tuple[str, ...] = (
-    ".|  ___  |.",
-    "<##=======##>",
-    "   '. - .'",
-)
+#: Manta-ray mark for ASCII-only terminals (same silhouette, 7-bit glyphs).
+MANTA_RAY_ASCII = r"""
+.|  ___  |.
+<##=======##>
+   '. - .'"""
 
+#: Manta wordmark for Unicode-capable terminals (ANSI Shadow style, matching
+#: the upstream banner's visual weight).
+MANTA_WORDMARK_UNICODE = """\
+███╗   ███╗  █████╗  ███╗   ██╗ ████████╗  █████╗
+████╗ ████║ ██╔══██╗ ████╗  ██║ ╚══██╔══╝ ██╔══██╗
+██╔████╔██║ ███████║ ██╔██╗ ██║    ██║    ███████║
+██║╚██╔╝██║ ██╔══██║ ██║╚██╗██║    ██║    ██╔══██║
+██║ ╚═╝ ██║ ██║  ██║ ██║ ╚████║    ██║    ██║  ██║
+╚═╝     ╚═╝ ╚═╝  ╚═╝ ╚═╝  ╚═══╝    ╚═╝    ╚═╝  ╚═╝"""
 
-def _manta_version() -> str:
-    try:
-        from manta_code import __version__
-
-        return __version__
-    except Exception:  # noqa: BLE001
-        return "0.0.0"
-
-
-def _active_profile_label() -> str:
-    try:
-        from manta_code.auth import resolve_profile
-
-        return resolve_profile() or "DEFAULT"
-    except Exception:  # noqa: BLE001
-        return "DEFAULT"
+#: Manta wordmark for ASCII-only terminals.
+MANTA_WORDMARK_ASCII = r"""
+ __  __    _    _   _ _____  _
+|  \/  |  / \  | \ | |_   _|/ \
+| |\/| | / _ \ |  \| | | | / _ \
+| |  | |/ ___ \| |\  | | |/ ___ \
+|_|  |_/_/   \_\_| \_| |_/_/   \_\
+"""
 
 
-def _banner(mark: tuple[str, ...]) -> str:
-    """Compose the compact splash: mark on the left, identity on the right."""
-    info = (
-        f"Manta v{_manta_version()}",
-        "Databricks-native coding agent",
-        f"/profile {_active_profile_label()}",
-    )
-    width = max(len(line) for line in mark)
-    rows = [f"{line:<{width}}   {text}".rstrip() for line, text in zip(mark, info)]
-    return "\n" + "\n".join(rows) + "\n"
+def _compose_banner(ray: str, wordmark: str) -> str:
+    """Center the manta-ray mark over the wordmark and stack them.
+
+    The wordmark is the widest element, so each non-blank ray line is left-padded
+    to center it over the wordmark's width. A blank line separates the two. The
+    result is wrapped in newlines so :func:`_versioned` can append the version
+    tag beneath it exactly as upstream's banner constants are shaped.
+    """
+    word_lines = [ln for ln in wordmark.splitlines() if ln]
+    width = max((len(ln) for ln in word_lines), default=0)
+    centered = [
+        "" if not ln.strip() else " " * max(0, (width - len(ln)) // 2) + ln
+        for ln in ray.splitlines()
+    ]
+    return "\n" + "\n".join(centered) + "\n\n" + "\n".join(word_lines) + "\n"
+
+
+#: Composed splash art: a Databricks-red manta gliding above the wordmark.
+MANTA_UNICODE_BANNER = _compose_banner(MANTA_RAY_UNICODE, MANTA_WORDMARK_UNICODE)
+MANTA_ASCII_BANNER = _compose_banner(MANTA_RAY_ASCII, MANTA_WORDMARK_ASCII)
+
+
+def _versioned(art: str, version: str) -> str:
+    """Append the runtime version tag so upstream's version logic still works.
+
+    ``get_banner`` looks for the literal ``v{version}`` substring to apply the
+    ``(local)`` editable-install suffix and the hide-version behaviour, so the
+    tag must match the live ``deepagents-code`` version.
+    """
+    return f"{art.rstrip()}\n                                  v{version}\n"
 
 
 def apply_branding() -> bool:
@@ -92,14 +110,15 @@ def apply_branding() -> bool:
     """
     try:
         from deepagents_code import config
+        from deepagents_code._version import __version__ as dcode_version
     except Exception:
         return False
 
     if not hasattr(config, "_UNICODE_BANNER") or not hasattr(config, "_ASCII_BANNER"):
         return False
 
-    config._UNICODE_BANNER = _banner(MANTA_MARK_UNICODE)
-    config._ASCII_BANNER = _banner(MANTA_MARK_ASCII)
+    config._UNICODE_BANNER = _versioned(MANTA_UNICODE_BANNER, dcode_version)
+    config._ASCII_BANNER = _versioned(MANTA_ASCII_BANNER, dcode_version)
     return True
 
 
