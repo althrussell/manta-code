@@ -249,6 +249,12 @@ class TokenEconomyMiddleware(AgentMiddleware):
             scaffold, net_new = estimate_scaffolding(request)
             thread = _thread_id(request)
 
+            # Task attribution (ADR 0010 Phase C): background tasks export
+            # MANTA_TASK_ID, so their spend is drillable per task — not just
+            # per agent. Interactive sessions fall back to the agent label.
+            import os
+
+            task = os.environ.get("MANTA_TASK_ID") or self._agent
             record_usage(
                 UsageRecord(
                     agent=self._agent,
@@ -261,7 +267,7 @@ class TokenEconomyMiddleware(AgentMiddleware):
                     scaffold_tokens=scaffold,
                     net_new_tokens=net_new,
                     thread_id=thread,
-                    task=self._agent,
+                    task=task,
                 ),
                 path=self._ledger_path,
             )

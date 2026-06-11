@@ -110,6 +110,16 @@ def _agent_extra_middleware(defn: Any) -> list[Any]:
     except Exception:  # noqa: BLE001
         pass
 
+    # ADR 0010 Phase C: proactive model advice (session signals + tiered tips).
+    try:
+        from .middleware.advice import agent_advice_middleware
+
+        mw = agent_advice_middleware(defn)
+        if mw is not None:
+            extras.append(mw)
+    except Exception:  # noqa: BLE001
+        pass
+
     return extras
 
 
@@ -231,6 +241,14 @@ def build_orchestrator_middleware() -> list[Any]:
                 middleware.append(mw)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            from .middleware.advice import agent_advice_middleware
+
+            mw = agent_advice_middleware(defn)
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
     else:
         # Deterministic plan-request delegation, outermost so it can short-circuit
         # the model call entirely (no accounting noise for a call that never runs).
@@ -252,6 +270,14 @@ def build_orchestrator_middleware() -> list[Any]:
             from .tasks.events import orchestrator_event_middleware
 
             mw = orchestrator_event_middleware()
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .middleware.advice import orchestrator_advice_middleware
+
+            mw = orchestrator_advice_middleware()
             if mw is not None:
                 middleware.append(mw)
         except Exception:  # noqa: BLE001

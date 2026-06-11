@@ -130,6 +130,51 @@ def _normalize_chunk(chunk: ChatGenerationChunk) -> ChatGenerationChunk:
     )
 
 
+def _usage_delta(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Convert one chunk's *cumulative* usage into a delta against ``previous``.
+
+    ``databricks-langchain`` attaches the cumulative usage totals to **every**
+    streamed chunk, but langchain's chunk merge *adds* ``usage_metadata``
+    across chunks — so a 15-chunk stream records ~15x the real input tokens
+    (and a near-quadratic output count) on the merged message. That poisoned
+    Manta's ledger, budget governor, and advice signals (ADR 0010 Phase C).
+
+    Emitting per-chunk deltas makes the additive merge come out exactly equal
+    to the provider's final cumulative totals. Handles nested int dicts (e.g.
+    ``input_token_details``) recursively; negative deltas clamp to 0 (a
+    provider restating a lower total is noise, not a refund).
+    """
+    delta: dict[str, Any] = {}
+    for key, value in current.items():
+        prev = previous.get(key)
+        if isinstance(value, int):
+            delta[key] = max(0, value - (prev if isinstance(prev, int) else 0))
+        elif isinstance(value, dict):
+            delta[key] = _usage_delta(prev if isinstance(prev, dict) else {}, value)
+        else:
+            delta[key] = value
+    return delta
+
+
+class _StreamUsageDeduplicator:
+    """Rewrite cumulative per-chunk usage as deltas across one stream."""
+
+    def __init__(self) -> None:
+        self._cumulative: dict[str, Any] = {}
+
+    def rewrite(self, chunk: ChatGenerationChunk) -> ChatGenerationChunk:
+        usage = getattr(chunk.message, "usage_metadata", None)
+        if not isinstance(usage, dict) or not usage:
+            return chunk
+        delta = _usage_delta(self._cumulative, usage)
+        self._cumulative = usage
+        message = chunk.message.model_copy(update={"usage_metadata": delta})
+        return ChatGenerationChunk(
+            message=message,  # type: ignore[arg-type]
+            generation_info=chunk.generation_info,
+        )
+
+
 class MantaChatDatabricks(ChatDatabricks):
     """``ChatDatabricks`` that strips reasoning blocks from assistant turns.
 
@@ -145,14 +190,16 @@ class MantaChatDatabricks(ChatDatabricks):
         return _normalize_chat_result(await super()._agenerate(*args, **kwargs))
 
     def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        dedup = _StreamUsageDeduplicator()
         for chunk in super()._stream(*args, **kwargs):
-            yield _normalize_chunk(chunk)
+            yield dedup.rewrite(_normalize_chunk(chunk))
 
     async def _astream(
         self, *args: Any, **kwargs: Any
     ) -> AsyncIterator[ChatGenerationChunk]:
+        dedup = _StreamUsageDeduplicator()
         async for chunk in super()._astream(*args, **kwargs):
-            yield _normalize_chunk(chunk)
+            yield dedup.rewrite(_normalize_chunk(chunk))
 
 
 #: Guards :func:`_install_subagent_databricks_resolver` against re-patching.

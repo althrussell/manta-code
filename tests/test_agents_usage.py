@@ -129,3 +129,76 @@ def test_totals_sums_across_agents(tmp_path):
 
 def test_aggregate_empty_ledger(tmp_path):
     assert U.aggregate(by="agent", path=tmp_path / "empty.db") == []
+
+
+# --- advice ledger + offline advisor (ADR 0010 Phase C) --------------------------
+
+
+def test_advice_record_roundtrip(tmp_path):
+    db = tmp_path / "U.db"
+    U.record_advice(
+        U.AdviceRecord(
+            agent="swe", kind="escalate", severity="note", message="try opus",
+            model="databricks-gpt-oss-120b", thread_id="t1", delivered="note",
+        ),
+        path=db,
+    )
+    (loaded,) = U.recent_advice(path=db)
+    assert loaded.kind == "escalate"
+    assert loaded.message == "try opus"
+    assert loaded.accepted is None
+
+
+def test_advise_flags_scaffold_overhead(tmp_path):
+    db = tmp_path / "U.db"
+    U.record_usage(
+        U.UsageRecord(
+            agent="orchestrator", model="databricks-gpt-oss-120b",
+            input_tokens=10_000, output_tokens=500,
+            scaffold_tokens=8_000, net_new_tokens=2_000,
+        ),
+        path=db,
+    )
+    recs = U.advise(path=db)
+    assert any("Scaffolding" in r for r in recs)
+
+
+def test_advise_flags_low_cache_hit(tmp_path):
+    db = tmp_path / "U.db"
+    U.record_usage(
+        U.UsageRecord(
+            agent="orchestrator", model="databricks-claude-opus-4-8",
+            input_tokens=10_000, output_tokens=500,
+            cache_read=100, cache_creation=5_000,
+        ),
+        path=db,
+    )
+    recs = U.advise(path=db)
+    assert any("Cache-hit rate" in r for r in recs)
+
+
+def test_advise_flags_premium_heavy_mix(tmp_path):
+    db = tmp_path / "U.db"
+    for _ in range(12):
+        U.record_usage(
+            U.UsageRecord(
+                agent="orchestrator", model="databricks-claude-opus-4-8",
+                input_tokens=1_000, output_tokens=100,
+            ),
+            path=db,
+        )
+    recs = U.advise(path=db)
+    assert any("premium models" in r for r in recs)
+
+
+def test_advise_quiet_on_healthy_ledger(tmp_path):
+    db = tmp_path / "U.db"
+    U.record_usage(
+        U.UsageRecord(
+            agent="orchestrator", model="databricks-gpt-oss-120b",
+            input_tokens=1_000, output_tokens=400,
+            scaffold_tokens=200, net_new_tokens=800,
+        ),
+        path=db,
+    )
+    assert U.advise(path=db) == []

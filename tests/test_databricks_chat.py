@@ -207,3 +207,62 @@ def test_resolver_defers_non_databricks_specs(monkeypatch):
     assert isinstance(
         _models.resolve_model("databricks:databricks-gpt-5-5"), dc.MantaChatDatabricks
     )
+
+
+# --- streaming usage dedup (ADR 0010 Phase C accounting fix) --------------------
+
+
+def test_usage_delta_converts_cumulative_to_increments():
+    prev: dict = {}
+    first = dc._usage_delta(prev, {"input_tokens": 105, "output_tokens": 10, "total_tokens": 115})
+    assert first == {"input_tokens": 105, "output_tokens": 10, "total_tokens": 115}
+    second = dc._usage_delta(
+        {"input_tokens": 105, "output_tokens": 10, "total_tokens": 115},
+        {"input_tokens": 105, "output_tokens": 25, "total_tokens": 130},
+    )
+    # Input already paid for: delta 0. Output grew by 15.
+    assert second == {"input_tokens": 0, "output_tokens": 15, "total_tokens": 15}
+
+
+def test_usage_delta_handles_nested_details_and_clamps_negative():
+    delta = dc._usage_delta(
+        {"input_tokens": 100, "input_token_details": {"cache_read": 80}},
+        {"input_tokens": 90, "input_token_details": {"cache_read": 80}},
+    )
+    assert delta["input_tokens"] == 0  # restated lower total is noise, not refund
+    assert delta["input_token_details"] == {"cache_read": 0}
+
+
+def test_stream_dedup_makes_additive_merge_equal_final_totals():
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+
+    # databricks-langchain attaches *cumulative* usage to every chunk; the
+    # additive chunk merge must come out equal to the final cumulative totals.
+    cumulative = [
+        {"input_tokens": 105, "output_tokens": 10, "total_tokens": 115},
+        {"input_tokens": 105, "output_tokens": 30, "total_tokens": 135},
+        {"input_tokens": 105, "output_tokens": 51, "total_tokens": 156},
+    ]
+    dedup = dc._StreamUsageDeduplicator()
+    merged = None
+    for i, usage in enumerate(cumulative):
+        chunk = ChatGenerationChunk(
+            message=AIMessageChunk(content=f"c{i}", usage_metadata=dict(usage))
+        )
+        rewritten = dedup.rewrite(chunk)
+        merged = rewritten.message if merged is None else merged + rewritten.message
+    assert merged.usage_metadata == {
+        "input_tokens": 105,
+        "output_tokens": 51,
+        "total_tokens": 156,
+    }
+
+
+def test_stream_dedup_passes_chunks_without_usage():
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+
+    dedup = dc._StreamUsageDeduplicator()
+    chunk = ChatGenerationChunk(message=AIMessageChunk(content="hello"))
+    assert dedup.rewrite(chunk) is chunk

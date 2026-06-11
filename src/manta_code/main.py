@@ -649,6 +649,9 @@ def cost(
     breakdown: bool = typer.Option(
         False, "--breakdown", help="Show scaffolding (skills/defaults) vs net-new tokens."
     ),
+    advise: bool = typer.Option(
+        False, "--advise", help="Spend-optimization recommendations from the ledger."
+    ),
 ) -> None:
     """Historical token + dollar spend from the local usage ledger.
 
@@ -714,6 +717,23 @@ def cost(
                 "[dim]Scaffolding = system prompt + tool/skill/memory schemas paid "
                 "before any task work. Prune expensive defaults to lower it.[/dim]"
             )
+
+    if advise:
+        recommendations = usage.advise(since=since)
+        recent = usage.recent_advice(since=since, limit=10)
+        if not recommendations and not recent:
+            console.print(
+                "\n[green]No spend-optimization advice — the ledger looks healthy.[/green]"
+            )
+        if recommendations:
+            console.print("\n[bold]Spend advice (from the ledger):[/bold]")
+            for rec in recommendations:
+                console.print(f"  • {rec}")
+        if recent:
+            console.print("\n[bold]Recent in-session advice:[/bold]")
+            for r in recent:
+                marker = "⏸" if r.severity == "interrupt" else "•"
+                console.print(f"  {marker} [{r.agent}] {r.kind}: {r.message[:110]}")
 
 
 @app.command()
@@ -859,8 +879,10 @@ def task_main(ctx: typer.Context) -> None:
 
 
 def _task_list(state: Optional[str]) -> None:
+    from .tasks.executor import reconcile_stale_tasks
     from .tasks.store import list_tasks
 
+    reconcile_stale_tasks()
     tasks = list_tasks(state=state, limit=30)
     if not tasks:
         console.print(
@@ -918,8 +940,10 @@ def task_list_cmd(
 @task_app.command("status")
 def task_status(task_id: str = typer.Argument(..., help="Task id.")) -> None:
     """Show one task's state, timing, and exit code."""
+    from .tasks.executor import reconcile_stale_tasks
     from .tasks.store import get_task
 
+    reconcile_stale_tasks()
     record = get_task(task_id)
     if record is None:
         console.print(f"[red]No task '{task_id}'.[/red]")
@@ -974,8 +998,10 @@ def status(
 ) -> None:
     """The chief-of-staff pane: tasks, recent activity, and spend in one view."""
     from .agents import usage
+    from .tasks.executor import reconcile_stale_tasks
     from .tasks.store import list_tasks, recent_events
 
+    reconcile_stale_tasks()
     active = [t for t in list_tasks(limit=50) if t.state in ("queued", "running")]
     finished = [t for t in list_tasks(limit=8) if t.state not in ("queued", "running")]
     shown = [*active, *finished][:12]

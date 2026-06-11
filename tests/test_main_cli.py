@@ -385,3 +385,20 @@ def test_status_single_pane(tmp_path, monkeypatch):
     assert "st000001" in result.stdout
     assert "@review" in result.stdout
     assert "denied" in result.stdout
+
+
+def test_cost_advise_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    from manta_code.agents import usage as usage_mod
+
+    usage_mod.record_usage(
+        usage_mod.UsageRecord(
+            agent="orchestrator", model="databricks-gpt-oss-120b",
+            input_tokens=10_000, output_tokens=500,
+            scaffold_tokens=8_000, net_new_tokens=2_000,
+        )
+    )
+    result = runner.invoke(app, ["cost", "--advise"])
+    assert result.exit_code == 0
+    assert "Spend advice" in result.stdout
+    assert "Scaffolding" in result.stdout
