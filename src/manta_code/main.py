@@ -134,13 +134,21 @@ def _launch_interactive(*, profile: Optional[str], passthrough: list[str]) -> No
         raise typer.Exit(code=1)
 
     from . import dcode
+    from .auth import databricks_configured
 
     cfg = load_config()
+    configured = databricks_configured(profile)
+    if not configured:
+        console.print(
+            "[dim]Databricks: not configured (optional) — launching with your "
+            "other model providers. `databricks auth login` enables Databricks "
+            "models and tools.[/dim]"
+        )
     try:
         dcode.launch(
             profile=profile,
-            default_endpoint=cfg.interactive.default_endpoint,
-            endpoints=_resolve_endpoints(cfg, profile),
+            default_endpoint=cfg.interactive.default_endpoint if configured else None,
+            endpoints=_resolve_endpoints(cfg, profile) if configured else [],
             passthrough=passthrough,
         )
     except dcode.LauncherError as exc:
@@ -155,9 +163,9 @@ def _resolve_endpoints(cfg: MantaConfig, profile: Optional[str]) -> list[str]:
     launches with) and the explicit ``extra_endpoints`` follow, so a curated
     ordering is preserved even when discovery succeeds. Every chat-capable
     serving endpoint found in the workspace is then appended (deduped), so
-    ``/model`` reflects the live Databricks AI Gateway rather than a hardcoded
-    pair. Discovery is best-effort: on any failure the configured endpoints are
-    used unchanged.
+    ``/model`` reflects the live workspace rather than a hardcoded pair.
+    Discovery is best-effort: on any failure the configured endpoints are used
+    unchanged.
     """
     from .auth import list_serving_chat_endpoints
 
@@ -204,6 +212,16 @@ def doctor(ctx: typer.Context) -> None:
     cfg = load_config()
     endpoint = cfg.interactive.default_endpoint
 
+    # Databricks is detect-and-enable (ADR 0010): absent entirely, it is
+    # reported as optional rather than failing preflight, and the
+    # Databricks-specific checks (model wiring, auth probe) are skipped.
+    try:
+        from .auth import databricks_configured
+
+        db_configured = databricks_configured(profile)
+    except Exception:  # noqa: BLE001
+        db_configured = False
+
     # Provision + validate the Databricks provider in deepagents-code's config.
     # This is offline (no model call) and idempotent.
     if dcode_ok:
@@ -212,29 +230,38 @@ def doctor(ctx: typer.Context) -> None:
             from .auth import resolve_profile
 
             path = dcode.ensure_dcode_config(
-                interactive_endpoints(cfg), default_endpoint=endpoint
+                interactive_endpoints(cfg) if db_configured else [],
+                default_endpoint=endpoint if db_configured else None,
             )
             dcode.mark_onboarding_complete()
             add("dcode config", True, str(path))
-            try:
-                from deepagents_code.config import create_model
+            if db_configured:
+                try:
+                    from deepagents_code.config import create_model
 
-                with _databricks_profile_env(resolve_profile(profile)):
-                    result = create_model(f"databricks:{endpoint}")
-                add("model wiring", True, type(result.model).__name__)
-            except Exception as exc:  # noqa: BLE001
-                add("model wiring", False, f"{endpoint}: {exc}")
+                    with _databricks_profile_env(resolve_profile(profile)):
+                        result = create_model(f"databricks:{endpoint}")
+                    add("model wiring", True, type(result.model).__name__)
+                except Exception as exc:  # noqa: BLE001
+                    add("model wiring", False, f"{endpoint}: {exc}")
         except Exception as exc:  # noqa: BLE001
             add("dcode config", False, str(exc))
 
-    try:
-        from .auth import current_username, is_authenticated, resolve_profile
+    if not db_configured:
+        add(
+            "databricks",
+            True,
+            "not configured (optional) — `databricks auth login` to enable",
+        )
+    else:
+        try:
+            from .auth import current_username, is_authenticated, resolve_profile
 
-        authed = is_authenticated(profile)
-        who = current_username(profile) if authed else (resolve_profile(profile) or "default profile")
-        add("databricks auth", authed, who or "")
-    except Exception as exc:  # noqa: BLE001
-        add("databricks auth", False, str(exc))
+            authed = is_authenticated(profile)
+            who = current_username(profile) if authed else (resolve_profile(profile) or "default profile")
+            add("databricks auth", authed, who or "")
+        except Exception as exc:  # noqa: BLE001
+            add("databricks auth", False, str(exc))
 
     # Control-plane hooks: Manta monkeypatches a few internal upstream symbols
     # (ADR 0008). If a pinned-version bump moved one, the build hook degrades to
@@ -729,13 +756,15 @@ def run(
         raise typer.Exit(code=1)
 
     from . import dcode
+    from .auth import databricks_configured
 
     cfg = load_config()
+    db_configured = databricks_configured(profile)
     try:
         code = dcode.run_headless(
             profile=profile,
-            default_endpoint=cfg.interactive.default_endpoint,
-            endpoints=_resolve_endpoints(cfg, profile),
+            default_endpoint=cfg.interactive.default_endpoint if db_configured else None,
+            endpoints=_resolve_endpoints(cfg, profile) if db_configured else [],
             message=task,
             passthrough=list(ctx.args),
             timeout=timeout,

@@ -294,43 +294,57 @@ def test_apply_branding_overrides_upstream_banner():
         config._ASCII_BANNER = original_ascii
 
 
-def test_databricks_only_models_filters_to_databricks(monkeypatch):
-    model_config = pytest.importorskip("deepagents_code.model_config")
-
-    class _FakeConfig:
-        providers = {
-            "databricks": {"models": ["databricks-claude-sonnet", "databricks-gpt"]},
-            "anthropic": {"models": ["claude-opus"]},
-        }
-
+def test_databricks_first_models_reorders_but_keeps_all_providers(monkeypatch):
+    # Databricks-first, not Databricks-only (ADR 0010): every provider upstream
+    # discovers stays available; databricks just moves to the front.
     monkeypatch.setattr(
-        model_config.ModelConfig, "load", classmethod(lambda cls: _FakeConfig())
+        _boot,
+        "_original_get_available_models",
+        lambda: {
+            "anthropic": ["claude-opus"],
+            "databricks": ["databricks-claude-sonnet", "databricks-gpt"],
+            "openai": ["gpt-5"],
+        },
     )
-    assert _boot._databricks_only_models() == {
-        "databricks": ["databricks-claude-sonnet", "databricks-gpt"]
-    }
+    result = _boot._databricks_first_models()
+    assert list(result) == ["databricks", "anthropic", "openai"]
+    assert result["anthropic"] == ["claude-opus"]
+    assert result["openai"] == ["gpt-5"]
 
 
-def test_databricks_only_models_empty_when_provider_absent(monkeypatch):
-    model_config = pytest.importorskip("deepagents_code.model_config")
-
-    class _FakeConfig:
-        providers = {"anthropic": {"models": ["claude-opus"]}}
-
+def test_databricks_first_models_passthrough_when_provider_absent(monkeypatch):
+    # Off Databricks the wrapper is a pure passthrough — nothing is hidden.
     monkeypatch.setattr(
-        model_config.ModelConfig, "load", classmethod(lambda cls: _FakeConfig())
+        _boot,
+        "_original_get_available_models",
+        lambda: {"anthropic": ["claude-opus"]},
     )
-    assert _boot._databricks_only_models() == {}
+    assert _boot._databricks_first_models() == {"anthropic": ["claude-opus"]}
 
 
-def test_restrict_models_to_databricks_patches_discovery():
+def test_databricks_first_models_empty_on_upstream_failure(monkeypatch):
+    def _boom():
+        raise RuntimeError("discovery exploded")
+
+    monkeypatch.setattr(_boot, "_original_get_available_models", _boom)
+    assert _boot._databricks_first_models() == {}
+
+
+def test_prefer_databricks_models_patches_discovery():
     model_config = pytest.importorskip("deepagents_code.model_config")
     original = model_config.get_available_models
+    saved_original = _boot._original_get_available_models
     try:
-        assert _boot.restrict_models_to_databricks() is True
-        assert model_config.get_available_models is _boot._databricks_only_models
+        assert _boot.prefer_databricks_models() is True
+        assert model_config.get_available_models is _boot._databricks_first_models
+        # The upstream implementation is captured so the wrapper can delegate.
+        assert _boot._original_get_available_models is original
+        # Idempotent: re-applying must not capture the wrapper as the original.
+        assert _boot.prefer_databricks_models() is True
+        assert _boot._original_get_available_models is original
     finally:
         model_config.get_available_models = original
+        _boot._original_get_available_models = saved_original
 
 
 def test_rebrand_auth_screen_replaces_screen_internals():
@@ -452,3 +466,83 @@ def test_switch_databricks_workspace_without_restart_hook(monkeypatch):
 
     assert os.environ["DATABRICKS_CONFIG_PROFILE"] == "acme-prod"
     assert any(sev == "warning" for sev, _ in app.notifications)
+
+
+def test_boot_main_announces_degraded_control_plane(monkeypatch, capsys):
+    # ADR 0010: falling back to vanilla is fine; falling back *silently* is not.
+    pytest.importorskip("deepagents_code")
+    import deepagents_code.main as upstream_main
+
+    monkeypatch.setattr(_boot, "apply_branding", lambda: True)
+    monkeypatch.setattr(_boot, "rebrand_model_selector_footer", lambda: True)
+    monkeypatch.setattr(_boot, "prefer_databricks_models", lambda: True)
+    monkeypatch.setattr(_boot, "rebrand_auth_screen", lambda: True)
+    monkeypatch.setattr(_boot, "allow_blocking_server", lambda: True)
+    monkeypatch.setattr(_boot, "install_manta_build_hook", lambda: False)
+    monkeypatch.setattr(upstream_main, "cli_main", lambda: None)
+
+    _boot.main()
+    err = capsys.readouterr().err
+    assert "Manta degraded" in err
+    assert "control plane" in err
+    assert "manta doctor" in err
+
+
+def test_boot_main_silent_when_everything_applies(monkeypatch, capsys):
+    pytest.importorskip("deepagents_code")
+    import deepagents_code.main as upstream_main
+
+    for fn in (
+        "apply_branding",
+        "rebrand_model_selector_footer",
+        "prefer_databricks_models",
+        "rebrand_auth_screen",
+        "allow_blocking_server",
+        "install_manta_build_hook",
+    ):
+        monkeypatch.setattr(_boot, fn, lambda: True)
+    monkeypatch.setattr(upstream_main, "cli_main", lambda: None)
+
+    _boot.main()
+    assert "Manta degraded" not in capsys.readouterr().err
+
+
+def test_rebranded_auth_screen_renders_both_sections(tmp_path, monkeypatch):
+    # Pilot-render the recomposed /auth screen: the Databricks workspace picker
+    # leads and upstream's provider API-key list survives below it (ADR 0010).
+    pytest.importorskip("deepagents_code")
+    textual = pytest.importorskip("textual")  # noqa: F841
+    import asyncio
+
+    from textual.app import App
+    from textual.widgets import OptionList
+
+    cfg = tmp_path / ".databrickscfg"
+    cfg.write_text(
+        "[prod]\nhost = https://prod.example.com\ntoken = x\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+
+    assert _boot.rebrand_auth_screen() is True
+    from deepagents_code.widgets.auth import AuthManagerScreen
+
+    class _Harness(App):
+        pass
+
+    async def _render() -> tuple[int, list[str]]:
+        app = _Harness()
+        async with app.run_test(size=(100, 40)) as pilot:
+            await app.push_screen(AuthManagerScreen())
+            await pilot.pause()
+            screen = app.screen
+            workspaces = screen.query_one("#manta-workspace-options", OptionList)
+            prov = screen.query_one("#auth-manager-options", OptionList)
+            ids = [
+                prov.get_option_at_index(i).id for i in range(prov.option_count)
+            ]
+            return workspaces.option_count, ids
+
+    workspace_count, provider_ids = asyncio.run(_render())
+    assert workspace_count == 1  # the prod profile from the fake config file
+    # Upstream's installed providers are still manageable on the same screen.
+    assert "anthropic" in provider_ids

@@ -165,3 +165,23 @@ def test_wrapped_falls_back_when_enrichment_raises(monkeypatch):
         assert calls["n"] == 1
     finally:
         dc_agent.create_deep_agent = original
+
+
+def test_databricks_tools_skipped_when_not_configured(monkeypatch):
+    # Databricks is detect-and-enable (ADR 0010): without a workspace, the
+    # UC/SQL/jobs tools are not injected at all.
+    from manta_code import auth
+
+    monkeypatch.setattr(auth, "databricks_configured", lambda profile=None: False)
+    assert hook.build_databricks_tools() == []
+
+
+def test_databricks_tools_built_when_configured(monkeypatch):
+    from manta_code import auth
+
+    monkeypatch.setattr(auth, "databricks_configured", lambda profile=None: True)
+    sentinel = [object()]
+    import manta_code.databricks_tools as dbt
+
+    monkeypatch.setattr(dbt, "build_default_databricks_tools", lambda: sentinel)
+    assert hook.build_databricks_tools() == sentinel

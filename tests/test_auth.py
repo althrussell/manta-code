@@ -105,3 +105,34 @@ def test_ensure_auth_returns_profile_when_authenticated(monkeypatch):
 def test_ensure_auth_non_interactive_returns_none(monkeypatch):
     monkeypatch.setattr(auth, "is_authenticated", lambda profile=None: False)
     assert auth.ensure_auth(None, interactive=False) is None
+
+
+def test_databricks_configured_false_when_nothing_present(tmp_path: Path, monkeypatch):
+    for var in ("DATABRICKS_HOST", "DATABRICKS_CONFIG_PROFILE", "MANTA_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "nope.cfg"))
+    assert auth.databricks_configured() is False
+
+
+def test_databricks_configured_via_explicit_profile(tmp_path: Path, monkeypatch):
+    for var in ("DATABRICKS_HOST", "DATABRICKS_CONFIG_PROFILE", "MANTA_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "nope.cfg"))
+    assert auth.databricks_configured("prod") is True
+
+
+def test_databricks_configured_via_env(tmp_path: Path, monkeypatch):
+    for var in ("DATABRICKS_HOST", "DATABRICKS_CONFIG_PROFILE", "MANTA_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "nope.cfg"))
+    monkeypatch.setenv("DATABRICKS_HOST", "https://ws.example.com")
+    assert auth.databricks_configured() is True
+
+
+def test_databricks_configured_via_config_file(tmp_path: Path, monkeypatch):
+    for var in ("DATABRICKS_HOST", "DATABRICKS_CONFIG_PROFILE", "MANTA_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = tmp_path / ".databrickscfg"
+    cfg.write_text("[prod]\nhost = https://prod.example.com\n", encoding="utf-8")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    assert auth.databricks_configured() is True

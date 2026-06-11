@@ -155,16 +155,12 @@ class MantaChatDatabricks(ChatDatabricks):
             yield _normalize_chunk(chunk)
 
 
-#: ``provider:`` prefix that identifies a Databricks model spec (matches
-#: :data:`manta_code.dcode.DATABRICKS_PROVIDER`).
-_DATABRICKS_MODEL_PREFIX = "databricks:"
-
 #: Guards :func:`_install_subagent_databricks_resolver` against re-patching.
 _resolver_installed = False
 
 
 def _install_subagent_databricks_resolver() -> bool:
-    """Route subagent ``databricks:<endpoint>`` specs through Manta's provider.
+    """Route subagent model specs for Manta-registered providers through Manta.
 
     deepagents resolves a subagent's ``model`` string with
     ``deepagents._models.resolve_model`` -> langchain ``init_chat_model``, which
@@ -173,10 +169,12 @@ def _install_subagent_databricks_resolver() -> bool:
     "Unable to infer model provider". The main agent avoids this because
     deepagents-code's ``create_model`` honors the provider ``class_path``.
 
-    This wraps ``resolve_model`` so a ``databricks:<endpoint>`` spec instantiates
-    :class:`MantaChatDatabricks` directly — mirroring how deepagents-code's
+    This wraps ``resolve_model`` so any spec whose provider is registered in
+    :mod:`manta_code.providers` (databricks today; the AI Gateway provider in
+    Phase D) resolves through Manta's registry — mirroring how deepagents-code's
     ``_create_model_from_class`` builds the main agent (``cls(model=endpoint)``)
-    — while every other spec defers to the original resolver.
+    — while every other spec (``anthropic:…``, ``openai:…``, bare names) defers
+    to the original resolver, which handles them natively.
 
     Patching is applied in **two** places because some deepagents modules bind
     the function by name at import time. ``deepagents.graph`` does a top-level
@@ -197,12 +195,17 @@ def _install_subagent_databricks_resolver() -> bool:
     except Exception:
         return False
 
+    from . import providers
+
     original_resolve_model = _models.resolve_model
 
     def resolve_model(model: Any) -> Any:
-        if isinstance(model, str) and model.startswith(_DATABRICKS_MODEL_PREFIX):
-            endpoint = model[len(_DATABRICKS_MODEL_PREFIX) :]
-            return MantaChatDatabricks(model=endpoint)
+        if isinstance(model, str):
+            ref = providers.parse_model_ref(model)
+            if ref is not None and providers.resolver_for(ref.provider) is not None:
+                resolved = providers.resolve_model_ref(model, fallback=False)
+                if resolved is not None:
+                    return resolved
         return original_resolve_model(model)
 
     _models.resolve_model = resolve_model

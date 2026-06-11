@@ -281,3 +281,28 @@ def test_doctor_reports_checks(monkeypatch):
     assert result.exit_code == 0
     assert "Preflight" in result.stdout
     assert "deepagents-code" in result.stdout
+
+
+def test_launch_interactive_databricks_optional(monkeypatch):
+    # Off Databricks (ADR 0010): launch proceeds with no Databricks default
+    # model and no endpoint registration, instead of failing.
+    calls = {}
+
+    def fake_dcode_launch(**kwargs):
+        calls.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr(dcode, "launch", fake_dcode_launch)
+    monkeypatch.setattr(auth, "databricks_configured", lambda profile=None: False)
+    main_mod._launch_interactive(profile=None, passthrough=[])
+    assert calls["default_endpoint"] is None
+    assert calls["endpoints"] == []
+
+
+def test_doctor_reports_databricks_optional(monkeypatch):
+    monkeypatch.setattr(auth, "databricks_configured", lambda profile=None: False)
+    monkeypatch.setattr(dcode, "ensure_dcode_config", lambda *a, **k: Path("/tmp/manta-doctor"))
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "not configured (optional)" in result.stdout

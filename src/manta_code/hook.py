@@ -225,8 +225,17 @@ def build_orchestrator_middleware() -> list[Any]:
 
 
 def build_databricks_tools() -> list[Any]:
-    """Databricks-native tools to expose to the main agent (Phase 2)."""
+    """Databricks-native tools to expose to the main agent (Phase 2).
+
+    Databricks is detect-and-enable (ADR 0010): with no workspace configured,
+    no tools are injected — off Databricks they would only error at call time
+    and crowd the tool list.
+    """
     try:
+        from .auth import databricks_configured
+
+        if not databricks_configured():
+            return []
         from .databricks_tools import build_default_databricks_tools
 
         return build_default_databricks_tools()

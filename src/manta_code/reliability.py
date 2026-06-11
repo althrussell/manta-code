@@ -28,15 +28,24 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class PatchTarget:
-    """A single upstream symbol Manta depends on being able to monkeypatch."""
+    """A single upstream symbol Manta depends on being able to monkeypatch.
+
+    ``attribute`` may be dotted (``Class.method``) to probe an attribute on a
+    class. ``kind`` selects the check: ``"callable"`` (default) requires a
+    callable symbol; ``"attr"`` only requires the symbol to exist (used for
+    the banner string constants).
+    """
 
     module: str
     attribute: str
     purpose: str
+    kind: str = "callable"
 
 
-#: Every internal upstream symbol Manta patches or reads by reflection. Keep
-#: this list in sync with the modules referenced in each ``purpose``.
+#: Every internal upstream symbol Manta patches or reads by reflection — the
+#: hook/resolver seams plus every ``_boot`` patch surface (ADR 0010 closed the
+#: gap where ``_boot``'s targets were unverified). Keep this list in sync with
+#: the modules referenced in each ``purpose``.
 PATCH_TARGETS: tuple[PatchTarget, ...] = (
     PatchTarget(
         module="deepagents_code.agent",
@@ -51,7 +60,54 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
     PatchTarget(
         module="deepagents._models",
         attribute="resolve_model",
-        purpose="subagent databricks:<endpoint> resolver (manta_code.databricks_chat)",
+        purpose="subagent provider:model resolver (manta_code.databricks_chat)",
+    ),
+    PatchTarget(
+        module="deepagents_code.config",
+        attribute="_UNICODE_BANNER",
+        purpose="splash banner constant rebranded by manta_code._boot",
+        kind="attr",
+    ),
+    PatchTarget(
+        module="deepagents_code.config",
+        attribute="_ASCII_BANNER",
+        purpose="splash banner constant rebranded by manta_code._boot",
+        kind="attr",
+    ),
+    PatchTarget(
+        module="deepagents_code.model_config",
+        attribute="get_available_models",
+        purpose="model discovery wrapped Databricks-first by manta_code._boot",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.auth",
+        attribute="AuthManagerScreen.compose",
+        purpose="/auth screen recomposed (workspace picker + provider keys)",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.auth",
+        attribute="AuthManagerScreen._build_options_with_warning",
+        purpose="upstream provider-key list reused by Manta's /auth compose",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.auth",
+        attribute="AuthPromptScreen",
+        purpose="upstream API-key prompt pushed from Manta's /auth screen",
+    ),
+    PatchTarget(
+        module="deepagents_code.model_config",
+        attribute="get_credential_env_var",
+        purpose="provider env-var lookup used by Manta's /auth screen",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.model_selector",
+        attribute="ModelSelectorScreen._update_footer",
+        purpose="/model footer wrapped for profile-less Databricks endpoints",
+    ),
+    PatchTarget(
+        module="deepagents_code.server",
+        attribute="_build_server_cmd",
+        purpose="server cmd wrapped to add --allow-blocking (Databricks auth)",
     ),
 )
 
@@ -84,8 +140,15 @@ def verify_patch_targets(
                 PatchTargetResult(target, False, f"module not importable: {exc}")
             )
             continue
-        symbol = getattr(module, target.attribute, None)
-        if symbol is None:
+        # Dotted attributes (``Class.method``) walk into the class.
+        symbol: object = module
+        missing = False
+        for part in target.attribute.split("."):
+            symbol = getattr(symbol, part, None)
+            if symbol is None:
+                missing = True
+                break
+        if missing:
             results.append(
                 PatchTargetResult(
                     target,
@@ -94,7 +157,7 @@ def verify_patch_targets(
                 )
             )
             continue
-        if not callable(symbol):
+        if target.kind == "callable" and not callable(symbol):
             results.append(
                 PatchTargetResult(
                     target, False, f"{target.attribute} is not callable"
