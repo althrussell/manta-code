@@ -280,6 +280,59 @@ def _has_model_flag(args: Sequence[str]) -> bool:
     return False
 
 
+def _addressed_agent(args: Sequence[str]) -> str | None:
+    """Return the agent named by ``-a/--agent`` in the passthrough args, if any."""
+    args = list(args)
+    for i, arg in enumerate(args):
+        if arg in ("-a", "--agent") and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--agent="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _agent_model_spec(agent_name: str) -> str | None:
+    """The full ``provider:model`` pin for a Manta agent, or ``None``.
+
+    Guarded: an unknown agent or an unreadable registry returns ``None`` so
+    the caller falls back to the configured default endpoint.
+    """
+    try:
+        from .agents.defaults import merged_agents
+        from .agents.registry import list_agents
+
+        for defn in merged_agents(list_agents()):
+            if defn.name == agent_name:
+                return defn.model or None
+    except Exception:  # noqa: BLE001 - pin lookup is best-effort
+        pass
+    return None
+
+
+def _session_model_spec(
+    default_endpoint: str | None, extras: Sequence[str]
+) -> str | None:
+    """Resolve the ``-M`` spec to inject for a launch, or ``None``.
+
+    The user's own ``-M/--model`` always wins (no injection). A launch
+    addressed to an agent (``-a <name>``) uses **that agent's model pin** as
+    the session model — so the visible session model matches the agent
+    actually running ("the right model for the role", VISION pillar 2), and
+    the pin middleware becomes a backstop rather than the mechanism. Otherwise
+    the configured default endpoint applies.
+    """
+    if _has_model_flag(extras):
+        return None
+    agent = _addressed_agent(extras)
+    if agent:
+        pin = _agent_model_spec(agent)
+        if pin:
+            return pin
+    if default_endpoint:
+        return f"{DATABRICKS_PROVIDER}:{default_endpoint}"
+    return None
+
+
 def build_dcode_argv(
     default_endpoint: str | None,
     passthrough: Sequence[str],
@@ -289,14 +342,16 @@ def build_dcode_argv(
     """Build the argv to launch deepagents-code via Manta's branded boot shim.
 
     Runs ``python -m manta_code._boot`` (which rebrands the splash then hands
-    off to ``deepagents-code``'s CLI). Injects ``-M databricks:<endpoint>`` only
-    when the user did not pass their own ``-M/--model``. Extra args are
-    forwarded verbatim.
+    off to ``deepagents-code``'s CLI). Injects ``-M`` only when the user did
+    not pass their own ``-M/--model``: the addressed agent's pin when
+    launching with ``-a <agent>``, else ``databricks:<default endpoint>``.
+    Extra args are forwarded verbatim.
     """
     argv = [python or sys.executable, "-m", DCODE_BOOT_MODULE]
     extras = list(passthrough)
-    if default_endpoint and not _has_model_flag(extras):
-        argv += ["-M", f"{DATABRICKS_PROVIDER}:{default_endpoint}"]
+    spec = _session_model_spec(default_endpoint, extras)
+    if spec:
+        argv += ["-M", spec]
     argv += extras
     return argv
 
@@ -334,8 +389,9 @@ def build_run_argv(
     """
     argv = [python or sys.executable, "-m", DCODE_BOOT_MODULE]
     extras = list(passthrough)
-    if default_endpoint and not _has_model_flag(extras):
-        argv += ["-M", f"{DATABRICKS_PROVIDER}:{default_endpoint}"]
+    spec = _session_model_spec(default_endpoint, extras)
+    if spec:
+        argv += ["-M", spec]
     argv += ["-n", message]
     if quiet:
         argv.append("-q")

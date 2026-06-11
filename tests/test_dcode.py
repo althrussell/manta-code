@@ -546,3 +546,43 @@ def test_rebranded_auth_screen_renders_both_sections(tmp_path, monkeypatch):
     assert workspace_count == 1  # the prod profile from the fake config file
     # Upstream's installed providers are still manageable on the same screen.
     assert "anthropic" in provider_ids
+
+
+# --- agent-addressed launches use the agent's pin (VISION pillar 2) -------------
+
+
+def test_build_argv_agent_launch_uses_agent_pin(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
+    # chief pins databricks-gpt-5-5: the session model matches the agent that
+    # actually runs, so the TUI footer tells the truth.
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-5"
+    assert "databricks:ep-default" not in argv
+
+
+def test_build_argv_agent_launch_falls_back_for_unknown_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    argv = dcode.build_dcode_argv("ep-default", ["-a", "ghost"], python="py")
+    assert argv[argv.index("-M") + 1] == "databricks:ep-default"
+
+
+def test_build_argv_user_model_flag_beats_agent_pin(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    argv = dcode.build_dcode_argv("ep-default", ["-a", "chief", "-M", "openai:gpt"], python="py")
+    assert "databricks:databricks-gpt-5-5" not in argv
+    assert argv.count("-M") == 1
+
+
+def test_build_run_argv_agent_launch_uses_agent_pin(tmp_path, monkeypatch):
+    # Background tasks (the runner passes -a <agent>) launch on the agent's
+    # pinned model too — not the cheap session default.
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    argv = dcode.build_run_argv("ep-default", "do it", ["-a", "planning"], python="py")
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-claude-opus-4-8"
+
+
+def test_addressed_agent_parsing():
+    assert dcode._addressed_agent(["-a", "chief"]) == "chief"
+    assert dcode._addressed_agent(["--agent", "swe"]) == "swe"
+    assert dcode._addressed_agent(["--agent=review"]) == "review"
+    assert dcode._addressed_agent(["-r"]) is None
