@@ -119,6 +119,16 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         attribute="DeepAgentsApp._switch_model",
         purpose="upstream model switch reused for agent-pin alignment",
     ),
+    PatchTarget(
+        module="deepagents_code.widgets.autocomplete",
+        attribute="FuzzyFileController._get_fuzzy_suggestions",
+        purpose="@ completion extended with Manta agent names",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.autocomplete",
+        attribute="FuzzyFileController.on_text_changed",
+        purpose="@ completion position check for agent addressing",
+    ),
 )
 
 

@@ -598,6 +598,72 @@ def align_agent_switch_model() -> bool:
     return True
 
 
+def add_agent_mentions_to_autocomplete() -> bool:
+    """Teach the ``@`` autocomplete about Manta agents at message start.
+
+    Upstream's ``@`` completion is file mentions only, so typing ``@swe …``
+    (Manta's agent addressing, VISION pillar 4) fights a file picker and gets
+    no completion. This wraps ``FuzzyFileController`` so that when the ``@``
+    opens the message — the only position where agent addressing fires —
+    matching agent names are suggested first (tagged ``agent``), with file
+    suggestions following. Mid-message ``@`` stays pure file mention.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code.widgets.autocomplete import FuzzyFileController
+    except Exception:
+        return False
+
+    original_suggest = getattr(FuzzyFileController, "_get_fuzzy_suggestions", None)
+    original_changed = getattr(FuzzyFileController, "on_text_changed", None)
+    if original_suggest is None or original_changed is None:
+        return False
+    if getattr(original_suggest, "__manta_agents__", False):
+        return True
+
+    def _agent_names() -> list[str]:
+        try:
+            from manta_code.agents.defaults import merged_agents
+            from manta_code.agents.registry import list_agents
+
+            return [a.name for a in merged_agents(list_agents())]
+        except Exception:  # noqa: BLE001 - registry trouble just loses hints
+            return []
+
+    def on_text_changed(self: object, text: str, cursor_index: int) -> None:
+        try:
+            before = text[:cursor_index]
+            at_index = before.rfind("@")
+            # Agent addressing only applies when @ starts the message.
+            self._manta_addressing = at_index >= 0 and not before[:at_index].strip()
+        except Exception:  # noqa: BLE001
+            self._manta_addressing = False
+        original_changed(self, text, cursor_index)
+
+    def _get_fuzzy_suggestions(self: object, search: str) -> list[tuple[str, str]]:
+        suggestions = original_suggest(self, search)
+        if not getattr(self, "_manta_addressing", False):
+            return suggestions
+        try:
+            query = search.lower()
+            agents = [
+                (f"@{name}", "agent")
+                for name in _agent_names()
+                if name.startswith(query)
+            ]
+            if agents:
+                return [*agents, *suggestions][:10]
+        except Exception:  # noqa: BLE001 - hints must never break completion
+            pass
+        return suggestions
+
+    _get_fuzzy_suggestions.__manta_agents__ = True  # type: ignore[attr-defined]
+    FuzzyFileController.on_text_changed = on_text_changed
+    FuzzyFileController._get_fuzzy_suggestions = _get_fuzzy_suggestions
+    return True
+
+
 def install_manta_build_hook() -> bool:
     """Install Manta's control-plane build hook (best-effort).
 
@@ -633,6 +699,8 @@ def main() -> None:
         degraded.append("workspace picker in /auth")
     if not align_agent_switch_model():
         degraded.append("agent-pin model alignment in /agents")
+    if not add_agent_mentions_to_autocomplete():
+        degraded.append("@agent autocomplete")
     if not allow_blocking_server():
         degraded.append("Databricks auth shim")
     if not install_manta_build_hook():

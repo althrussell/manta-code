@@ -481,6 +481,7 @@ def test_boot_main_announces_degraded_control_plane(monkeypatch, capsys):
     monkeypatch.setattr(_boot, "prefer_databricks_models", lambda: True)
     monkeypatch.setattr(_boot, "rebrand_auth_screen", lambda: True)
     monkeypatch.setattr(_boot, "align_agent_switch_model", lambda: True)
+    monkeypatch.setattr(_boot, "add_agent_mentions_to_autocomplete", lambda: True)
     monkeypatch.setattr(_boot, "allow_blocking_server", lambda: True)
     monkeypatch.setattr(_boot, "install_manta_build_hook", lambda: False)
     monkeypatch.setattr(upstream_main, "cli_main", lambda: None)
@@ -502,6 +503,7 @@ def test_boot_main_silent_when_everything_applies(monkeypatch, capsys):
         "prefer_databricks_models",
         "rebrand_auth_screen",
         "align_agent_switch_model",
+        "add_agent_mentions_to_autocomplete",
         "allow_blocking_server",
         "install_manta_build_hook",
     ):
@@ -697,3 +699,53 @@ def test_a_flag_beats_persisted_agents(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "planning")
     argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
     assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-5"
+
+
+class _FakeCompletionView:
+    def __init__(self):
+        self.rendered = None
+
+    def render_completion_suggestions(self, suggestions, selected):
+        self.rendered = list(suggestions)
+
+    def clear_completion_suggestions(self):
+        self.rendered = None
+
+    def replace_completion_range(self, start, end, replacement):
+        pass
+
+
+def _fresh_controller(tmp_path):
+    from deepagents_code.widgets.autocomplete import FuzzyFileController
+
+    controller = FuzzyFileController(_FakeCompletionView(), cwd=tmp_path)
+    controller._file_cache = ["src/main.py", "chart.py"]
+    return controller
+
+
+def test_agent_mentions_complete_at_message_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    pytest.importorskip("deepagents_code.widgets.autocomplete")
+    assert _boot.add_agent_mentions_to_autocomplete() is True
+    assert _boot.add_agent_mentions_to_autocomplete() is True  # idempotent
+
+    controller = _fresh_controller(tmp_path)
+    controller.on_text_changed("@ch", 3)
+    labels = [label for label, _hint in controller._suggestions]
+    hints = dict(controller._suggestions)
+    assert labels[0] == "@chief"
+    assert hints["@chief"] == "agent"
+    # File matches still follow the agent suggestions.
+    assert any(label.startswith("@chart") for label in labels)
+
+
+def test_agent_mentions_not_offered_mid_message(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    pytest.importorskip("deepagents_code.widgets.autocomplete")
+    assert _boot.add_agent_mentions_to_autocomplete() is True
+
+    controller = _fresh_controller(tmp_path)
+    text = "look at @ch"
+    controller.on_text_changed(text, len(text))
+    labels = [label for label, _hint in controller._suggestions]
+    assert "@chief" not in labels  # mid-message @ stays a file mention
