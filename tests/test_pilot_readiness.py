@@ -135,6 +135,7 @@ def test_notify_disabled_by_env(monkeypatch):
 def test_notify_task_finished_invokes_platform_tool(monkeypatch):
     from manta_code.tasks import notify as N
 
+    monkeypatch.setenv("MANTA_NOTIFY", "1")  # conftest disables suite-wide
     calls = {}
     monkeypatch.setattr(N.sys, "platform", "darwin")
     monkeypatch.setattr(N.shutil, "which", lambda name: "/usr/bin/osascript")
@@ -149,6 +150,7 @@ def test_notify_task_finished_invokes_platform_tool(monkeypatch):
 def test_notify_never_raises(monkeypatch):
     from manta_code.tasks import notify as N
 
+    monkeypatch.setenv("MANTA_NOTIFY", "1")  # conftest disables suite-wide
     monkeypatch.setattr(N.shutil, "which", lambda name: "/bin/notify-send")
     monkeypatch.setattr(
         N.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError)

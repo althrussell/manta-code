@@ -1,4 +1,3 @@
-import os
 """Pytest bootstrap: make the repo-root ``evals`` package importable in tests.
 
 ``manta_code`` is installed editable (src layout), but the eval harness lives at
@@ -6,6 +5,7 @@ the repo root as ``evals/`` and is not packaged, so add the repo root to
 ``sys.path`` for the test session.
 """
 
+import os
 import sys
 from pathlib import Path
 
