@@ -649,7 +649,9 @@ def agents_set_model(
 
     if not agent_exists(name):
         console.print(f"[dim]Copied built-in '{name}' into your registry.[/dim]")
-    defn.model = model
+    # Copy before mutating: built-ins are shared module-level instances, and
+    # mutating one in place would change it for the rest of this process.
+    defn = defn.model_copy(update={"model": model})
     save_agent(defn)
     try:
         from .agents.defaults import merged_agents

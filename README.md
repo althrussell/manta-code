@@ -42,7 +42,7 @@ things they treat as afterthoughts:
 
 And underneath: **reliability as a feature**. Manta enriches the upstream
 [`deepagents-code`](https://pypi.org/project/deepagents-code/) runtime through
-a contract-tested seam (18 verified patch targets); if anything moves, Manta
+a contract-tested seam (21 verified patch targets); if anything moves, Manta
 falls back to a clean vanilla launch and *says so*. `manta doctor --probe`
 even live-tests every pinned model in the real agent loop before you bet a
 session on it.
