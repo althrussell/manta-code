@@ -29,6 +29,7 @@ back is non-negotiable, falling back *silently* is not (ADR 0010).
 
 from __future__ import annotations
 
+import os
 import sys
 
 #: Config-file provider key Manta wires up for Databricks AI Gateway.
@@ -578,17 +579,27 @@ def allow_blocking_server() -> bool:
 
 
 def align_agent_switch_model() -> bool:
-    """Make the ``/agents`` picker also apply the selected agent's model pin.
+    """Make the ``/agents`` picker keep the conversation and apply the pin.
 
     Upstream's agent swap (``DeepAgentsApp._restart_server_for_agent_swap``)
-    restarts the server with the new identity but leaves the *session model*
-    (and therefore the footer) on whatever the session launched with. Manta's
-    pin middleware still runs the agent's calls on its pinned model, but the
-    visible state lies — exactly the mismatch between ``manta agents`` and
-    the footer. This wraps the swap to follow up with upstream's own
-    ``_switch_model`` (thread-preserving, defers until the server is ready)
-    using the Manta agent's pin, with ``persist=False`` so a profile switch
-    never redefines the user's saved default model.
+    restarts the server with the new identity, starts a **new thread**, and
+    leaves the *session model* (and therefore the footer) on whatever the
+    session launched with. This wraps the swap to follow up with upstream's
+    own primitives:
+
+    - **Conversation continuity**: the previous thread is auto-resumed via
+      ``_resume_thread`` (the same machinery as the ``/threads`` picker and
+      launch-time ``-r``), so switching agents continues your session instead
+      of wiping the chat — the new agent picks up where the old one left off.
+      ``/clear`` starts fresh when that's what you want. Only threads that
+      actually produced agent output are resumed (a brand-new empty thread has
+      nothing to restore — mirrors upstream's own resume-hint gating).
+      Disable with ``MANTA_SWAP_RESUME=0``.
+    - **Model-pin alignment**: the selected Manta agent's pin (or, for
+      unpinned agents, the configured cheap default) becomes the session model
+      via ``_switch_model`` (thread-preserving; ``persist=False`` so a profile
+      switch never redefines the user's saved default model). Without this,
+      the footer lied about the model the agent runs on.
 
     Returns ``True`` when the override was applied, ``False`` otherwise.
     """
@@ -632,11 +643,55 @@ def align_agent_switch_model() -> bool:
         except Exception:  # noqa: BLE001
             return None
 
+    def _swap_resume_enabled() -> bool:
+        value = os.getenv("MANTA_SWAP_RESUME")
+        if value is None:
+            return True
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+
+    def _resumable_thread(self: object) -> str | None:
+        """The pre-swap thread id, if it holds real agent output.
+
+        Must be read *before* the swap (the swap clears the message store).
+        Mirrors upstream's resume-hint gating: USER-only threads have no
+        checkpoint row, so resuming them would fail.
+        """
+        try:
+            thread_id = getattr(self, "_lc_thread_id", None)
+            if not thread_id:
+                return None
+            from deepagents_code.widgets.message_store import MessageType
+
+            signal_types = {
+                MessageType.ASSISTANT,
+                MessageType.TOOL,
+                MessageType.SKILL,
+            }
+            messages = self._message_store.get_all_messages()
+            if any(msg.type in signal_types for msg in messages):
+                return str(thread_id)
+        except Exception:  # noqa: BLE001 - continuity is best-effort
+            pass
+        return None
+
     async def wrapped(self: object, agent_name: str) -> None:
+        previous_thread = (
+            _resumable_thread(self) if _swap_resume_enabled() else None
+        )
         await original_swap(self, agent_name)
         try:
             if getattr(self, "_assistant_id", None) != agent_name:
-                return  # swap failed and rolled back; leave the model alone
+                return  # swap failed and rolled back; leave everything alone
+            if previous_thread:
+                await self._resume_thread(previous_thread)
+                notify = getattr(self, "notify", None)
+                if callable(notify):
+                    notify(
+                        "Continued your previous session with the new agent — "
+                        "/clear starts a fresh thread.",
+                        timeout=6,
+                        markup=False,
+                    )
             spec = _manta_pin(agent_name) or _fallback_spec()
             if spec:
                 await self._switch_model(

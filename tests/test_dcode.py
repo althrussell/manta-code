@@ -796,3 +796,145 @@ def test_auth_screen_tab_actions_switch_focus_target():
             screen.action_cursor_down = original[3]
         if original[4] is not None:
             screen.action_cursor_up = original[4]
+
+
+def test_agent_swap_resumes_previous_thread(tmp_path, monkeypatch):
+    # Switching agents must continue the conversation (auto-resume the
+    # previous thread) instead of stranding it on a fresh thread; the user
+    # can /clear to start over.
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    app_mod = pytest.importorskip("deepagents_code.app")
+    from deepagents_code.widgets.message_store import MessageType
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_restart_server_for_agent_swap"]
+    try:
+        calls = {}
+
+        async def fake_swap(self, agent_name):
+            calls["swapped"] = agent_name
+            # The real swap clears the store and moves to a new thread.
+            self._lc_thread_id = "new-thread"
+            self._message_store = _FakeMessageStore([])
+
+        class _FakeMessage:
+            def __init__(self, type_):
+                self.type = type_
+
+        class _FakeMessageStore:
+            def __init__(self, messages):
+                self._messages = messages
+
+            def get_all_messages(self):
+                return self._messages
+
+        class _FakeApp:
+            _assistant_id = "chief"
+            _lc_thread_id = "prev-thread"
+            _message_store = _FakeMessageStore(
+                [_FakeMessage(MessageType.USER), _FakeMessage(MessageType.ASSISTANT)]
+            )
+
+            async def _resume_thread(self, thread_id):
+                calls["resumed"] = thread_id
+
+            async def _switch_model(self, spec, **kwargs):
+                calls["spec"] = spec
+
+            def notify(self, *a, **k):
+                calls["notified"] = True
+
+        cls._restart_server_for_agent_swap = fake_swap
+        assert _boot.align_agent_switch_model() is True
+        asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
+        assert calls["resumed"] == "prev-thread"
+        assert calls["notified"] is True
+        assert calls["spec"] == "databricks:databricks-gpt-5-5"  # pin still applies
+    finally:
+        cls._restart_server_for_agent_swap = original
+
+
+def test_agent_swap_skips_resume_for_empty_thread(tmp_path, monkeypatch):
+    # A USER-only thread has no checkpoint row: resuming it would fail, so
+    # the swap keeps upstream's fresh-thread behavior (mirrors the resume-hint
+    # gating).
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    app_mod = pytest.importorskip("deepagents_code.app")
+    from deepagents_code.widgets.message_store import MessageType
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_restart_server_for_agent_swap"]
+    try:
+        calls = {}
+
+        async def fake_swap(self, agent_name):
+            calls["swapped"] = agent_name
+
+        class _FakeMessage:
+            type = MessageType.USER
+
+        class _FakeApp:
+            _assistant_id = "chief"
+            _lc_thread_id = "prev-thread"
+
+            class _message_store:  # noqa: N801 - stand-in attr
+                @staticmethod
+                def get_all_messages():
+                    return [_FakeMessage()]
+
+            async def _resume_thread(self, thread_id):
+                calls["resumed"] = thread_id
+
+            async def _switch_model(self, spec, **kwargs):
+                calls["spec"] = spec
+
+        cls._restart_server_for_agent_swap = fake_swap
+        assert _boot.align_agent_switch_model() is True
+        asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
+        assert "resumed" not in calls
+        assert calls["spec"]  # pin alignment still applies
+    finally:
+        cls._restart_server_for_agent_swap = original
+
+
+def test_agent_swap_resume_disabled_by_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("MANTA_SWAP_RESUME", "0")
+    app_mod = pytest.importorskip("deepagents_code.app")
+    from deepagents_code.widgets.message_store import MessageType
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_restart_server_for_agent_swap"]
+    try:
+        calls = {}
+
+        async def fake_swap(self, agent_name):
+            calls["swapped"] = agent_name
+
+        class _FakeMessage:
+            type = MessageType.ASSISTANT
+
+        class _FakeApp:
+            _assistant_id = "chief"
+            _lc_thread_id = "prev-thread"
+
+            class _message_store:  # noqa: N801 - stand-in attr
+                @staticmethod
+                def get_all_messages():
+                    return [_FakeMessage()]
+
+            async def _resume_thread(self, thread_id):
+                calls["resumed"] = thread_id
+
+            async def _switch_model(self, spec, **kwargs):
+                calls["spec"] = spec
+
+        cls._restart_server_for_agent_swap = fake_swap
+        assert _boot.align_agent_switch_model() is True
+        asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
+        assert "resumed" not in calls
+    finally:
+        cls._restart_server_for_agent_swap = original
