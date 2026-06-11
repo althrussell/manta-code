@@ -478,3 +478,34 @@ def test_classify_endpoint_other_errors(monkeypatch):
 
     monkeypatch.setattr(dc, "MantaChatDatabricks", _Boom)
     assert _classify_endpoint("x") == "error"
+
+
+# --- README drift guards ---------------------------------------------------------
+
+
+def _readme() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).parent.parent / "README.md").read_text()
+
+
+def test_readme_patch_target_count_matches_code():
+    # This number drifted twice; CI now owns it.
+    from manta_code.reliability import PATCH_TARGETS
+
+    assert f"({len(PATCH_TARGETS)} verified patch targets)" in _readme()
+
+
+def test_readme_agent_pins_match_code():
+    from manta_code.agents.defaults import DEFAULT_AGENTS
+
+    readme = _readme()
+    for defn in DEFAULT_AGENTS:
+        endpoint = defn.model.split(":", 1)[1]
+        assert f"`{endpoint}`" in readme, f"README missing {defn.name} pin {endpoint}"
+
+
+def test_readme_install_tag_matches_version():
+    from manta_code import __version__
+
+    assert f"@v{__version__}" in _readme()
