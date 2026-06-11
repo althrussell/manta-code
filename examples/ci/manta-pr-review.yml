@@ -1,0 +1,39 @@
+# Example: Manta's enforced read-only `review` agent reviews every PR and
+# posts findings as a comment. Copy into .github/workflows/ and provide a
+# Databricks service-principal token. The review agent cannot write files or
+# run commands (enforced at the tool-call layer), and the run is bounded by
+# --timeout/--max-turns; headless runs are unattended, so any ask-gated tool
+# fails closed.
+name: manta-review
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install Manta
+        run: pip install "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git"
+      - name: Review the diff
+        id: review
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          manta run "@review review the change in /tmp/pr.diff against this repo. \
+          Report findings by severity with file:line references; say so plainly if it looks good." \
+            --timeout 600 --max-turns 20 > /tmp/review.md
+      - name: Post findings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/review.md

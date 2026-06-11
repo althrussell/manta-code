@@ -37,6 +37,12 @@ prioritized roadmap.
 >   payloads + resume decisions honored), `[budget] daily_max_usd`, and the
 >   `manta_code.sdk` Python API. Non-goals recorded: no central server, web
 >   UI, multi-tenant platform, or cross-harness abstraction.
+> - **ADR 0012 landed (pilot readiness)** — self-writing memory
+>   (`manta_remember` + orchestrator recall), job-run diagnostics
+>   (`get_run_diagnostics`: errors/traces/log tails), desktop notifications on
+>   task completion, `manta receipts` (spend vs all-premium counterfactual),
+>   `manta doctor --probe` (live model-compat preflight), PILOT.md install/
+>   quickstart, and a CI PR-review recipe.
 
 **TL;DR.** The foundation is genuinely strong — the reliability seam (Pillar 7),
 the enforced agent registry (Pillar 4's bottom half), and token accounting

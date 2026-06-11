@@ -299,3 +299,68 @@ def agent_memory_middleware(defn: Any, store: Any | None = None) -> Any | None:
         return cls(memory_namespace(defn), store=store)
     except Exception:  # noqa: BLE001
         return None
+
+
+def orchestrator_memory_middleware(store: Any | None = None) -> Any | None:
+    """Recall middleware for the base orchestrator's own namespace.
+
+    ADR 0012: the orchestrator both recalls and (via ``manta_remember``)
+    writes durable session learnings, so bare sessions compound too — not
+    just the named agents.
+    """
+    try:
+        cls = _agent_memory_middleware_class()
+        return cls(("memories", "orchestrator"), store=store)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# --- self-writing memory (ADR 0012) ------------------------------------------
+
+
+def _active_memory_namespace() -> tuple[str, str]:
+    """Namespace notes are written to: the session's primary agent's memory.
+
+    Resolved at call time from the active profile, so notes written while
+    running as ``planning`` land in planning's memory; the base agent uses the
+    ``orchestrator`` namespace.
+    """
+    try:
+        from ..hook import active_agent_name
+
+        return ("memories", active_agent_name() or "orchestrator")
+    except Exception:  # noqa: BLE001
+        return ("memories", "orchestrator")
+
+
+def manta_remember(note: str) -> str:
+    """Save a durable note to this agent's private memory.
+
+    Use for facts worth keeping across sessions: repo conventions, decisions
+    and their reasons, gotchas, user preferences. Notes are recalled
+    automatically at the start of future sessions. Secrets are redacted on
+    write. Keep each note short and self-contained.
+    """
+    if not note or not note.strip():
+        return "Nothing to remember (empty note)."
+    store = shared_memory_store()
+    if store is None:
+        return "Memory store unavailable; note not saved."
+    import time as _time
+
+    namespace = _active_memory_namespace()
+    try:
+        write_memory(store, namespace, key=f"note-{int(_time.time() * 1000)}", text=note.strip())
+    except Exception as exc:  # noqa: BLE001
+        return f"Could not save the note: {exc}"
+    return f"Remembered (namespace: {namespace[-1]}; secrets redacted on write)."
+
+
+def build_memory_tools() -> list[Any]:
+    """LangChain tool(s) for self-writing memory; ``[]`` when unavailable."""
+    try:
+        from langchain_core.tools import StructuredTool
+
+        return [StructuredTool.from_function(manta_remember)]
+    except Exception:  # noqa: BLE001
+        return []
