@@ -28,9 +28,9 @@ are future work.
    model (plus the default) in the real agent loop. Three pins in this repo's
    history failed only at runtime with cryptic errors; this converts those
    into a preflight FAIL with a repin hint. Opt-in (spends ~a cent per model).
-6. **Distribution** — PILOT.md (install from git with the `[agent]` extra,
-   5-minute first run, pilot feedback checklist) and a tagged `v0.1.0`
-   release. PyPI publication is future work.
+6. **Distribution** — install/quickstart/feedback guidance in the README
+   (initially shipped as PILOT.md, folded into the README on request) and a
+   tagged `v0.1.0` release. PyPI publication is future work.
 7. **CI recipe** — `examples/ci/manta-pr-review.yml`: the enforced, budgeted
    `@review` agent reviewing PRs headlessly and posting findings, the org
    habit loop. Shipped as an example, not enabled on this repo.
@@ -40,5 +40,5 @@ are future work.
 New: `agents/memory.py` write-path (`manta_remember`, `build_memory_tools`,
 `orchestrator_memory_middleware`), `databricks_tools.get_run_diagnostics`,
 `tasks/notify.py`, `usage.receipts` + `manta receipts`, `doctor --probe`,
-PILOT.md, CI example. Future work recorded: in-TUI spend line, PyPI release,
+README quickstart, CI example. Future work recorded: in-TUI spend line, PyPI release,
 note-outcome capture for learned routing, deeper DAB authoring/deploy tools.

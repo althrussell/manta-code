@@ -41,7 +41,7 @@ prioritized roadmap.
 >   (`manta_remember` + orchestrator recall), job-run diagnostics
 >   (`get_run_diagnostics`: errors/traces/log tails), desktop notifications on
 >   task completion, `manta receipts` (spend vs all-premium counterfactual),
->   `manta doctor --probe` (live model-compat preflight), PILOT.md install/
+>   `manta doctor --probe` (live model-compat preflight), README install/
 >   quickstart, and a CI PR-review recipe.
 
 **TL;DR.** The foundation is genuinely strong — the reliability seam (Pillar 7),
