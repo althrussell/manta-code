@@ -267,23 +267,34 @@ class AdviceMiddleware(AgentMiddleware):
             pass
 
     @staticmethod
-    def _annotate(response: Any, advice: Advice) -> Any:
-        """Append the advisory note to the turn's final answer, if there is one.
+    def _annotation_target(response: Any) -> Any | None:
+        """The message an advisory can be appended to, or ``None``.
 
-        Only annotates a message with string content and no pending tool calls
-        (i.e. the user-facing end of the turn); anything else is returned
-        untouched so the agent loop is never perturbed mid-flight.
+        Only a message with string content and no pending tool calls (the
+        user-facing end of the turn) is annotatable. Mid-loop tool-calling
+        turns return ``None`` — and the caller must then *not* consume the
+        cooldown or record delivery, otherwise advice raised during a tool
+        loop (exactly when escalation advice fires) would be marked delivered
+        without ever reaching the user.
         """
         result = getattr(response, "result", None)
         target = result[-1] if isinstance(result, list) and result else response
         if getattr(target, "tool_calls", None):
-            return response
+            return None
         content = getattr(target, "content", None)
         if not isinstance(content, str) or not content.strip():
-            return response
+            return None
+        return target
+
+    @staticmethod
+    def _annotate(response: Any, target: Any, advice: Advice) -> Any:
+        """Append the advisory note to ``target`` (from :meth:`_annotation_target`)."""
         annotated = target.model_copy(
-            update={"content": f"{content}\n\n> **Manta advice:** {advice.message}"}
+            update={
+                "content": f"{target.content}\n\n> **Manta advice:** {advice.message}"
+            }
         )
+        result = getattr(response, "result", None)
         if isinstance(result, list) and result:
             response.result[-1] = annotated
             return response
@@ -297,9 +308,13 @@ class AdviceMiddleware(AgentMiddleware):
             return
         signals = self._signals(thread)
         try:
+            from langgraph.errors import GraphInterrupt
             from langgraph.types import interrupt
-
-            self._record(thread, model, advice, delivered="interrupt")
+        except Exception:  # noqa: BLE001 - no HITL primitive available
+            signals.interrupted = True
+            logger.info("Manta advice (no approval channel): %s", advice.message)
+            return
+        try:
             interrupt(
                 {
                     "type": "manta_advice",
@@ -308,10 +323,17 @@ class AdviceMiddleware(AgentMiddleware):
                     "message": advice.message,
                 }
             )
-            signals.interrupted = True  # resumed -> decided; ask once per thread
-        except Exception:  # noqa: BLE001 - no HITL primitive available
+            # interrupt() only returns on the post-decision re-execution (the
+            # first pass raises GraphInterrupt, re-raised below, pausing the
+            # run). Record exactly once, here, so the resume doesn't
+            # double-write the advice row.
             signals.interrupted = True
-            logger.info("Manta advice (no approval channel): %s", advice.message)
+            self._record(thread, model, advice, delivered="interrupt")
+        except GraphInterrupt:
+            raise  # the pause mechanism itself: must propagate
+        except Exception:  # noqa: BLE001 - interrupt outside a graph context
+            signals.interrupted = True
+            logger.info("Manta advice (cannot pause here): %s", advice.message)
 
     def _after_response(self, request: Any, response: Any) -> Any:
         try:
@@ -319,9 +341,17 @@ class AdviceMiddleware(AgentMiddleware):
             model = _model_name(getattr(request, "model", None))
             self._observe_model_response(thread, model, response)
             advice = self._evaluate_notes(thread, model)
-            if advice is not None and self._cooled_down(thread, advice.kind):
+            if advice is None:
+                return response
+            # Annotatability gates everything: a mid-loop tool-calling turn
+            # leaves the advice pending (no cooldown, no ledger row) so it
+            # actually lands on the turn's final user-facing answer.
+            target = self._annotation_target(response)
+            if target is None:
+                return response
+            if self._cooled_down(thread, advice.kind):
                 self._record(thread, model, advice, delivered="note")
-                return self._annotate(response, advice)
+                return self._annotate(response, target, advice)
         except Exception:  # noqa: BLE001 - advice must never break a run
             logger.debug("Manta advice evaluation failed", exc_info=True)
         return response

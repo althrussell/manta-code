@@ -657,9 +657,14 @@ def test_align_agent_switch_model_skips_non_manta_agents(tmp_path, monkeypatch):
             async def _switch_model(self, spec, **kwargs):
                 calls["spec"] = spec
 
+        # Unpinned target: falls back to the configured cheap default so a
+        # previous specialist's premium pin never ratchets into the base agent.
+        from manta_code import auth as manta_auth
+
+        monkeypatch.setattr(manta_auth, "databricks_configured", lambda profile=None: True)
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "agent"))
         assert calls["swapped"] == "agent"
-        assert "spec" not in calls  # base profile has no Manta pin
+        assert calls["spec"] == "databricks:databricks-gpt-oss-120b"
     finally:
         cls._restart_server_for_agent_swap = original
 
@@ -749,3 +754,45 @@ def test_agent_mentions_not_offered_mid_message(tmp_path, monkeypatch):
     controller.on_text_changed(text, len(text))
     labels = [label for label, _hint in controller._suggestions]
     assert "@chief" not in labels  # mid-message @ stays a file mention
+
+
+def test_resume_launch_gets_no_model_injection(tmp_path, monkeypatch):
+    # A resumed thread adopts its own model; injecting -M would override it
+    # (review finding).
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    argv = dcode.build_dcode_argv("ep-default", ["-r", "thread-1"], python="py")
+    assert "-M" not in argv
+
+
+def test_databricks_pin_skipped_when_unconfigured(tmp_path, monkeypatch):
+    # Off-Databricks (default_endpoint=None): a databricks: pin would force an
+    # unreachable provider — skip injection entirely (review finding).
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    argv = dcode.build_dcode_argv(None, ["-a", "chief"], python="py")
+    assert "-M" not in argv
+
+
+def test_auth_screen_tab_actions_switch_focus_target():
+    auth_widgets = pytest.importorskip("deepagents_code.widgets.auth")
+    screen = auth_widgets.AuthManagerScreen
+    original = (
+        screen.compose,
+        screen.on_mount,
+        screen.on_option_list_option_selected,
+        screen.__dict__.get("action_cursor_down"),
+        screen.__dict__.get("action_cursor_up"),
+    )
+    try:
+        assert _boot.rebrand_auth_screen() is True
+        # Tab actions are overridden: with two lists, Tab moves focus between
+        # sections instead of silently moving the provider highlight while
+        # Enter acts on the workspace list (review finding).
+        assert screen.action_cursor_down is not None
+        assert screen.action_cursor_down.__name__ == "_action_cursor_down"
+        assert screen.action_cursor_up.__name__ == "_action_cursor_up"
+    finally:
+        screen.compose, screen.on_mount, screen.on_option_list_option_selected = original[:3]
+        if original[3] is not None:
+            screen.action_cursor_down = original[3]
+        if original[4] is not None:
+            screen.action_cursor_up = original[4]

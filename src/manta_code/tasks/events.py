@@ -2,12 +2,17 @@
 
 Appends a lightweight event per tool call to the task store, attributed to the
 agent it wraps and (when running inside a background task) the task id from
-``MANTA_TASK_ID``. Three kinds:
+``MANTA_TASK_ID``. Four kinds:
 
 - ``tool`` — an ordinary tool call ran.
-- ``approved`` — an approval-gated tool ran: deepagents' ``interrupt_on`` HITL
-  pauses *before* the call, so the call executing means the human approved it.
-  This is the approval audit record ADR 0009's fleet story needs later.
+- ``approved`` — an approval-gated tool ran in an *interactive* session:
+  deepagents' ``interrupt_on`` HITL pauses before the call, so the call
+  executing means the human approved it. This is the approval audit record
+  ADR 0009's fleet story needs later.
+- ``auto_approved`` — an approval-gated tool ran **unattended** (headless /
+  background-task runs set the server's auto-approve flag, and no human was
+  in the loop). Recorded distinctly so the audit trail never claims a human
+  approval that didn't happen.
 - ``denied`` — the tool-policy middleware blocked the call (recognizable by
   the error ``ToolMessage`` it returns).
 
@@ -27,9 +32,25 @@ from .store import EventRecord, record_event
 #: Marker the tool-policy middleware puts in its denial ToolMessages.
 _POLICY_BLOCK_MARKER = "Blocked by Manta tool policy"
 
+#: Server env flag set by upstream when HITL is bypassed (headless runs).
+_AUTO_APPROVE_ENV = "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE"
+
 
 def _current_task_id() -> str | None:
     return os.environ.get("MANTA_TASK_ID") or None
+
+
+def _hitl_active() -> bool:
+    """Whether a human is actually in the approval loop for this run.
+
+    Upstream's headless path sets the server's auto-approve flag; background
+    tasks always run that way. When auto-approve is on (or we're inside a
+    background task), an approval-gated tool executing proves nothing about a
+    human decision.
+    """
+    if os.environ.get("MANTA_TASK_ID"):
+        return False
+    return os.environ.get(_AUTO_APPROVE_ENV, "").strip().lower() != "true"
 
 
 def _is_policy_denial(result: Any) -> bool:
@@ -65,7 +86,7 @@ class EventLogMiddleware(AgentMiddleware):
             if _is_policy_denial(result):
                 kind = "denied"
             elif tool in self._approval:
-                kind = "approved"
+                kind = "approved" if _hitl_active() else "auto_approved"
             else:
                 kind = "tool"
             record_event(

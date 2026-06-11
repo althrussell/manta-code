@@ -116,7 +116,9 @@ def test_live_solver_grades_run_output(monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Done())
-    monkeypatch.setattr(L, "_ledger_window", lambda since: (0.0123, 456, "databricks-gpt-oss-120b"))
+    monkeypatch.setattr(
+        L, "_ledger_window", lambda since, tag: (0.0123, 456, "databricks-gpt-oss-120b")
+    )
 
     task = next(t for t in BENCHMARK if t.id == "readonly-sql")
     output = L.live_solver()(task)
@@ -137,7 +139,7 @@ def test_live_mode_renders_summary(monkeypatch, capsys):
         stderr = ""
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Done())
-    monkeypatch.setattr(L, "_ledger_window", lambda since: (0.01, 100, "m"))
+    monkeypatch.setattr(L, "_ledger_window", lambda since, tag: (0.01, 100, "m"))
     from evals.__main__ import main
 
     assert main(["--live", "--task", "readonly-sql"]) == 0

@@ -329,25 +329,43 @@ def _effective_initial_agent(extras: Sequence[str]) -> str | None:
         return None
 
 
+def _has_resume_flag(args: Sequence[str]) -> bool:
+    """Return ``True`` when the launch resumes an existing thread (``-r``)."""
+    return any(
+        arg in ("-r", "--resume") or arg.startswith("--resume=") for arg in args
+    )
+
+
 def _session_model_spec(
     default_endpoint: str | None, extras: Sequence[str]
 ) -> str | None:
     """Resolve the ``-M`` spec to inject for a launch, or ``None``.
 
-    The user's own ``-M/--model`` always wins (no injection). When the launch
-    will start as a Manta agent — via ``-a <name>``, the persisted default
-    agent, or the remembered recent agent — **that agent's model pin** is the
-    session model, so the visible session model matches the agent actually
-    running ("the right model for the role", VISION pillar 2) and the pin
-    middleware becomes a backstop rather than the mechanism. Otherwise the
-    configured default endpoint applies (cheap-by-default orchestration).
+    The user's own ``-M/--model`` always wins (no injection). A **resumed**
+    session gets no injection either: upstream adopts the resumed thread's own
+    model, and an injected ``-M`` would mark the model "explicitly set" and
+    silently switch the conversation. When the launch will start as a Manta
+    agent — via ``-a <name>``, the persisted default agent, or the remembered
+    recent agent — **that agent's model pin** is the session model, so the
+    visible session model matches the agent actually running ("the right
+    model for the role", VISION pillar 2) and the pin middleware becomes a
+    backstop rather than the mechanism. Otherwise the configured default
+    endpoint applies (cheap-by-default orchestration).
+
+    ``default_endpoint is None`` means Databricks is not configured on this
+    machine (ADR 0010 detect-and-enable): a ``databricks:`` pin would force
+    the session onto an unreachable provider, so it is skipped and upstream's
+    own provider resolution applies.
     """
-    if _has_model_flag(extras):
+    if _has_model_flag(extras) or _has_resume_flag(extras):
         return None
     agent = _effective_initial_agent(extras)
     if agent:
         pin = _agent_model_spec(agent)
-        if pin:
+        if pin and (
+            default_endpoint is not None
+            or not pin.startswith(f"{DATABRICKS_PROVIDER}:")
+        ):
             return pin
     if default_endpoint:
         return f"{DATABRICKS_PROVIDER}:{default_endpoint}"

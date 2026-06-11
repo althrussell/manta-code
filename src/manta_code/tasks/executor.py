@@ -26,6 +26,14 @@ from . import store
 #: Env var the runner/middleware use to attribute events + usage to a task.
 TASK_ID_ENV = "MANTA_TASK_ID"
 
+#: Env var carrying the task-nesting depth (a task submitting a task).
+TASK_DEPTH_ENV = "MANTA_TASK_DEPTH"
+
+#: Maximum task-nesting depth. Depth 0 = an interactive session submitting a
+#: task; depth 1 = that task's agent submitting one more (the chief fanning
+#: out from the background). Beyond that is runaway recursion, refused.
+MAX_TASK_DEPTH = 2
+
 #: Default wall-clock timeout for a background task (seconds). More generous
 #: than interactive ``manta run``: background work is expected to take a while.
 DEFAULT_TASK_TIMEOUT = 1800
@@ -67,6 +75,17 @@ def submit_task(
     if not prompt or not prompt.strip():
         raise TaskError("a non-empty task prompt is required")
 
+    # Refuse runaway recursion: a task spawning a task spawning a task…
+    try:
+        depth = int(os.environ.get(TASK_DEPTH_ENV, "0"))
+    except ValueError:
+        depth = 0
+    if depth >= MAX_TASK_DEPTH:
+        raise TaskError(
+            f"task nesting limit reached (depth {depth}); a background task's "
+            "tasks may not submit further tasks"
+        )
+
     task_id = store.new_task_id()
     log_dir = store.task_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -86,19 +105,31 @@ def submit_task(
 
     env = dict(os.environ)
     env[TASK_ID_ENV] = task_id
+    env[TASK_DEPTH_ENV] = str(depth + 1)
     if profile:
         env["DATABRICKS_CONFIG_PROFILE"] = profile
 
     argv = [sys.executable, "-m", "manta_code.tasks.runner", task_id]
-    with log_path.open("ab") as log:
-        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            argv,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=env,
+    try:
+        with log_path.open("ab") as log:
+            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                argv,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
+    except OSError as exc:
+        # Never leave a forever-queued row behind a failed spawn.
+        store.update_task(
+            task_id,
+            state="failed",
+            finished_at=time.time(),
+            result=f"(failed to spawn runner: {exc})",
+            path=db_path,
         )
+        raise TaskError(f"could not start the task runner: {exc}") from exc
     store.update_task(task_id, pid=process.pid, path=db_path)
     store.record_event(
         store.EventRecord(
@@ -126,10 +157,13 @@ def cancel_task(task_id: str, *, db_path: Path | None = None) -> store.TaskRecor
             os.killpg(record.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass  # already gone (or not ours); state update below still applies
+    # Compare-and-set on the observed state so a runner that finished between
+    # our read and this write keeps its done/failed outcome.
     store.update_task(
         task_id,
         state="cancelled",
         finished_at=time.time(),
+        expect_state=record.state,
         path=db_path,
     )
     store.record_event(

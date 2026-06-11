@@ -184,3 +184,23 @@ def test_account_attributes_background_task_id(tmp_path, monkeypatch):
     (task,) = conn.execute("SELECT task FROM usage").fetchone()
     conn.close()
     assert task == "task7777"
+
+
+def test_budget_pause_graph_interrupt_propagates(tmp_path, monkeypatch):
+    # The budget governor pauses via interrupt(), which raises GraphInterrupt;
+    # it must propagate to the runtime, not be swallowed (review finding).
+    from langgraph.errors import GraphInterrupt
+
+    import langgraph.types as lg_types
+
+    def _raising_interrupt(payload):
+        raise GraphInterrupt()
+
+    monkeypatch.setattr(lg_types, "interrupt", _raising_interrupt)
+    mw = E.TokenEconomyMiddleware(
+        agent="swe", max_tokens=10, ledger_path=tmp_path / "usage.db"
+    )
+    req = _Request()
+    mw.wrap_model_call(req, lambda r: _Response(result=[_ai({"input_tokens": 100, "output_tokens": 50})]))
+    with pytest.raises(GraphInterrupt):
+        mw.wrap_model_call(req, lambda r: _Response(result=[_ai({"input_tokens": 1, "output_tokens": 1})]))

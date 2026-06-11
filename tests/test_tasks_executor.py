@@ -133,3 +133,26 @@ def test_reconcile_leaves_live_runner_alone(monkeypatch, _fake_spawn):
     monkeypatch.setattr(executor, "_pid_alive", lambda pid: False)
     assert executor.reconcile_stale_tasks() == []
     assert store.get_task(record.id).state == "running"
+
+
+def test_submit_refuses_runaway_nesting(monkeypatch, _fake_spawn):
+    # Depth 0 (interactive) and 1 (inside a task) may submit; depth 2 may not.
+    monkeypatch.setenv(executor.TASK_DEPTH_ENV, "1")
+    record = executor.submit_task("swe", "nested once is fine")
+    assert _fake_spawn["kwargs"]["env"][executor.TASK_DEPTH_ENV] == "2"
+    assert record.state == "queued"
+    monkeypatch.setenv(executor.TASK_DEPTH_ENV, "2")
+    with pytest.raises(executor.TaskError, match="nesting limit"):
+        executor.submit_task("swe", "too deep")
+
+
+def test_submit_spawn_failure_marks_task_failed(monkeypatch):
+    def _no_spawn(*a, **k):
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(executor.subprocess, "Popen", _no_spawn)
+    with pytest.raises(executor.TaskError, match="could not start"):
+        executor.submit_task("swe", "doomed")
+    (task,) = store.list_tasks(limit=1)
+    assert task.state == "failed"  # never stranded in queued
+    assert "failed to spawn" in task.result

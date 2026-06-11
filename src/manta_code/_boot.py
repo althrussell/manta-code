@@ -425,6 +425,35 @@ def rebrand_auth_screen() -> bool:
             colors = theme.get_theme_colors(self)
             container.styles.border = ("ascii", colors.success)
 
+    def _focus_other_list(self: object) -> None:
+        """Move keyboard focus between the workspace and provider lists.
+
+        Upstream binds Tab/Shift+Tab (priority) to ``action_cursor_down/up``,
+        which hardcode the provider list — with two lists that moved the
+        *provider* highlight while focus (and Enter) stayed on the workspace
+        list, so a user tabbing toward an API key could trigger a workspace
+        switch instead. With two lists, Tab means "switch section"; arrow
+        keys move within the focused list.
+        """
+        lists = list(self.query(OptionList))
+        if not lists:
+            return
+        if len(lists) == 1:
+            lists[0].focus()
+            return
+        focused = self.app.focused
+        try:
+            index = lists.index(focused)
+        except ValueError:
+            index = -1
+        lists[(index + 1) % len(lists)].focus()
+
+    def _action_cursor_down(self: object) -> None:
+        _focus_other_list(self)
+
+    def _action_cursor_up(self: object) -> None:
+        _focus_other_list(self)
+
     def _on_option_selected(self: object, event: object) -> None:
         selected = event.option.id
         if not selected:
@@ -461,6 +490,8 @@ def rebrand_auth_screen() -> bool:
     AuthManagerScreen.compose = _compose
     AuthManagerScreen.on_mount = _on_mount
     AuthManagerScreen.on_option_list_option_selected = _on_option_selected
+    AuthManagerScreen.action_cursor_down = _action_cursor_down
+    AuthManagerScreen.action_cursor_up = _action_cursor_up
     return True
 
 
@@ -582,13 +613,34 @@ def align_agent_switch_model() -> bool:
             pass
         return None
 
+    def _fallback_spec() -> str | None:
+        """Session model for an *unpinned* swap target (base agent included).
+
+        Without this, switching from a pinned specialist to an unpinned agent
+        would ratchet: the previous agent's (possibly premium) pin would stay
+        the session model. Fall back to Manta's configured cheap default when
+        Databricks is configured; otherwise leave the model alone.
+        """
+        try:
+            from manta_code.auth import databricks_configured
+            from manta_code.config import load_config
+
+            if not databricks_configured():
+                return None
+            endpoint = load_config().interactive.default_endpoint
+            return f"{DATABRICKS_PROVIDER}:{endpoint}" if endpoint else None
+        except Exception:  # noqa: BLE001
+            return None
+
     async def wrapped(self: object, agent_name: str) -> None:
         await original_swap(self, agent_name)
         try:
-            pin = _manta_pin(agent_name)
-            if pin and getattr(self, "_assistant_id", None) == agent_name:
+            if getattr(self, "_assistant_id", None) != agent_name:
+                return  # swap failed and rolled back; leave the model alone
+            spec = _manta_pin(agent_name) or _fallback_spec()
+            if spec:
                 await self._switch_model(
-                    pin, persist=False, announce_unchanged=False
+                    spec, persist=False, announce_unchanged=False
                 )
         except Exception:  # noqa: BLE001 - alignment must never break the swap
             pass
