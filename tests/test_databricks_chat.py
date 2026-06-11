@@ -181,9 +181,9 @@ def test_resolver_patches_graph_module_level_binding():
 
     # Ensure the shim's rebind reached an already-imported graph module.
     dc._install_subagent_databricks_resolver()
-    model = graph.resolve_model("databricks:databricks-gpt-5-5")
+    model = graph.resolve_model("databricks:databricks-gpt-5-4")
     assert isinstance(model, dc.MantaChatDatabricks)
-    assert model.model == "databricks-gpt-5-5"
+    assert model.model == "databricks-gpt-5-4"
 
 
 def test_resolver_defers_non_databricks_specs(monkeypatch):
@@ -205,7 +205,7 @@ def test_resolver_defers_non_databricks_specs(monkeypatch):
     assert seen["model"] == "openai:gpt-5.5"
     # databricks specs are intercepted before reaching the original.
     assert isinstance(
-        _models.resolve_model("databricks:databricks-gpt-5-5"), dc.MantaChatDatabricks
+        _models.resolve_model("databricks:databricks-gpt-5-4"), dc.MantaChatDatabricks
     )
 
 

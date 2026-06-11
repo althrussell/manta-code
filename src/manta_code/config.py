@@ -26,7 +26,7 @@ provider = "databricks"
 default_endpoint = "databricks-gpt-oss-120b"
 extra_endpoints = [
     "databricks-claude-opus-4-8",
-    "databricks-gpt-5-5",
+    "databricks-gpt-5-4",
     "databricks-claude-sonnet-4-5",
 ]
 """
@@ -41,15 +41,23 @@ class InteractiveConfig(BaseModel):
     extra_endpoints: list[str] = Field(
         default_factory=lambda: [
             "databricks-claude-opus-4-8",
-            "databricks-gpt-5-5",
+            "databricks-gpt-5-4",
             "databricks-claude-sonnet-4-5",
         ]
     )
 
 
+class BudgetConfig(BaseModel):
+    #: Daily (UTC) spend cap across all Manta usage on this machine (ADR
+    #: 0011). Trust-first: interactive runs pause for approval at the cap;
+    #: unattended runs log + record an event and continue. ``None`` = no cap.
+    daily_max_usd: float | None = None
+
+
 class MantaConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     interactive: InteractiveConfig = Field(default_factory=InteractiveConfig)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
     #: Per-model pricing overrides (USD / 1M tokens), merged over Manta's
     #: built-in table — keys are substring-matched against model names, e.g.::
     #:

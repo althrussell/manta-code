@@ -40,17 +40,30 @@ def _current_task_id() -> str | None:
     return os.environ.get("MANTA_TASK_ID") or None
 
 
-def _hitl_active() -> bool:
-    """Whether a human is actually in the approval loop for this run.
+#: Explicit unattended marker exported by every ``run_headless`` invocation
+#: (ADR 0011). Upstream's auto-approve flag alone is not reliable: a headless
+#: run with a restricted shell allow-list runs with auto-approve *off* while
+#: still auto-approving non-shell HITL requests.
+_UNATTENDED_ENV = "MANTA_UNATTENDED"
 
-    Upstream's headless path sets the server's auto-approve flag; background
-    tasks always run that way. When auto-approve is on (or we're inside a
-    background task), an approval-gated tool executing proves nothing about a
-    human decision.
+
+def unattended_run() -> bool:
+    """Whether this run has no human in the approval loop (ADR 0011).
+
+    True inside background tasks, any ``run_headless`` invocation, or when
+    upstream's server auto-approve flag is set. Shared by the audit layer and
+    the ASK policy tier so they can never disagree.
     """
+    if os.environ.get(_UNATTENDED_ENV, "").strip() == "1":
+        return True
     if os.environ.get("MANTA_TASK_ID"):
-        return False
-    return os.environ.get(_AUTO_APPROVE_ENV, "").strip().lower() != "true"
+        return True
+    return os.environ.get(_AUTO_APPROVE_ENV, "").strip().lower() == "true"
+
+
+def _hitl_active() -> bool:
+    """Whether a human is actually in the approval loop for this run."""
+    return not unattended_run()
 
 
 def _is_policy_denial(result: Any) -> bool:
@@ -112,11 +125,18 @@ class EventLogMiddleware(AgentMiddleware):
 
 
 def agent_event_middleware(defn: Any) -> AgentMiddleware | None:
-    """Event-log middleware for an :class:`AgentDef`; ``None`` on failure."""
+    """Event-log middleware for an :class:`AgentDef`; ``None`` on failure.
+
+    Ask-gated tools (ADR 0011) audit through the same approved/auto_approved
+    distinction as upstream-HITL approval tools.
+    """
     try:
+        gated = set(getattr(defn, "approval", None) or ()) | set(
+            getattr(defn, "tools_ask", None) or ()
+        )
         return EventLogMiddleware(
             agent=getattr(defn, "name", "agent"),
-            approval=set(getattr(defn, "approval", None) or ()),
+            approval=gated,
         )
     except Exception:  # noqa: BLE001
         return None

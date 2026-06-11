@@ -85,11 +85,13 @@ class ToolPolicyMiddleware(AgentMiddleware):
         deny: list[str] | None = None,
         read_only: bool = False,
         filesystem: list[Any] | None = None,
+        ask: list[str] | None = None,
         agent_name: str | None = None,
     ) -> None:
         super().__init__()
         self._allow = set(allow) if allow is not None else None
         self._deny = set(deny or ())
+        self._ask = set(ask or ())
         self._read_only = read_only
         #: Each rule has ``.operations`` (``["read"|"write"]``), ``.paths``
         #: (list of globs) and ``.mode`` (``"allow"|"deny"``). Stored in order;
@@ -146,7 +148,42 @@ class ToolPolicyMiddleware(AgentMiddleware):
                 f"'{tool_name}' is not in this agent's allowed tools. "
                 f"Allowed: {allowed}."
             )
-        return self._fs_denial(tool_name, args)
+        fs = self._fs_denial(tool_name, args)
+        if fs is not None:
+            return fs
+        # ASK tier (ADR 0011), evaluated last so a human is never prompted for
+        # a call another rule denies anyway. Interactive sessions never reach
+        # a denial here — upstream HITL (interrupt_on) owns the prompt; this
+        # is the unattended fail-closed half.
+        return self._ask_denial(tool_name)
+
+    def _ask_denial(self, tool_name: str) -> str | None:
+        """Deny ask-gated tools in unattended runs (fail closed).
+
+        Upstream HITL auto-approves when no human is present; ask-gated tools
+        must not run on that basis. ``MANTA_ALLOW_ASKS=1`` (set when a human
+        submitted the task with ``--allow-asks``) grants blanket
+        pre-approval, audited as ``auto_approved`` by the event layer.
+        """
+        if tool_name not in self._ask:
+            return None
+        try:
+            from ..tasks.events import unattended_run
+
+            if not unattended_run():
+                return None  # interactive: interrupt_on owns the prompt
+        except Exception:  # noqa: BLE001 - fail closed if detection breaks
+            pass
+        import os
+
+        if os.environ.get("MANTA_ALLOW_ASKS", "").strip() == "1":
+            return None  # human pre-approved at submission
+        label = f" for agent '{self._agent_name}'" if self._agent_name else ""
+        return (
+            f"'{tool_name}' requires human approval{label} and this is an "
+            "unattended run (ask-gated tools fail closed). A human can "
+            "pre-approve by resubmitting the task with --allow-asks."
+        )
 
     def _tool_call(self, request: Any) -> dict[str, Any]:
         call = getattr(request, "tool_call", None)

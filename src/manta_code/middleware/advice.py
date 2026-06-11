@@ -101,6 +101,9 @@ class _ThreadSignals:
     spent_tokens: float = 0.0
     last_note_at: dict[str, float] = field(default_factory=dict)
     interrupted: bool = False
+    #: Set when the human rejected continuing on premium: every later call on
+    #: this thread is overridden to this (cheap) model.
+    downgrade_model: Any = None
 
     @property
     def recent_failures(self) -> int:
@@ -308,6 +311,16 @@ class AdviceMiddleware(AgentMiddleware):
             return
         signals = self._signals(thread)
         try:
+            from ..tasks.events import unattended_run
+
+            if unattended_run():
+                signals.interrupted = True
+                self._record(thread, model, advice, delivered="log")
+                logger.info("Manta advice (unattended): %s", advice.message)
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             from langgraph.errors import GraphInterrupt
             from langgraph.types import interrupt
         except Exception:  # noqa: BLE001 - no HITL primitive available
@@ -315,25 +328,46 @@ class AdviceMiddleware(AgentMiddleware):
             logger.info("Manta advice (no approval channel): %s", advice.message)
             return
         try:
-            interrupt(
-                {
-                    "type": "manta_advice",
-                    "agent": self._agent,
-                    "kind": advice.kind,
-                    "message": advice.message,
-                }
+            from .economy import _hitl_payload, _resume_decision
+
+            resume = interrupt(
+                _hitl_payload(
+                    "manta_advice_continue_premium",
+                    advice.message
+                    + " (Approve to continue on the premium model; reject to "
+                    "switch the rest of this task to the cheap default.)",
+                    {"agent": self._agent, "kind": advice.kind},
+                )
             )
             # interrupt() only returns on the post-decision re-execution (the
             # first pass raises GraphInterrupt, re-raised below, pausing the
             # run). Record exactly once, here, so the resume doesn't
             # double-write the advice row.
             signals.interrupted = True
-            self._record(thread, model, advice, delivered="interrupt")
+            if _resume_decision(resume) == "reject":
+                signals.downgrade_model = self._cheap_default_model()
+                self._record(thread, model, advice, delivered="interrupt:downgraded")
+            else:
+                self._record(thread, model, advice, delivered="interrupt:approved")
         except GraphInterrupt:
             raise  # the pause mechanism itself: must propagate
         except Exception:  # noqa: BLE001 - interrupt outside a graph context
             signals.interrupted = True
             logger.info("Manta advice (cannot pause here): %s", advice.message)
+
+    @staticmethod
+    def _cheap_default_model() -> Any | None:
+        """Resolve the configured cheap default for an advice-driven downgrade."""
+        try:
+            from ..config import load_config
+            from ..providers import resolve_model_ref
+
+            endpoint = load_config().interactive.default_endpoint
+            if not endpoint:
+                return None
+            return resolve_model_ref(f"databricks:{endpoint}", fallback=False)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _after_response(self, request: Any, response: Any) -> Any:
         try:
@@ -358,13 +392,25 @@ class AdviceMiddleware(AgentMiddleware):
 
     # --- middleware hooks -----------------------------------------------------
 
+    def _apply_downgrade(self, request: Any) -> Any:
+        """Honor a human's reject-decision: run the rest of the task cheap."""
+        try:
+            model = self._signals(_thread_id(request)).downgrade_model
+            if model is not None:
+                return request.override(model=model)
+        except Exception:  # noqa: BLE001 - downgrade must never break a call
+            pass
+        return request
+
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
         self._maybe_interrupt(request)
+        request = self._apply_downgrade(request)
         response = handler(request)
         return self._after_response(request, response)
 
     async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
         self._maybe_interrupt(request)
+        request = self._apply_downgrade(request)
         response = await handler(request)
         return self._after_response(request, response)
 

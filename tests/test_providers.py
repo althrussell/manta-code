@@ -11,7 +11,7 @@ from manta_code import providers
 @pytest.mark.parametrize(
     ("spec", "provider", "model"),
     [
-        ("databricks:databricks-gpt-5-5", "databricks", "databricks-gpt-5-5"),
+        ("databricks:databricks-gpt-5-4", "databricks", "databricks-gpt-5-4"),
         ("anthropic:claude-opus-4-8", "anthropic", "claude-opus-4-8"),
         # Only the first colon splits — gateway routes may contain colons.
         ("gateway:routes:chat/default", "gateway", "routes:chat/default"),
@@ -82,9 +82,9 @@ def test_databricks_factory_builds_manta_chat():
     pytest.importorskip("databricks_langchain")
     from manta_code.databricks_chat import MantaChatDatabricks
 
-    model = providers.resolve_model_ref("databricks:databricks-gpt-5-5")
+    model = providers.resolve_model_ref("databricks:databricks-gpt-5-4")
     assert isinstance(model, MantaChatDatabricks)
-    assert model.model == "databricks-gpt-5-5"
+    assert model.model == "databricks-gpt-5-4"
 
 
 def test_databricks_factory_returns_none_on_construction_failure(monkeypatch):
@@ -96,7 +96,7 @@ def test_databricks_factory_returns_none_on_construction_failure(monkeypatch):
             raise RuntimeError("no workspace")
 
     monkeypatch.setattr(dc, "MantaChatDatabricks", _Exploding)
-    assert providers._databricks_factory("databricks-gpt-5-5") is None
+    assert providers._databricks_factory("databricks-gpt-5-4") is None
 
 
 # --- integration with the subagent resolver shim ---------------------------------
@@ -145,7 +145,7 @@ def _fake_detail(name, *, usage=True, rate_limits=False, external=None, foundati
 def test_gateway_inspect_foundation_endpoint():
     from manta_code.providers.gateway import _inspect_endpoint
 
-    info = _inspect_endpoint(_fake_detail("databricks-gpt-5-5", rate_limits=True))
+    info = _inspect_endpoint(_fake_detail("databricks-gpt-5-4", rate_limits=True))
     assert info.gateway_governed
     assert info.features == ("usage-tracking", "rate-limits")
     assert info.external_provider is None
@@ -167,7 +167,7 @@ def test_gateway_surface_providers_and_governance():
 
     surface = GatewaySurface(
         endpoints=[
-            _inspect_endpoint(_fake_detail("databricks-gpt-5-5")),
+            _inspect_endpoint(_fake_detail("databricks-gpt-5-4")),
             _inspect_endpoint(_fake_detail("ext-oai", external="openai", foundation=False)),
             _inspect_endpoint(_fake_detail("bare", usage=False)),
         ]

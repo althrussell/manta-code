@@ -100,6 +100,13 @@ class AgentDef(BaseModel):
     #: Tool names that must pause for human approval (HITL) before running.
     approval: list[str] = Field(default_factory=list)
 
+    #: Tool names requiring a human decision at Manta's policy layer (ADR
+    #: 0011). Interactively this rides the same HITL prompt as ``approval``;
+    #: the difference is unattended behaviour: ask-gated tools **fail closed**
+    #: in background tasks / headless runs (upstream HITL auto-approves)
+    #: unless the submitter pre-approved with ``--allow-asks``.
+    tools_ask: list[str] = Field(default_factory=list)
+
     #: Skill source paths for this agent (passed to ``SkillsMiddleware``).
     skills: list[str] = Field(default_factory=list)
 

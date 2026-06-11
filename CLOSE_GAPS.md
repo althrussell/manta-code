@@ -30,6 +30,13 @@ prioritized roadmap.
 >   set-model` with live-workspace validation, pluggable pricing
 >   (`[pricing]` config overrides), and `python -m evals --live` running the
 >   benchmark through the real runtime with real ledger costs.
+> - **ADR 0011 landed** (post-Omnigent review) — steerable background tasks
+>   (task inbox + `manta task send` + checkpointed mid-task delivery), ASK
+>   policy tier (`tools_ask`: interactive HITL, unattended fail-closed with
+>   `--allow-asks` override), repaired budget/advice pauses (HITLRequest
+>   payloads + resume decisions honored), `[budget] daily_max_usd`, and the
+>   `manta_code.sdk` Python API. Non-goals recorded: no central server, web
+>   UI, multi-tenant platform, or cross-harness abstraction.
 
 **TL;DR.** The foundation is genuinely strong — the reliability seam (Pillar 7),
 the enforced agent registry (Pillar 4's bottom half), and token accounting

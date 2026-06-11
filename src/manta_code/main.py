@@ -1025,6 +1025,11 @@ def task_submit(
         None, "--max-turns", help="Agentic turn cap (default 80)."
     ),
     profile: Optional[str] = typer.Option(None, "-p", "--profile", help="Databricks profile."),
+    allow_asks: bool = typer.Option(
+        False,
+        "--allow-asks",
+        help="Pre-approve this agent's ask-gated tools for this unattended run.",
+    ),
 ) -> None:
     """Hand a long-running task to a named agent; returns immediately with an id."""
     from .tasks import executor
@@ -1035,7 +1040,9 @@ def task_submit(
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
     try:
-        record = executor.submit_task(agent, prompt, profile=profile, **kwargs)
+        record = executor.submit_task(
+            agent, prompt, profile=profile, allow_asks=allow_asks, **kwargs
+        )
     except executor.TaskError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -1078,6 +1085,16 @@ def task_status(task_id: str = typer.Argument(..., help="Task id.")) -> None:
         console.print(f"Finished:  {_fmt_age(record.finished_at)} ago "
                       f"(exit {record.exit_code})")
     console.print(f"Prompt:    {record.prompt}")
+    try:
+        from .tasks.store import inbox_count
+
+        steered = inbox_count(task_id)
+        if steered:
+            console.print(f"Steered:   {steered} message(s)")
+    except Exception:  # noqa: BLE001
+        pass
+    if record.allow_asks:
+        console.print("Asks:      pre-approved at submission (--allow-asks)")
     if record.log_path:
         console.print(f"Log:       [dim]{record.log_path}[/dim]")
 
@@ -1096,6 +1113,26 @@ def task_output_cmd(task_id: str = typer.Argument(..., help="Task id.")) -> None
         console.print("[dim](no output yet)[/dim]")
         return
     console.print(output)
+
+
+@task_app.command("send")
+def task_send(
+    task_id: str = typer.Argument(..., help="Task id."),
+    message: str = typer.Argument(..., help="Steering message for the running task."),
+) -> None:
+    """Steer a queued/running task: the message is delivered into the task's
+    thread before its next model call (ADR 0011)."""
+    from .tasks import executor
+
+    try:
+        executor.send_to_task(task_id, message)
+    except executor.TaskError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        f"Steering note queued for task [bold]{task_id}[/bold] — delivered "
+        "before its next model call."
+    )
 
 
 @task_app.command("cancel")

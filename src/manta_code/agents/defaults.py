@@ -59,7 +59,7 @@ SWE = AgentDef(
         "run tests and shell commands to verify. Delegate well-scoped "
         "engineering tasks here."
     ),
-    model=_model("databricks-gpt-5-5"),
+    model=_model("databricks-gpt-5-4"),
     read_only=False,
     memory=True,
     # Writes and shell are powerful: require approval before the agent edits or
@@ -107,7 +107,7 @@ CHIEF = AgentDef(
         "swe, review, and yours), tracks background tasks, and collects their "
         "results into one report. Coordinates; does not write code itself."
     ),
-    model=_model("databricks-gpt-5-5"),
+    model=_model("databricks-gpt-5-4"),
     read_only=True,
     memory=True,
     manta_tools=["tasks"],

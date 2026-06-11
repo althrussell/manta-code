@@ -72,5 +72,6 @@ def test_build_task_tools_compiles_structured_tools():
         "manta_task_status",
         "manta_task_output",
         "manta_task_list",
+        "manta_task_send",
         "manta_task_cancel",
     }

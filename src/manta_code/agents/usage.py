@@ -68,7 +68,7 @@ DEFAULT_PRICING: dict[str, Price] = {
     "claude-sonnet": Price(input=3.0, output=15.0),
     "claude-haiku": Price(input=0.80, output=4.0),
     "claude": Price(input=3.0, output=15.0),
-    "gpt-5-5": Price(input=1.25, output=10.0),
+    "gpt-5-4": Price(input=1.25, output=10.0),
     "gpt-5": Price(input=1.25, output=10.0),
     "gpt-oss-120b": Price(input=0.15, output=0.60),
     "gpt-oss": Price(input=0.10, output=0.40),
@@ -262,6 +262,62 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+#: (utc_day, total_usd, fetched_at_monotonic) — short-TTL cache so N economy
+#: middleware instances don't each hit SQLite per model call (ADR 0011).
+_day_total_cache: tuple[str, float, float] | None = None
+_DAY_TOTAL_TTL_SECONDS = 30.0
+
+
+def _utc_day_start(now: float | None = None) -> tuple[str, float]:
+    import datetime as _dt
+
+    moment = _dt.datetime.fromtimestamp(now or time.time(), tz=_dt.UTC)
+    day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    return moment.strftime("%Y-%m-%d"), day_start.timestamp()
+
+
+def today_total_usd(*, path: Path | None = None) -> float:
+    """Total USD recorded in the ledger for the current UTC day.
+
+    Cached with a short TTL and bumped locally by :func:`record_usage`, so the
+    per-model-call daily-budget check is a dict read, with periodic refresh to
+    pick up other processes' spend (background runners share the ledger).
+    """
+    global _day_total_cache  # noqa: PLW0603 - module-level cache
+    day, day_start = _utc_day_start()
+    now = time.monotonic()
+    if (
+        _day_total_cache is not None
+        and _day_total_cache[0] == day
+        and now - _day_total_cache[2] < _DAY_TOTAL_TTL_SECONDS
+    ):
+        return _day_total_cache[1]
+    try:
+        conn = connect(path)
+    except Exception:  # noqa: BLE001
+        return _day_total_cache[1] if _day_total_cache else 0.0
+    try:
+        row = conn.execute(
+            "SELECT SUM(cost_usd) FROM usage WHERE ts >= ?", (day_start,)
+        ).fetchone()
+        total = float(row[0] or 0.0)
+    except Exception:  # noqa: BLE001
+        total = _day_total_cache[1] if _day_total_cache else 0.0
+    finally:
+        conn.close()
+    _day_total_cache = (day, total, now)
+    return total
+
+
+def _bump_today_total(cost: float | None) -> None:
+    global _day_total_cache  # noqa: PLW0603
+    if cost is None or _day_total_cache is None:
+        return
+    day, _ = _utc_day_start()
+    if _day_total_cache[0] == day:
+        _day_total_cache = (day, _day_total_cache[1] + cost, _day_total_cache[2])
+
+
 def record_usage(record: UsageRecord, *, path: Path | None = None) -> None:
     """Append one usage row. Best-effort: never raises into the model loop."""
     try:
@@ -289,6 +345,7 @@ def record_usage(record: UsageRecord, *, path: Path | None = None) -> None:
             ),
         )
         conn.commit()
+        _bump_today_total(record.cost_usd)
     except Exception:  # noqa: BLE001
         pass
     finally:

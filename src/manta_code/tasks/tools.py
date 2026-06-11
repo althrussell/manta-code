@@ -113,6 +113,24 @@ def manta_task_list(state: str = "") -> str:
     return "\n".join(lines)
 
 
+def manta_task_send(task_id: str, message: str) -> str:
+    """Steer a queued/running background task with a mid-flight message.
+
+    The note is delivered into the task's thread before its next model call,
+    so the running agent course-corrects without restarting the task.
+    """
+    from .executor import TaskError, send_to_task
+
+    try:
+        send_to_task(task_id.strip(), message)
+    except TaskError as exc:
+        return str(exc)
+    return (
+        f"Steering note queued for task {task_id.strip()} — it will be "
+        "delivered before the task's next model call."
+    )
+
+
 def manta_task_cancel(task_id: str) -> str:
     """Cancel a queued or running background task by id."""
     from .executor import TaskError, cancel_task
@@ -139,6 +157,7 @@ def build_task_tools() -> list[Any]:
         manta_task_status,
         manta_task_output,
         manta_task_list,
+        manta_task_send,
         manta_task_cancel,
     )
     return [StructuredTool.from_function(fn) for fn in functions]

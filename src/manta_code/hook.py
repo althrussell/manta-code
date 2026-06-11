@@ -199,6 +199,18 @@ def build_orchestrator_middleware() -> list[Any]:
     except Exception:  # noqa: BLE001
         pass
 
+    # Task-inbox steering (ADR 0011): active only inside a background task
+    # (MANTA_TASK_ID), attached once at the orchestrator level — never
+    # per-subagent, so a delegated subagent can't consume the user's note.
+    try:
+        from .middleware.inbox import task_inbox_middleware
+
+        mw = task_inbox_middleware()
+        if mw is not None:
+            middleware.append(mw)
+    except Exception:  # noqa: BLE001
+        pass
+
     if defn is not None:
         # Model pin first (outermost) so accounting/routing below see the pinned
         # model, and the primary loop actually runs on the profile's model — not

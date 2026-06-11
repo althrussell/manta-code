@@ -45,7 +45,7 @@ def _infer_model(text: str) -> str:
         return _model("databricks-claude-opus-4-8")
     if any(hint in text for hint in _READ_ONLY_HINTS):
         return _model("databricks-claude-sonnet-4-5")
-    return _model("databricks-gpt-5-5")
+    return _model("databricks-gpt-5-4")
 
 
 def _infer_databricks_tools(text: str) -> list[str]:

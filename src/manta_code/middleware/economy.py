@@ -42,6 +42,43 @@ logger = logging.getLogger("manta.economy")
 SOFT_THRESHOLD = 0.8
 
 
+def _hitl_payload(action: str, description: str, args: dict[str, Any]) -> dict[str, Any]:
+    """An upstream-valid ``HITLRequest`` interrupt payload.
+
+    Design review (ADR 0011) found the TUI validates non-``ask_user``
+    interrupts against langchain's ``HITLRequest`` TypedDict and rejects
+    anything else — Manta's previous custom dicts never rendered an approval
+    prompt at all. ``action_requests`` + ``review_configs`` is the only shape
+    that reaches the human.
+    """
+    return {
+        "action_requests": [
+            {"name": action, "args": args, "description": description}
+        ],
+        "review_configs": [
+            {"action_name": action, "allowed_decisions": ["approve", "reject"]}
+        ],
+    }
+
+
+def _resume_decision(resume_value: Any) -> str:
+    """Extract the human's decision from an ``interrupt()`` resume value.
+
+    Upstream resumes with ``{"decisions": [{"type": "approve"|"reject", ...}]}``.
+    Unknown shapes default to ``approve`` (trust-first: a malformed resume
+    must not destroy work the human probably just approved).
+    """
+    try:
+        decisions = resume_value.get("decisions") if isinstance(resume_value, dict) else None
+        if isinstance(decisions, list) and decisions:
+            kind = decisions[0].get("type")
+            if kind == "reject":
+                return "reject"
+    except Exception:  # noqa: BLE001
+        pass
+    return "approve"
+
+
 def _model_name(model: Any) -> str:
     """Best-effort human/endpoint name for a request's model object."""
     if model is None:
@@ -150,17 +187,21 @@ class TokenEconomyMiddleware(AgentMiddleware):
         max_usd: float | None = None,
         pricing: dict[str, Price] | None = None,
         ledger_path: Any | None = None,
+        daily_max_usd: float | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
         self._max_tokens = max_tokens
         self._max_usd = max_usd
+        self._daily_max_usd = daily_max_usd
         self._pricing = pricing
         self._ledger_path = ledger_path
         #: Per-thread running totals: thread_id -> {"tokens", "usd"}.
         self._totals: dict[str, dict[str, float]] = {}
         #: Threads we have already prompted for continuation (ask once per cap).
         self._approved: set[str] = set()
+        #: Threads where the human rejected continuing: end turns gracefully.
+        self._stopped: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -189,62 +230,107 @@ class TokenEconomyMiddleware(AgentMiddleware):
             return True
         return False
 
-    def _maybe_pause(self, thread: str) -> None:
-        """If over the cap, pause for approval (approve-to-continue).
+    def _maybe_pause(self, thread: str) -> str | None:
+        """If over a cap, pause for an approve/reject decision.
 
-        Uses LangGraph ``interrupt`` so the run is *paused*, never killed: the
-        user approves and work resumes exactly where it left off. If ``interrupt``
-        is unavailable, we log and continue (accounting still happened) rather
-        than aborting.
+        Uses LangGraph ``interrupt`` (HITLRequest-shaped, so upstream actually
+        renders the prompt) — the run is *paused*, never killed. Returns
+        ``"stop"`` when the human rejected continuing (the caller ends the
+        turn gracefully), else ``None``. If no approval channel exists, we
+        log and continue rather than aborting.
         """
-        if not self.has_budget:
-            return
+        if thread in self._stopped:
+            return "stop"
         running = self._running(thread)
-        if not self._over_cap(running) or thread in self._approved:
-            return
+        over_agent_cap = self.has_budget and self._over_cap(running)
+        over_daily_cap = self._over_daily_cap()
+        if (not over_agent_cap and not over_daily_cap) or thread in self._approved:
+            return None
+
+        if over_agent_cap:
+            description = (
+                f"Agent '{self._agent}' reached its budget "
+                f"({int(running['tokens'])} tokens / ${running['usd']:.2f}). "
+                "Approve to continue, reject to stop here."
+            )
+            args: dict[str, Any] = {
+                "agent": self._agent,
+                "spent_usd": round(running["usd"], 4),
+                "spent_tokens": int(running["tokens"]),
+                "max_usd": self._max_usd,
+                "max_tokens": self._max_tokens,
+            }
+        else:
+            description = (
+                f"Today's Manta spend has reached the configured daily budget "
+                f"(${self._daily_max_usd:.2f}). Approve to continue, reject "
+                "to stop here."
+            )
+            args = {"daily_max_usd": self._daily_max_usd}
+
+        try:
+            from ..tasks.events import unattended_run
+
+            if unattended_run():
+                # No human to ask: log + event, never silently kill the work.
+                logger.warning("Manta budget cap reached (unattended): %s", description)
+                self._record_budget_event(description)
+                self._approved.add(thread)
+                return None
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             from langgraph.errors import GraphInterrupt
             from langgraph.types import interrupt
         except Exception:  # noqa: BLE001 - no HITL primitive available
-            logger.warning(
-                "Manta budget for '%s' exceeded (%s tokens / $%.2f) but no "
-                "approval channel is available; continuing.",
-                self._agent,
-                int(running["tokens"]),
-                running["usd"],
-            )
+            logger.warning("Manta budget cap reached but no approval channel: %s", description)
             self._approved.add(thread)
-            return
+            return None
         try:
-            interrupt(
-                {
-                    "type": "manta_budget",
-                    "agent": self._agent,
-                    "spent_usd": round(running["usd"], 4),
-                    "spent_tokens": int(running["tokens"]),
-                    "max_usd": self._max_usd,
-                    "max_tokens": self._max_tokens,
-                    "message": (
-                        f"Agent '{self._agent}' reached its budget "
-                        f"({int(running['tokens'])} tokens / "
-                        f"${running['usd']:.2f}). Approve to continue."
-                    ),
-                }
-            )
-            # interrupt() only *returns* on the post-approval re-execution;
-            # the first pass raises GraphInterrupt (re-raised below) to pause
-            # the run. Reaching here means the user approved — don't re-ask.
+            resume = interrupt(_hitl_payload("manta_budget_continue", description, args))
+            # interrupt() only *returns* on the post-decision re-execution;
+            # the first pass raises GraphInterrupt (re-raised below).
+            if _resume_decision(resume) == "reject":
+                self._stopped.add(thread)
+                return "stop"
             self._approved.add(thread)
         except GraphInterrupt:
             # The pause mechanism itself: must propagate to the runtime.
             raise
         except Exception:  # noqa: BLE001 - interrupt outside a graph context
             logger.warning(
-                "Manta budget for '%s' exceeded but the run cannot be paused "
-                "here; continuing.",
-                self._agent,
+                "Manta budget cap reached but the run cannot be paused here; continuing."
             )
             self._approved.add(thread)
+        return None
+
+    def _over_daily_cap(self) -> bool:
+        if self._daily_max_usd is None:
+            return False
+        try:
+            from ..agents.usage import today_total_usd
+
+            return today_total_usd() >= self._daily_max_usd
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _record_budget_event(self, description: str) -> None:
+        try:
+            from ..tasks.store import EventRecord, record_event
+
+            import os
+
+            record_event(
+                EventRecord(
+                    agent=self._agent,
+                    kind="budget",
+                    detail=description[:200],
+                    task_id=os.environ.get("MANTA_TASK_ID") or None,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # --- accounting --------------------------------------------------------
 
@@ -300,22 +386,48 @@ class TokenEconomyMiddleware(AgentMiddleware):
         except Exception:  # noqa: BLE001 - accounting must never break a run
             logger.debug("Manta token accounting failed", exc_info=True)
 
+    def _stop_message(self) -> Any:
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content=(
+                "Stopped at the budget cap as requested. Raise the cap "
+                "(`manta agents edit` / `[budget] daily_max_usd`) or start a "
+                "new session to continue."
+            )
+        )
+
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        self._maybe_pause(_thread_id(request))
+        if self._maybe_pause(_thread_id(request)) == "stop":
+            return self._stop_message()
         response = handler(request)
         self._account(request, response)
         return response
 
     async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        self._maybe_pause(_thread_id(request))
+        if self._maybe_pause(_thread_id(request)) == "stop":
+            return self._stop_message()
         response = await handler(request)
         self._account(request, response)
         return response
 
 
+def _configured_daily_cap() -> float | None:
+    try:
+        from ..config import load_config
+
+        return load_config().budget.daily_max_usd
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def orchestrator_middleware() -> list[AgentMiddleware]:
-    """Orchestrator-level economy middleware (accounting; no caps by default)."""
-    return [TokenEconomyMiddleware(agent="orchestrator")]
+    """Orchestrator-level economy middleware (accounting + optional daily cap)."""
+    return [
+        TokenEconomyMiddleware(
+            agent="orchestrator", daily_max_usd=_configured_daily_cap()
+        )
+    ]
 
 
 def agent_budget_middleware(defn: Any) -> AgentMiddleware | None:
@@ -330,6 +442,7 @@ def agent_budget_middleware(defn: Any) -> AgentMiddleware | None:
             agent=getattr(defn, "name", "agent"),
             max_tokens=getattr(defn, "budget_max_tokens", None),
             max_usd=getattr(defn, "budget_max_usd", None),
+            daily_max_usd=_configured_daily_cap(),
         )
     except Exception:  # noqa: BLE001
         return None
