@@ -729,3 +729,87 @@ def receipts(*, days: int = 7, path: Path | None = None) -> Receipts:
         advice_delivered=len(advice),
         advice_accepted=accepted,
     )
+
+
+# --- in-session cost views (/cost in the TUI) --------------------------------
+
+
+@dataclass(frozen=True)
+class CallRow:
+    """One model call from the ledger, for per-call drill-down."""
+
+    ts: float
+    agent: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float | None
+
+
+def thread_totals(thread_id: str, *, path: Path | None = None) -> list[AggRow]:
+    """Per-agent spend for one conversation thread (the current session)."""
+    if not thread_id:
+        return []
+    try:
+        conn = connect(path)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT agent AS key, COUNT(*) AS calls, SUM(input_tokens) AS i, "
+            "SUM(output_tokens) AS o, SUM(cache_read) AS cr, "
+            "SUM(cache_creation) AS cc, SUM(cost_usd) AS cost, "
+            "SUM(cost_usd IS NULL) AS unknown FROM usage WHERE thread_id = ? "
+            "GROUP BY agent ORDER BY cost DESC",
+            (thread_id,),
+        ).fetchall()
+        return [
+            AggRow(
+                key=r["key"],
+                calls=r["calls"],
+                input_tokens=int(r["i"] or 0),
+                output_tokens=int(r["o"] or 0),
+                cache_read=int(r["cr"] or 0),
+                cache_creation=int(r["cc"] or 0),
+                cost_usd=float(r["cost"] or 0.0),
+                cost_known=not r["unknown"],
+            )
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+
+
+def recent_calls(
+    thread_id: str, *, limit: int = 6, path: Path | None = None
+) -> list[CallRow]:
+    """The thread's most recent model calls, newest first (per-call costs)."""
+    if not thread_id:
+        return []
+    try:
+        conn = connect(path)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT ts, agent, model, input_tokens, output_tokens, cost_usd "
+            "FROM usage WHERE thread_id = ? ORDER BY ts DESC LIMIT ?",
+            (thread_id, limit),
+        ).fetchall()
+        return [
+            CallRow(
+                ts=r["ts"],
+                agent=r["agent"],
+                model=r["model"],
+                input_tokens=r["input_tokens"],
+                output_tokens=r["output_tokens"],
+                cost_usd=r["cost_usd"],
+            )
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()

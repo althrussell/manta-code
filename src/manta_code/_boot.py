@@ -812,6 +812,115 @@ def add_agent_mentions_to_autocomplete() -> bool:
     return True
 
 
+def _session_cost_report(thread_id: str | None) -> str:
+    """Plain-text spend report for the current session (the ``/cost`` command).
+
+    The session's per-agent totals from the local ledger, the most recent
+    model calls (per-call cost — the closest honest thing to "cost per
+    turn"), today's total, and the daily cap when configured.
+    """
+    from manta_code.agents.usage import recent_calls, thread_totals, today_total_usd
+
+    lines: list[str] = []
+    rows = thread_totals(thread_id or "")
+    if rows:
+        total = sum(r.cost_usd for r in rows)
+        tokens = sum(r.total_tokens for r in rows)
+        lines.append(f"Session spend: ${total:.4f}  ({tokens:,} tokens)")
+        for r in rows:
+            lines.append(
+                f"  {r.key:<14} {r.calls:>3} call(s)  "
+                f"{r.total_tokens:>10,} tok  ${r.cost_usd:.4f}"
+            )
+        calls = recent_calls(thread_id or "", limit=5)
+        if calls:
+            lines.append("Recent calls (newest first):")
+            for c in calls:
+                cost = f"${c.cost_usd:.4f}" if c.cost_usd is not None else "$?"
+                lines.append(
+                    f"  {c.agent:<14} {c.model:<34} "
+                    f"{c.input_tokens:>8,}→{c.output_tokens:<7,} {cost}"
+                )
+    else:
+        lines.append(
+            "No spend recorded for this session yet (the ledger writes after "
+            "each model call)."
+        )
+    today = today_total_usd()
+    cap = None
+    try:
+        from manta_code.config import load_config
+
+        cap = load_config().budget.daily_max_usd
+    except Exception:  # noqa: BLE001
+        pass
+    if cap:
+        lines.append(f"Today: ${today:.2f} of ${cap:.2f} daily budget")
+    else:
+        lines.append(f"Today (all sessions): ${today:.2f}")
+    lines.append("More: manta receipts • manta cost --by model • manta status")
+    return "\n".join(lines)
+
+
+def add_session_cost_command() -> bool:
+    """Register an in-session ``/cost`` command (token economy, at the front).
+
+    Every Manta cost surface lived in a second terminal; ``/cost`` brings the
+    session's own spend — per-agent totals, per-call costs, today's total
+    against the daily budget — into the conversation. Classified
+    side-effect-free so it answers even while the agent is busy.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code import command_registry
+        from deepagents_code.app import DeepAgentsApp
+        from deepagents_code.widgets.messages import AppMessage, UserMessage
+    except Exception:
+        return False
+
+    original_handle = getattr(DeepAgentsApp, "_handle_command", None)
+    if original_handle is None:
+        return False
+    if getattr(original_handle, "__manta_cost__", False):
+        return True
+
+    async def wrapped(self: object, command: str) -> None:
+        cmd = command.lower().strip()
+        if cmd in {"/cost", "/spend"}:
+            try:
+                await self._mount_message(UserMessage(command))
+                report = _session_cost_report(getattr(self, "_lc_thread_id", None))
+                await self._mount_message(AppMessage(report))
+            except Exception:  # noqa: BLE001 - reporting must never break input
+                pass
+            return
+        await original_handle(self, command)
+
+    wrapped.__manta_cost__ = True  # type: ignore[attr-defined]
+    DeepAgentsApp._handle_command = wrapped
+
+    # Autocomplete + busy-state classification for the new command.
+    try:
+        entry = command_registry.CommandEntry(
+            name="/cost",
+            description="Session spend: per-agent totals, per-call costs, daily budget",
+            hidden_keywords="tokens spend price budget receipts money usage",
+            argument_hint="",
+        )
+        if all(e.name != "/cost" for e in command_registry.SLASH_COMMANDS):
+            command_registry.SLASH_COMMANDS.append(entry)
+        command_registry.SIDE_EFFECT_FREE = frozenset(
+            command_registry.SIDE_EFFECT_FREE | {"/cost", "/spend"}
+        )
+        command_registry.ALL_CLASSIFIED = frozenset(
+            command_registry.ALL_CLASSIFIED | {"/cost", "/spend"}
+        )
+    except Exception:  # noqa: BLE001 - autocomplete is a nicety; /cost still works
+        pass
+    return True
+
+
 def install_manta_build_hook() -> bool:
     """Install Manta's control-plane build hook (best-effort).
 
@@ -850,6 +959,8 @@ def main() -> None:
         degraded.append("agent-pin model alignment in /agents")
     if not add_agent_mentions_to_autocomplete():
         degraded.append("@agent autocomplete")
+    if not add_session_cost_command():
+        degraded.append("in-session /cost")
     if not allow_blocking_server():
         degraded.append("Databricks auth shim")
     if not install_manta_build_hook():

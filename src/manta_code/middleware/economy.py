@@ -165,8 +165,21 @@ def _thread_id(request: Any) -> str:
         cfg = config.get("configurable") or {}
         if isinstance(cfg, dict):
             tid = cfg.get("thread_id")
-            if isinstance(tid, str):
+            if isinstance(tid, str) and tid:
                 return tid
+    # The real runtime carries no thread attribute; inside a graph node the
+    # live RunnableConfig is reachable via langgraph's contextvar. Without
+    # this, every ledger row had an empty thread_id — per-session /cost and
+    # per-thread budget tracking silently degraded to a single bucket.
+    try:
+        from langgraph.config import get_config
+
+        cfg = get_config() or {}
+        tid = (cfg.get("configurable") or {}).get("thread_id")
+        if isinstance(tid, str) and tid:
+            return tid
+    except Exception:  # noqa: BLE001 - outside a graph context (tests)
+        pass
     return ""
 
 
