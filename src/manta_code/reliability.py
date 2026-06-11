@@ -109,6 +109,26 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         attribute="_build_server_cmd",
         purpose="server cmd wrapped to add --allow-blocking (Databricks auth)",
     ),
+    PatchTarget(
+        module="deepagents_code.app",
+        attribute="DeepAgentsApp._restart_server_for_agent_swap",
+        purpose="/agents swap wrapped to apply the Manta agent's model pin",
+    ),
+    PatchTarget(
+        module="deepagents_code.app",
+        attribute="DeepAgentsApp._switch_model",
+        purpose="upstream model switch reused for agent-pin alignment",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.autocomplete",
+        attribute="FuzzyFileController._get_fuzzy_suggestions",
+        purpose="@ completion extended with Manta agent names",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.autocomplete",
+        attribute="FuzzyFileController.on_text_changed",
+        purpose="@ completion position check for agent addressing",
+    ),
 )
 
 

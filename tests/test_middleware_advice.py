@@ -216,3 +216,51 @@ def test_rule_failure_never_breaks_the_call(monkeypatch):
     )
     result = mw.wrap_model_call(_Request(), lambda r: _response(content="fine"))
     assert result.content == "fine"
+
+
+def test_budget_tradeoff_graph_interrupt_propagates(monkeypatch):
+    # interrupt() pauses by RAISING GraphInterrupt; swallowing it would make
+    # the approve-to-continue tier a silent no-op (review finding).
+    from langgraph.errors import GraphInterrupt
+
+    mw = _mw(max_usd=0.001)
+    req = _Request(model="databricks-opus-x")
+    mw.wrap_model_call(req, lambda r: _response(output_tokens=500))  # accrue spend
+
+    import langgraph.types as lg_types
+
+    def _raising_interrupt(payload):
+        raise GraphInterrupt()
+
+    monkeypatch.setattr(lg_types, "interrupt", _raising_interrupt)
+    with pytest.raises(GraphInterrupt):
+        mw.wrap_model_call(req, lambda r: _response(output_tokens=500))
+    # Not yet decided: the resume re-execution asks again (and only then
+    # records), so no advice row exists from the paused attempt.
+    from manta_code.agents.usage import recent_advice
+
+    assert all(r.kind != "budget_tradeoff" for r in recent_advice())
+
+
+def test_note_not_consumed_by_mid_loop_turn():
+    # Escalation advice typically fires mid tool-error loop, where the model
+    # response carries tool calls and cannot be annotated. The cooldown and
+    # ledger row must NOT be consumed there — the note lands on the turn's
+    # final user-facing answer instead (review finding).
+    mw = _mw()
+    _tool_error(mw, ADV.FAILURE_THRESHOLD)
+    req = _Request(model="databricks-mini-x")
+    tool_turn = _response(
+        tool_calls=[{"name": "read_file", "args": {}, "id": "x", "type": "tool_call"}]
+    )
+    result = mw.wrap_model_call(req, lambda r: tool_turn)
+    assert "Manta advice" not in result.content
+    from manta_code.agents.usage import recent_advice
+
+    assert recent_advice() == []  # nothing recorded as delivered yet
+
+    final_turn = _response(content="here is the answer")
+    result = mw.wrap_model_call(req, lambda r: final_turn)
+    assert "Manta advice" in result.content  # delivered on the final answer
+    (record,) = recent_advice()
+    assert record.delivered == "note"

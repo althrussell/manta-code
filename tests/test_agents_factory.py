@@ -13,11 +13,26 @@ def test_plain_agent_compiles_to_minimal_subagent():
     assert sub["name"] == "helper"
     assert sub["description"] == "d"
     assert sub["system_prompt"] == "p"
-    # No constraints => no enforcement keys (inherits parent tools/permissions).
     assert "permissions" not in sub
-    assert "middleware" not in sub
     assert "interrupt_on" not in sub
     assert "model" not in sub
+    # Every agent that has not opted into the task tools gets a policy that
+    # denies them: subagents inherit the orchestrator's extra tools, and a
+    # read-only agent must not route around its boundary by submitting a
+    # background swe task.
+    (policy,) = sub["middleware"]
+    assert "manta_task_submit" in policy._deny
+    assert "manta_task_cancel" in policy._deny
+
+
+def test_chief_opt_in_keeps_task_tools_allowed():
+    from manta_code.agents.defaults import CHIEF
+    from manta_code.agents.factory import _effective_deny
+
+    assert "manta_task_submit" not in _effective_deny(CHIEF)
+    from manta_code.agents.defaults import REVIEW
+
+    assert "manta_task_submit" in _effective_deny(REVIEW)
 
 
 def test_model_pin_is_emitted():

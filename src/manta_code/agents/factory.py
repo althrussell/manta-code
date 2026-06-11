@@ -32,12 +32,35 @@ from typing import Any
 from .registry import AgentDef
 
 
+#: Names of the background-task tools (must match ``tasks/tools.py``). Agents
+#: that have not opted in via ``manta_tools=["tasks"]`` get these deny-listed:
+#: deepagents subagents inherit the parent's extra tools unless their spec
+#: declares its own, so without this a *read-only* agent could route around
+#: its boundary by submitting a background ``swe`` task that writes files.
+TASK_TOOL_NAMES: tuple[str, ...] = (
+    "manta_task_submit",
+    "manta_task_status",
+    "manta_task_output",
+    "manta_task_list",
+    "manta_task_cancel",
+)
+
+
+def _effective_deny(defn: AgentDef) -> list[str]:
+    """The agent's deny-list plus inherited task tools it has not opted into."""
+    deny = list(defn.tools_deny)
+    if "tasks" not in (defn.manta_tools or []):
+        deny.extend(t for t in TASK_TOOL_NAMES if t not in deny)
+    return deny
+
+
 def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
     """Return a one-element ``[ToolPolicyMiddleware]`` when any policy applies."""
+    deny = _effective_deny(defn)
     needs_policy = (
         defn.read_only
         or defn.tools_allow is not None
-        or bool(defn.tools_deny)
+        or bool(deny)
         or bool(defn.filesystem)
     )
     if not needs_policy:
@@ -47,7 +70,7 @@ def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
     return [
         ToolPolicyMiddleware(
             allow=defn.tools_allow,
-            deny=defn.tools_deny,
+            deny=deny,
             read_only=defn.read_only,
             filesystem=defn.filesystem,
             agent_name=defn.name,

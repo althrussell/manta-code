@@ -280,6 +280,98 @@ def _has_model_flag(args: Sequence[str]) -> bool:
     return False
 
 
+def _addressed_agent(args: Sequence[str]) -> str | None:
+    """Return the agent named by ``-a/--agent`` in the passthrough args, if any."""
+    args = list(args)
+    for i, arg in enumerate(args):
+        if arg in ("-a", "--agent") and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--agent="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _agent_model_spec(agent_name: str) -> str | None:
+    """The full ``provider:model`` pin for a Manta agent, or ``None``.
+
+    Guarded: an unknown agent or an unreadable registry returns ``None`` so
+    the caller falls back to the configured default endpoint.
+    """
+    try:
+        from .agents.defaults import merged_agents
+        from .agents.registry import list_agents
+
+        for defn in merged_agents(list_agents()):
+            if defn.name == agent_name:
+                return defn.model or None
+    except Exception:  # noqa: BLE001 - pin lookup is best-effort
+        pass
+    return None
+
+
+def _effective_initial_agent(extras: Sequence[str]) -> str | None:
+    """The agent a launch will actually start as, mirroring upstream's order.
+
+    ``deepagents-code`` resolves the initial assistant as: ``-a`` flag >
+    persisted ``[agents].default`` > remembered ``[agents].recent`` > the base
+    ``agent``. Manta must inject the session model for the *same* agent, or
+    the footer shows the cheap default while a pinned specialist runs.
+    Guarded: any failure resolves to ``None`` (base agent).
+    """
+    agent = _addressed_agent(extras)
+    if agent:
+        return agent
+    try:
+        from deepagents_code.model_config import load_default_agent, load_recent_agent
+
+        return load_default_agent() or load_recent_agent() or None
+    except Exception:  # noqa: BLE001 - upstream config is best-effort here
+        return None
+
+
+def _has_resume_flag(args: Sequence[str]) -> bool:
+    """Return ``True`` when the launch resumes an existing thread (``-r``)."""
+    return any(
+        arg in ("-r", "--resume") or arg.startswith("--resume=") for arg in args
+    )
+
+
+def _session_model_spec(
+    default_endpoint: str | None, extras: Sequence[str]
+) -> str | None:
+    """Resolve the ``-M`` spec to inject for a launch, or ``None``.
+
+    The user's own ``-M/--model`` always wins (no injection). A **resumed**
+    session gets no injection either: upstream adopts the resumed thread's own
+    model, and an injected ``-M`` would mark the model "explicitly set" and
+    silently switch the conversation. When the launch will start as a Manta
+    agent — via ``-a <name>``, the persisted default agent, or the remembered
+    recent agent — **that agent's model pin** is the session model, so the
+    visible session model matches the agent actually running ("the right
+    model for the role", VISION pillar 2) and the pin middleware becomes a
+    backstop rather than the mechanism. Otherwise the configured default
+    endpoint applies (cheap-by-default orchestration).
+
+    ``default_endpoint is None`` means Databricks is not configured on this
+    machine (ADR 0010 detect-and-enable): a ``databricks:`` pin would force
+    the session onto an unreachable provider, so it is skipped and upstream's
+    own provider resolution applies.
+    """
+    if _has_model_flag(extras) or _has_resume_flag(extras):
+        return None
+    agent = _effective_initial_agent(extras)
+    if agent:
+        pin = _agent_model_spec(agent)
+        if pin and (
+            default_endpoint is not None
+            or not pin.startswith(f"{DATABRICKS_PROVIDER}:")
+        ):
+            return pin
+    if default_endpoint:
+        return f"{DATABRICKS_PROVIDER}:{default_endpoint}"
+    return None
+
+
 def build_dcode_argv(
     default_endpoint: str | None,
     passthrough: Sequence[str],
@@ -289,14 +381,16 @@ def build_dcode_argv(
     """Build the argv to launch deepagents-code via Manta's branded boot shim.
 
     Runs ``python -m manta_code._boot`` (which rebrands the splash then hands
-    off to ``deepagents-code``'s CLI). Injects ``-M databricks:<endpoint>`` only
-    when the user did not pass their own ``-M/--model``. Extra args are
-    forwarded verbatim.
+    off to ``deepagents-code``'s CLI). Injects ``-M`` only when the user did
+    not pass their own ``-M/--model``: the addressed agent's pin when
+    launching with ``-a <agent>``, else ``databricks:<default endpoint>``.
+    Extra args are forwarded verbatim.
     """
     argv = [python or sys.executable, "-m", DCODE_BOOT_MODULE]
     extras = list(passthrough)
-    if default_endpoint and not _has_model_flag(extras):
-        argv += ["-M", f"{DATABRICKS_PROVIDER}:{default_endpoint}"]
+    spec = _session_model_spec(default_endpoint, extras)
+    if spec:
+        argv += ["-M", spec]
     argv += extras
     return argv
 
@@ -334,8 +428,9 @@ def build_run_argv(
     """
     argv = [python or sys.executable, "-m", DCODE_BOOT_MODULE]
     extras = list(passthrough)
-    if default_endpoint and not _has_model_flag(extras):
-        argv += ["-M", f"{DATABRICKS_PROVIDER}:{default_endpoint}"]
+    spec = _session_model_spec(default_endpoint, extras)
+    if spec:
+        argv += ["-M", spec]
     argv += ["-n", message]
     if quiet:
         argv.append("-q")

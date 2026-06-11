@@ -90,3 +90,27 @@ def test_agent_event_middleware_reads_defn():
     mw = agent_event_middleware(SWE)
     assert mw is not None
     assert mw._approval == {"write_file", "edit_file", "execute"}
+
+
+def test_unattended_approval_recorded_as_auto_approved(monkeypatch):
+    # Background tasks / headless runs bypass HITL (auto-approve); the audit
+    # trail must not claim a human approved anything (review finding).
+    monkeypatch.setenv("MANTA_TASK_ID", "task1234")
+    mw = EventLogMiddleware(agent="swe", approval={"execute"})
+    mw.wrap_tool_call(
+        _ToolRequest({"name": "execute", "args": {}, "id": "1"}),
+        lambda r: ToolMessage(content="ran", tool_call_id="1"),
+    )
+    (event,) = [e for e in store.recent_events(limit=5)]
+    assert event.kind == "auto_approved"
+
+
+def test_auto_approve_env_recorded_as_auto_approved(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_AUTO_APPROVE", "true")
+    mw = EventLogMiddleware(agent="swe", approval={"execute"})
+    mw.wrap_tool_call(
+        _ToolRequest({"name": "execute", "args": {}, "id": "1"}),
+        lambda r: ToolMessage(content="ran", tool_call_id="1"),
+    )
+    (event,) = [e for e in store.recent_events(limit=5)]
+    assert event.kind == "auto_approved"

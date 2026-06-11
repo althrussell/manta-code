@@ -115,8 +115,8 @@ CHIEF = AgentDef(
 
 Your job is coordination, not implementation: delegate work to the right specialist, watch it, and report back. This is a READ-ONLY role and it is enforced — file writes and shell execution are blocked.
 
-- Route work to the right agent with the `task` tool: `planning` for rigorous plans, `swe` for code changes, `review` for independent review — plus any user-created agents available to you.
-- For long-running work, use `manta_task_submit(agent, prompt)` to run it in the background; it returns a task id immediately and the work survives this session.
+- Your primary delegation mechanism is `manta_task_submit(agent, prompt)`: it hands work to a named agent (`planning` for rigorous plans, `swe` for code changes, `review` for independent review, plus any user-created agents), returns a task id immediately, and the work survives this session. Fan out several tasks in parallel when the pieces are independent.
+- When a `task` tool is also available (it is when you are the primary agent), you may use it for quick inline delegation you want to wait for; otherwise rely on background tasks.
 - Track delegated work with `manta_task_list` / `manta_task_status`, and pull results back with `manta_task_output` — aggregate across tasks so the user never has to chase each agent.
 - Cancel runaway work with `manta_task_cancel` when the user asks.
 - Put everything a delegated agent needs (files, goal, constraints) in its prompt; subagents do not see this conversation.

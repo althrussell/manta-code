@@ -203,8 +203,19 @@ class TokenEconomyMiddleware(AgentMiddleware):
         if not self._over_cap(running) or thread in self._approved:
             return
         try:
+            from langgraph.errors import GraphInterrupt
             from langgraph.types import interrupt
-
+        except Exception:  # noqa: BLE001 - no HITL primitive available
+            logger.warning(
+                "Manta budget for '%s' exceeded (%s tokens / $%.2f) but no "
+                "approval channel is available; continuing.",
+                self._agent,
+                int(running["tokens"]),
+                running["usd"],
+            )
+            self._approved.add(thread)
+            return
+        try:
             interrupt(
                 {
                     "type": "manta_budget",
@@ -220,15 +231,18 @@ class TokenEconomyMiddleware(AgentMiddleware):
                     ),
                 }
             )
-            # Resumed -> user approved; don't ask again this run.
+            # interrupt() only *returns* on the post-approval re-execution;
+            # the first pass raises GraphInterrupt (re-raised below) to pause
+            # the run. Reaching here means the user approved — don't re-ask.
             self._approved.add(thread)
-        except Exception:  # noqa: BLE001 - no HITL primitive available
+        except GraphInterrupt:
+            # The pause mechanism itself: must propagate to the runtime.
+            raise
+        except Exception:  # noqa: BLE001 - interrupt outside a graph context
             logger.warning(
-                "Manta budget for '%s' exceeded (%s tokens / $%.2f) but no "
-                "approval channel is available; continuing.",
+                "Manta budget for '%s' exceeded but the run cannot be paused "
+                "here; continuing.",
                 self._agent,
-                int(running["tokens"]),
-                running["usd"],
             )
             self._approved.add(thread)
 

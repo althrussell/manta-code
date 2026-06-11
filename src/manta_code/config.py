@@ -50,6 +50,15 @@ class InteractiveConfig(BaseModel):
 class MantaConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     interactive: InteractiveConfig = Field(default_factory=InteractiveConfig)
+    #: Per-model pricing overrides (USD / 1M tokens), merged over Manta's
+    #: built-in table — keys are substring-matched against model names, e.g.::
+    #:
+    #:     [pricing."my-finetune"]
+    #:     input = 2.0
+    #:     output = 8.0
+    #:
+    #: Fields: input, output, and optionally cache_read / cache_creation.
+    pricing: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
 def interactive_endpoints(cfg: MantaConfig) -> list[str]:

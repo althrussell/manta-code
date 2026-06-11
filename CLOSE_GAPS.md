@@ -24,7 +24,12 @@ prioritized roadmap.
 >   (now rewritten as deltas in `MantaChatDatabricks`). Plus background-task
 >   robustness: cwd-safe runner, crash-proof state recording, stale-task
 >   reconciliation.
-> - Phase D in flight.
+> - **Phase D landed** — AI Gateway surface discovery + `manta gateway`
+>   (per-endpoint governance: usage tracking, rate limits, guardrails,
+>   fallbacks; external-provider brokerage detection), `manta agents
+>   set-model` with live-workspace validation, pluggable pricing
+>   (`[pricing]` config overrides), and `python -m evals --live` running the
+>   benchmark through the real runtime with real ledger costs.
 
 **TL;DR.** The foundation is genuinely strong — the reliability seam (Pillar 7),
 the enforced agent registry (Pillar 4's bottom half), and token accounting

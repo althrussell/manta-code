@@ -425,6 +425,35 @@ def rebrand_auth_screen() -> bool:
             colors = theme.get_theme_colors(self)
             container.styles.border = ("ascii", colors.success)
 
+    def _focus_other_list(self: object) -> None:
+        """Move keyboard focus between the workspace and provider lists.
+
+        Upstream binds Tab/Shift+Tab (priority) to ``action_cursor_down/up``,
+        which hardcode the provider list — with two lists that moved the
+        *provider* highlight while focus (and Enter) stayed on the workspace
+        list, so a user tabbing toward an API key could trigger a workspace
+        switch instead. With two lists, Tab means "switch section"; arrow
+        keys move within the focused list.
+        """
+        lists = list(self.query(OptionList))
+        if not lists:
+            return
+        if len(lists) == 1:
+            lists[0].focus()
+            return
+        focused = self.app.focused
+        try:
+            index = lists.index(focused)
+        except ValueError:
+            index = -1
+        lists[(index + 1) % len(lists)].focus()
+
+    def _action_cursor_down(self: object) -> None:
+        _focus_other_list(self)
+
+    def _action_cursor_up(self: object) -> None:
+        _focus_other_list(self)
+
     def _on_option_selected(self: object, event: object) -> None:
         selected = event.option.id
         if not selected:
@@ -461,6 +490,8 @@ def rebrand_auth_screen() -> bool:
     AuthManagerScreen.compose = _compose
     AuthManagerScreen.on_mount = _on_mount
     AuthManagerScreen.on_option_list_option_selected = _on_option_selected
+    AuthManagerScreen.action_cursor_down = _action_cursor_down
+    AuthManagerScreen.action_cursor_up = _action_cursor_up
     return True
 
 
@@ -546,6 +577,145 @@ def allow_blocking_server() -> bool:
     return True
 
 
+def align_agent_switch_model() -> bool:
+    """Make the ``/agents`` picker also apply the selected agent's model pin.
+
+    Upstream's agent swap (``DeepAgentsApp._restart_server_for_agent_swap``)
+    restarts the server with the new identity but leaves the *session model*
+    (and therefore the footer) on whatever the session launched with. Manta's
+    pin middleware still runs the agent's calls on its pinned model, but the
+    visible state lies — exactly the mismatch between ``manta agents`` and
+    the footer. This wraps the swap to follow up with upstream's own
+    ``_switch_model`` (thread-preserving, defers until the server is ready)
+    using the Manta agent's pin, with ``persist=False`` so a profile switch
+    never redefines the user's saved default model.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code.app import DeepAgentsApp
+    except Exception:
+        return False
+
+    original_swap = getattr(DeepAgentsApp, "_restart_server_for_agent_swap", None)
+    if original_swap is None or getattr(original_swap, "__manta_pin_align__", False):
+        return original_swap is not None
+
+    def _manta_pin(agent_name: str) -> str | None:
+        try:
+            from manta_code.agents.defaults import merged_agents
+            from manta_code.agents.registry import list_agents
+
+            for defn in merged_agents(list_agents()):
+                if defn.name == agent_name:
+                    return defn.model or None
+        except Exception:  # noqa: BLE001 - pin lookup is best-effort
+            pass
+        return None
+
+    def _fallback_spec() -> str | None:
+        """Session model for an *unpinned* swap target (base agent included).
+
+        Without this, switching from a pinned specialist to an unpinned agent
+        would ratchet: the previous agent's (possibly premium) pin would stay
+        the session model. Fall back to Manta's configured cheap default when
+        Databricks is configured; otherwise leave the model alone.
+        """
+        try:
+            from manta_code.auth import databricks_configured
+            from manta_code.config import load_config
+
+            if not databricks_configured():
+                return None
+            endpoint = load_config().interactive.default_endpoint
+            return f"{DATABRICKS_PROVIDER}:{endpoint}" if endpoint else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def wrapped(self: object, agent_name: str) -> None:
+        await original_swap(self, agent_name)
+        try:
+            if getattr(self, "_assistant_id", None) != agent_name:
+                return  # swap failed and rolled back; leave the model alone
+            spec = _manta_pin(agent_name) or _fallback_spec()
+            if spec:
+                await self._switch_model(
+                    spec, persist=False, announce_unchanged=False
+                )
+        except Exception:  # noqa: BLE001 - alignment must never break the swap
+            pass
+
+    wrapped.__manta_pin_align__ = True  # type: ignore[attr-defined]
+    DeepAgentsApp._restart_server_for_agent_swap = wrapped
+    return True
+
+
+def add_agent_mentions_to_autocomplete() -> bool:
+    """Teach the ``@`` autocomplete about Manta agents at message start.
+
+    Upstream's ``@`` completion is file mentions only, so typing ``@swe …``
+    (Manta's agent addressing, VISION pillar 4) fights a file picker and gets
+    no completion. This wraps ``FuzzyFileController`` so that when the ``@``
+    opens the message — the only position where agent addressing fires —
+    matching agent names are suggested first (tagged ``agent``), with file
+    suggestions following. Mid-message ``@`` stays pure file mention.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code.widgets.autocomplete import FuzzyFileController
+    except Exception:
+        return False
+
+    original_suggest = getattr(FuzzyFileController, "_get_fuzzy_suggestions", None)
+    original_changed = getattr(FuzzyFileController, "on_text_changed", None)
+    if original_suggest is None or original_changed is None:
+        return False
+    if getattr(original_suggest, "__manta_agents__", False):
+        return True
+
+    def _agent_names() -> list[str]:
+        try:
+            from manta_code.agents.defaults import merged_agents
+            from manta_code.agents.registry import list_agents
+
+            return [a.name for a in merged_agents(list_agents())]
+        except Exception:  # noqa: BLE001 - registry trouble just loses hints
+            return []
+
+    def on_text_changed(self: object, text: str, cursor_index: int) -> None:
+        try:
+            before = text[:cursor_index]
+            at_index = before.rfind("@")
+            # Agent addressing only applies when @ starts the message.
+            self._manta_addressing = at_index >= 0 and not before[:at_index].strip()
+        except Exception:  # noqa: BLE001
+            self._manta_addressing = False
+        original_changed(self, text, cursor_index)
+
+    def _get_fuzzy_suggestions(self: object, search: str) -> list[tuple[str, str]]:
+        suggestions = original_suggest(self, search)
+        if not getattr(self, "_manta_addressing", False):
+            return suggestions
+        try:
+            query = search.lower()
+            agents = [
+                (f"@{name}", "agent")
+                for name in _agent_names()
+                if name.startswith(query)
+            ]
+            if agents:
+                return [*agents, *suggestions][:10]
+        except Exception:  # noqa: BLE001 - hints must never break completion
+            pass
+        return suggestions
+
+    _get_fuzzy_suggestions.__manta_agents__ = True  # type: ignore[attr-defined]
+    FuzzyFileController.on_text_changed = on_text_changed
+    FuzzyFileController._get_fuzzy_suggestions = _get_fuzzy_suggestions
+    return True
+
+
 def install_manta_build_hook() -> bool:
     """Install Manta's control-plane build hook (best-effort).
 
@@ -579,6 +749,10 @@ def main() -> None:
         degraded.append("Databricks-first model list")
     if not rebrand_auth_screen():
         degraded.append("workspace picker in /auth")
+    if not align_agent_switch_model():
+        degraded.append("agent-pin model alignment in /agents")
+    if not add_agent_mentions_to_autocomplete():
+        degraded.append("@agent autocomplete")
     if not allow_blocking_server():
         degraded.append("Databricks auth shim")
     if not install_manta_build_hook():
