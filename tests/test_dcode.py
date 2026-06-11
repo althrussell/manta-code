@@ -258,27 +258,27 @@ def test_mark_onboarding_complete_is_idempotent(tmp_path):
 # --- branding boot shim -------------------------------------------------------
 
 
-def test_compact_banner_layout(monkeypatch):
-    # Three-line mark with the identity column alongside; dynamic version and
-    # active profile.
-    monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "dev")
-    out = _boot._banner(_boot.MANTA_MARK_UNICODE)
-    lines = [line for line in out.splitlines() if line]
-    assert len(lines) == 3
-    from manta_code import __version__
-
-    assert lines[0].endswith(f"Manta v{__version__}")
-    assert lines[1].endswith("Databricks-native coding agent")
-    assert lines[2].endswith("/profile dev")
-    assert lines[0].startswith("▗▌")
+def test_versioned_appends_matching_version_tag():
+    out = _boot._versioned("ART", "9.9.9")
+    assert out.startswith("ART")
+    assert "v9.9.9" in out
 
 
-def test_compact_banner_ascii_variant(monkeypatch):
-    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
-    monkeypatch.delenv("MANTA_PROFILE", raising=False)
-    out = _boot._banner(_boot.MANTA_MARK_ASCII)
-    assert "/profile DEFAULT" in out
-    assert all(ord(ch) < 128 for ch in out)  # genuinely 7-bit
+def test_composed_banner_stacks_ray_over_wordmark():
+    # Both splash variants carry the manta-ray mark above the wordmark.
+    assert "▝▜██▀▀▀██▛▘" in _boot.MANTA_UNICODE_BANNER  # compact mark body
+    assert _boot.MANTA_WORDMARK_UNICODE.splitlines()[-1] in _boot.MANTA_UNICODE_BANNER
+    assert "<##=======##>" in _boot.MANTA_ASCII_BANNER  # ascii mark body
+    assert "|_|  |_/_/" in _boot.MANTA_ASCII_BANNER  # ascii wordmark tail
+
+
+def test_compose_banner_centers_ray():
+    ray = "xx"
+    wordmark = "\n" + "#" * 10 + "\n"
+    out = _boot._compose_banner(ray, wordmark)
+    # ray (width 2) centered over wordmark (width 10) -> 4 leading spaces.
+    assert "    xx" in out
+    assert "##########" in out
 
 
 def test_apply_branding_overrides_upstream_banner():
