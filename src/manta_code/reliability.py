@@ -120,6 +120,17 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         purpose="upstream model switch reused for agent-pin alignment",
     ),
     PatchTarget(
+        module="deepagents_code.app",
+        attribute="DeepAgentsApp._resume_thread",
+        purpose="upstream thread resume reused for conversation continuity on /agents swap",
+    ),
+    PatchTarget(
+        module="deepagents_code.widgets.message_store",
+        attribute="MessageType",
+        purpose="agent-output gating for swap continuity",
+        kind="attr",
+    ),
+    PatchTarget(
         module="deepagents_code.widgets.autocomplete",
         attribute="FuzzyFileController._get_fuzzy_suggestions",
         purpose="@ completion extended with Manta agent names",
