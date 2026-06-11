@@ -124,7 +124,11 @@ def test_budget_pause_invoked_when_over_cap(tmp_path, monkeypatch):
     # Second call: running (550) >= cap (100) -> pause requested once.
     mw.wrap_model_call(req, handler)
     assert len(interrupts) == 1
-    assert interrupts[0]["type"] == "manta_budget"
+    # HITLRequest shape (ADR 0011): the only payload upstream renders.
+    (action,) = interrupts[0]["action_requests"]
+    assert action["name"] == "manta_budget_continue"
+    (review,) = interrupts[0]["review_configs"]
+    assert review["allowed_decisions"] == ["approve", "reject"]
     # Third call: already approved -> not asked again.
     mw.wrap_model_call(req, handler)
     assert len(interrupts) == 1

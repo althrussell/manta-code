@@ -42,6 +42,7 @@ TASK_TOOL_NAMES: tuple[str, ...] = (
     "manta_task_status",
     "manta_task_output",
     "manta_task_list",
+    "manta_task_send",
     "manta_task_cancel",
 )
 
@@ -62,6 +63,7 @@ def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
         or defn.tools_allow is not None
         or bool(deny)
         or bool(defn.filesystem)
+        or bool(defn.tools_ask)
     )
     if not needs_policy:
         return []
@@ -73,14 +75,20 @@ def _tool_policy_middleware(defn: AgentDef) -> list[Any]:
             deny=deny,
             read_only=defn.read_only,
             filesystem=defn.filesystem,
+            ask=defn.tools_ask,
             agent_name=defn.name,
         )
     ]
 
 
 def _interrupt_on(defn: AgentDef) -> dict[str, Any]:
-    """Map the ``approval`` tool list to a deepagents ``interrupt_on`` dict."""
-    return {tool: True for tool in defn.approval}
+    """Map ``approval`` + ``tools_ask`` to a deepagents ``interrupt_on`` dict.
+
+    Interactive ASK rides upstream's proven HITL prompt (ADR 0011); a tool in
+    both lists prompts once. The unattended fail-closed half of ASK lives in
+    the tool-policy middleware.
+    """
+    return {tool: True for tool in {*defn.approval, *defn.tools_ask}}
 
 
 def _manta_tools(defn: AgentDef) -> list[Any]:

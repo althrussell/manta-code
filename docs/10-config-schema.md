@@ -41,7 +41,7 @@ default_endpoint = "databricks-gpt-oss-120b"
 # Subagent role models, also registered in the deepagents-code `/model` switcher.
 extra_endpoints = [
     "databricks-claude-opus-4-8",
-    "databricks-gpt-5-5",
+    "databricks-gpt-5-4",
     "databricks-claude-sonnet-4-5",
 ]
 ```
@@ -72,7 +72,7 @@ class_path = "manta_code.databricks_chat:MantaChatDatabricks"
 models = [
     "databricks-gpt-oss-120b",
     "databricks-claude-opus-4-8",
-    "databricks-gpt-5-5",
+    "databricks-gpt-5-4",
     "databricks-claude-sonnet-4-5",
 ]
 ```

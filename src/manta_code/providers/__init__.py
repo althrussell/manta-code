@@ -40,7 +40,7 @@ _RESOLVERS: dict[str, Callable[[str], Any | None]] = {}
 
 @dataclass(frozen=True)
 class ModelRef:
-    """A parsed ``provider:model`` spec (e.g. ``databricks:databricks-gpt-5-5``)."""
+    """A parsed ``provider:model`` spec (e.g. ``databricks:databricks-gpt-5-4``)."""
 
     provider: str
     model: str

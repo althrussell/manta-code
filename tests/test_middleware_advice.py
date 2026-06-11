@@ -179,8 +179,10 @@ def test_budget_tradeoff_interrupts_once(monkeypatch):
     mw.wrap_model_call(req, lambda r: _response(output_tokens=500))  # accrue spend
     mw.wrap_model_call(req, lambda r: _response(output_tokens=500))  # should pause now
     assert len(interrupts) == 1
-    assert interrupts[0]["type"] == "manta_advice"
-    assert interrupts[0]["kind"] == "budget_tradeoff"
+    # HITLRequest shape (ADR 0011): the only payload upstream renders.
+    (action,) = interrupts[0]["action_requests"]
+    assert action["name"] == "manta_advice_continue_premium"
+    assert action["args"]["kind"] == "budget_tradeoff"
     # Decided once: never re-asks on this thread.
     mw.wrap_model_call(req, lambda r: _response(output_tokens=500))
     assert len(interrupts) == 1

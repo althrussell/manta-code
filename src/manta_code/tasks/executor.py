@@ -61,6 +61,7 @@ def submit_task(
     timeout: int = DEFAULT_TASK_TIMEOUT,
     max_turns: int = DEFAULT_TASK_MAX_TURNS,
     profile: str | None = None,
+    allow_asks: bool = False,
     db_path: Path | None = None,
 ) -> store.TaskRecord:
     """Create a task and spawn its detached runner; returns the queued record."""
@@ -99,6 +100,7 @@ def submit_task(
             log_path=str(log_path),
             timeout=timeout,
             max_turns=max_turns,
+            allow_asks=allow_asks,
         ),
         path=db_path,
     )
@@ -106,6 +108,12 @@ def submit_task(
     env = dict(os.environ)
     env[TASK_ID_ENV] = task_id
     env[TASK_DEPTH_ENV] = str(depth + 1)
+    if allow_asks:
+        # Human pre-approval of ask-gated tools, granted at submission
+        # (ADR 0011) — the policy layer reads this in the detached runner.
+        env["MANTA_ALLOW_ASKS"] = "1"
+    else:
+        env.pop("MANTA_ALLOW_ASKS", None)
     if profile:
         env["DATABRICKS_CONFIG_PROFILE"] = profile
 
@@ -244,3 +252,35 @@ def task_output(task_id: str, *, db_path: Path | None = None) -> str:
         text = log.read_text(encoding="utf-8", errors="replace")
         return text[-8000:]
     return ""
+
+
+def send_to_task(
+    task_id: str, message: str, *, db_path: Path | None = None
+) -> store.InboxMessage:
+    """Queue a steering message for a queued/running task (ADR 0011).
+
+    The task's InboxMiddleware delivers it as a checkpointed user note before
+    the task's next model call. Finished tasks reject with their terminal
+    state.
+    """
+    if not message or not message.strip():
+        raise TaskError("a non-empty steering message is required")
+    record = store.get_task(task_id, path=db_path)
+    if record is None:
+        raise TaskError(f"no task '{task_id}'")
+    if record.state not in store.ACTIVE_STATES:
+        raise TaskError(
+            f"task '{task_id}' is already {record.state}; steering only "
+            "reaches queued or running tasks"
+        )
+    queued = store.add_inbox_message(task_id, message.strip(), path=db_path)
+    store.record_event(
+        store.EventRecord(
+            agent=record.agent,
+            kind="task_steered",
+            detail=message.strip()[:200],
+            task_id=task_id,
+        ),
+        path=db_path,
+    )
+    return queued

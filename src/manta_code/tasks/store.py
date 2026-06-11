@@ -55,6 +55,20 @@ class TaskRecord:
     result: str = ""
     timeout: int | None = None
     max_turns: int | None = None
+    #: Human pre-approval of ask-gated tools, granted at submission
+    #: (ADR 0011): unattended runs deny `tools_ask` tools unless set.
+    allow_asks: bool = False
+
+
+@dataclass(frozen=True)
+class InboxMessage:
+    """One steering message queued for a running task (ADR 0011)."""
+
+    id: int
+    task_id: str
+    message: str
+    ts: float
+    consumed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -97,7 +111,22 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+
+CREATE TABLE IF NOT EXISTS task_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    ts REAL NOT NULL,
+    message TEXT NOT NULL,
+    consumed_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_task ON task_inbox(task_id, consumed_at);
 """
+
+#: Columns added after the initial schema shipped; applied as guarded ALTERs
+#: so existing databases migrate in place.
+_MIGRATIONS = (
+    "ALTER TABLE tasks ADD COLUMN allow_asks INTEGER NOT NULL DEFAULT 0",
+)
 
 
 def tasks_db_path(path: Path | None = None) -> Path:
@@ -115,6 +144,11 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    for migration in _MIGRATIONS:
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return conn
 
 
@@ -138,6 +172,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         result=row["result"],
         timeout=row["timeout"],
         max_turns=row["max_turns"],
+        allow_asks=bool(row["allow_asks"]) if "allow_asks" in row.keys() else False,
     )
 
 
@@ -147,8 +182,8 @@ def create_task(record: TaskRecord, *, path: Path | None = None) -> TaskRecord:
     try:
         conn.execute(
             "INSERT INTO tasks (id, agent, prompt, state, created_at, started_at, "
-            "finished_at, pid, exit_code, log_path, result, timeout, max_turns) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "finished_at, pid, exit_code, log_path, result, timeout, max_turns, "
+            "allow_asks) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 record.id,
                 record.agent,
@@ -163,6 +198,7 @@ def create_task(record: TaskRecord, *, path: Path | None = None) -> TaskRecord:
                 record.result,
                 record.timeout,
                 record.max_turns,
+                1 if record.allow_asks else 0,
             ),
         )
         conn.commit()
@@ -295,5 +331,74 @@ def recent_events(
             )
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+# --- task inbox (steerable tasks, ADR 0011) ----------------------------------
+
+
+def add_inbox_message(
+    task_id: str, message: str, *, path: Path | None = None
+) -> InboxMessage:
+    """Queue a steering message for a task."""
+    conn = connect(path)
+    try:
+        ts = time.time()
+        cursor = conn.execute(
+            "INSERT INTO task_inbox (task_id, ts, message) VALUES (?,?,?)",
+            (task_id, ts, message),
+        )
+        conn.commit()
+        return InboxMessage(id=int(cursor.lastrowid), task_id=task_id, message=message, ts=ts)
+    finally:
+        conn.close()
+
+
+def unconsumed_inbox(task_id: str, *, path: Path | None = None) -> list[InboxMessage]:
+    """Steering messages not yet delivered to the task, oldest first."""
+    conn = connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_inbox WHERE task_id = ? AND consumed_at IS NULL "
+            "ORDER BY ts ASC",
+            (task_id,),
+        ).fetchall()
+        return [
+            InboxMessage(
+                id=r["id"], task_id=r["task_id"], message=r["message"], ts=r["ts"]
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def mark_inbox_consumed(ids: list[int], *, path: Path | None = None) -> None:
+    """Mark specific inbox rows consumed (per-row, never blanket: a message
+    inserted between read and mark must wait for the next delivery, not be
+    silently swallowed)."""
+    if not ids:
+        return
+    conn = connect(path)
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"UPDATE task_inbox SET consumed_at = ? WHERE id IN ({placeholders})",  # noqa: S608 - placeholders only
+            [time.time(), *ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def inbox_count(task_id: str, *, path: Path | None = None) -> int:
+    """Total steering messages ever sent to a task."""
+    conn = connect(path)
+    try:
+        (count,) = conn.execute(
+            "SELECT COUNT(*) FROM task_inbox WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return int(count)
     finally:
         conn.close()

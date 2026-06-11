@@ -219,7 +219,7 @@ def test_effective_pricing_merges_config_overrides(tmp_path, monkeypatch):
         # Config overrides the built-in claude-opus rate.
         assert U.price_for("databricks-claude-opus-4-8").input == 10.0
         # Untouched built-ins survive the merge.
-        assert U.price_for("databricks-gpt-5-5").input == 1.25
+        assert U.price_for("databricks-gpt-5-4").input == 1.25
     finally:
         U.clear_pricing_cache()
 

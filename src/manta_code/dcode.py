@@ -486,6 +486,7 @@ def run_headless(
     no_stream: bool = True,
     json_output: str | None = None,
     shell_allow_list: str | None = None,
+    env_extra: Mapping[str, str] | None = None,
 ) -> int:
     """Provision config + env and run a single headless task, returning its code.
 
@@ -503,6 +504,13 @@ def run_headless(
     mark_onboarding_complete()
     sync_agent_profiles()
     env = build_launch_env(profile)
+    # Every headless run is unattended by definition (ADR 0011): one explicit
+    # marker so the ASK policy tier fails closed and the audit layer never
+    # records a human approval that didn't happen — regardless of whether
+    # upstream's auto-approve flag is set for this particular invocation.
+    env["MANTA_UNATTENDED"] = "1"
+    if env_extra:
+        env.update(env_extra)
     argv = build_run_argv(
         default_endpoint,
         message,

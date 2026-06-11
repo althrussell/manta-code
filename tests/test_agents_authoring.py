@@ -25,7 +25,7 @@ def test_data_description_infers_databricks_tools():
 def test_default_is_read_write_coder():
     defn = draft_agent_from_description("builder", "implement features end to end")
     assert defn.read_only is False
-    assert defn.model == "databricks:databricks-gpt-5-5"
+    assert defn.model == "databricks:databricks-gpt-5-4"
     assert "Verify your work" in defn.system_prompt
 
 
