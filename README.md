@@ -66,7 +66,7 @@ workspace's models behave before betting a session on them?
 ## Sixty seconds
 
 ```bash
-manta                                  # launch the interactive session
+manta                                  # launch — opens as the chief of staff
 ```
 
 Then, in the session:

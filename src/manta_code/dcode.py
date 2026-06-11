@@ -155,6 +155,7 @@ def merge_databricks_provider(
     )
 
     _merge_branding_theme(result)
+    _merge_default_agent(result)
     return result
 
 
@@ -178,6 +179,28 @@ def _merge_branding_theme(result: dict) -> None:
         return
     if not ui_tbl.get("theme"):
         ui_tbl["theme"] = MANTA_THEME_KEY
+
+
+#: The agent a fresh install opens with. The chief of staff is Manta's front
+#: door (VISION pillar 5): it delegates to the specialists and tracks
+#: background work. Set only when the user has no saved default — an explicit
+#: choice (Ctrl+S in /agents) is never overridden.
+DEFAULT_AGENT = "chief"
+
+
+def _merge_default_agent(result: dict) -> None:
+    """Make ``chief`` the default agent unless the user chose one.
+
+    Mutates ``result`` in place. Upstream resolves the initial agent as
+    ``-a`` flag > ``[agents].default`` > ``[agents].recent``; writing the
+    default (when absent) means fresh installs open as the chief of staff
+    instead of the bare upstream agent.
+    """
+    agents_tbl = result.setdefault("agents", {})
+    if not isinstance(agents_tbl, dict):
+        return  # defensive: never clobber a hand-edited section
+    if not agents_tbl.get("default"):
+        agents_tbl["default"] = DEFAULT_AGENT
 
 
 def _read_toml(path: Path) -> dict:
