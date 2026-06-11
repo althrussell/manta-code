@@ -951,3 +951,16 @@ def test_agent_swap_resume_disabled_by_env(tmp_path, monkeypatch):
         assert "resumed" not in calls
     finally:
         cls._restart_server_for_agent_swap = original
+
+
+def test_merge_sets_chief_as_default_agent_when_absent():
+    # Fresh installs open as the chief of staff (VISION pillar 5's front door).
+    merged = dcode.merge_databricks_provider({}, ["ep-a"])
+    assert merged["agents"]["default"] == "chief"
+
+
+def test_merge_never_overrides_user_default_agent():
+    existing = {"agents": {"default": "swe", "recent": "planning"}}
+    merged = dcode.merge_databricks_provider(existing, ["ep-a"])
+    assert merged["agents"]["default"] == "swe"
+    assert merged["agents"]["recent"] == "planning"  # untouched
