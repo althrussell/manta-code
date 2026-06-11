@@ -141,7 +141,9 @@ def test_build_launch_env_does_not_clobber_existing_splash(monkeypatch):
 # --- build_dcode_argv ----------------------------------------------------------
 
 
-def test_build_argv_injects_default_model():
+def test_build_argv_injects_default_model(monkeypatch):
+    # Hermetic: ignore any persisted default/recent agent on this machine.
+    monkeypatch.setattr(dcode, "_effective_initial_agent", lambda extras: None)
     argv = dcode.build_dcode_argv("ep-a", [], python="/usr/bin/python3")
     assert argv == [
         "/usr/bin/python3",
@@ -172,7 +174,8 @@ def test_has_model_flag_variants():
 # --- build_run_argv (headless) ------------------------------------------------
 
 
-def test_build_run_argv_defaults():
+def test_build_run_argv_defaults(monkeypatch):
+    monkeypatch.setattr(dcode, "_effective_initial_agent", lambda extras: None)
     argv = dcode.build_run_argv("ep-a", "fix the job", [], python="py")
     assert argv[:3] == ["py", "-m", dcode.DCODE_BOOT_MODULE]
     assert "-M" in argv and "databricks:ep-a" in argv
@@ -657,3 +660,40 @@ def test_align_agent_switch_model_skips_non_manta_agents(tmp_path, monkeypatch):
         assert "spec" not in calls  # base profile has no Manta pin
     finally:
         cls._restart_server_for_agent_swap = original
+
+
+def test_bare_launch_uses_recent_agent_pin(tmp_path, monkeypatch):
+    # Upstream reopens sessions on [agents].recent; the session model must
+    # follow that agent's pin, not the cheap default.
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    mc = pytest.importorskip("deepagents_code.model_config")
+    monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: None)
+    monkeypatch.setattr(mc, "load_recent_agent", lambda *a, **k: "planning")
+    argv = dcode.build_dcode_argv("ep-default", [], python="py")
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-claude-opus-4-8"
+
+
+def test_bare_launch_default_agent_beats_recent(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    mc = pytest.importorskip("deepagents_code.model_config")
+    monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "chief")
+    monkeypatch.setattr(mc, "load_recent_agent", lambda *a, **k: "planning")
+    argv = dcode.build_dcode_argv("ep-default", [], python="py")
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-5"
+
+
+def test_bare_launch_base_agent_keeps_cheap_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    mc = pytest.importorskip("deepagents_code.model_config")
+    monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: None)
+    monkeypatch.setattr(mc, "load_recent_agent", lambda *a, **k: None)
+    argv = dcode.build_dcode_argv("ep-default", [], python="py")
+    assert argv[argv.index("-M") + 1] == "databricks:ep-default"
+
+
+def test_a_flag_beats_persisted_agents(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    mc = pytest.importorskip("deepagents_code.model_config")
+    monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "planning")
+    argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-5"

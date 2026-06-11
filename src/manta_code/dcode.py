@@ -309,21 +309,42 @@ def _agent_model_spec(agent_name: str) -> str | None:
     return None
 
 
+def _effective_initial_agent(extras: Sequence[str]) -> str | None:
+    """The agent a launch will actually start as, mirroring upstream's order.
+
+    ``deepagents-code`` resolves the initial assistant as: ``-a`` flag >
+    persisted ``[agents].default`` > remembered ``[agents].recent`` > the base
+    ``agent``. Manta must inject the session model for the *same* agent, or
+    the footer shows the cheap default while a pinned specialist runs.
+    Guarded: any failure resolves to ``None`` (base agent).
+    """
+    agent = _addressed_agent(extras)
+    if agent:
+        return agent
+    try:
+        from deepagents_code.model_config import load_default_agent, load_recent_agent
+
+        return load_default_agent() or load_recent_agent() or None
+    except Exception:  # noqa: BLE001 - upstream config is best-effort here
+        return None
+
+
 def _session_model_spec(
     default_endpoint: str | None, extras: Sequence[str]
 ) -> str | None:
     """Resolve the ``-M`` spec to inject for a launch, or ``None``.
 
-    The user's own ``-M/--model`` always wins (no injection). A launch
-    addressed to an agent (``-a <name>``) uses **that agent's model pin** as
-    the session model — so the visible session model matches the agent
-    actually running ("the right model for the role", VISION pillar 2), and
-    the pin middleware becomes a backstop rather than the mechanism. Otherwise
-    the configured default endpoint applies.
+    The user's own ``-M/--model`` always wins (no injection). When the launch
+    will start as a Manta agent — via ``-a <name>``, the persisted default
+    agent, or the remembered recent agent — **that agent's model pin** is the
+    session model, so the visible session model matches the agent actually
+    running ("the right model for the role", VISION pillar 2) and the pin
+    middleware becomes a backstop rather than the mechanism. Otherwise the
+    configured default endpoint applies (cheap-by-default orchestration).
     """
     if _has_model_flag(extras):
         return None
-    agent = _addressed_agent(extras)
+    agent = _effective_initial_agent(extras)
     if agent:
         pin = _agent_model_spec(agent)
         if pin:
