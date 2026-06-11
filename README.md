@@ -94,6 +94,39 @@ manta task output <id>                 # collect the result
 manta receipts                         # what did this week cost — and save?
 ```
 
+## In the session
+
+Everything below happens inline, without leaving the conversation.
+
+**Talk to your team**
+
+| Type | What happens |
+| --- | --- |
+| `@swe fix the failing tests` | Deterministic delegation to that agent — its model pin, permissions, and budget apply. Autocomplete suggests agents after `@` at the start of a message. |
+| `@swe fix the failing tests &` | Same, but **detached**: you get a task id back instantly, keep working, and your desktop pings when it lands. |
+| `make a plan for the migration` | Plan requests auto-route to the read-only `planning` agent (opus) — no keyword magic needed, and `MANTA_AUTODELEGATE_PLANNING=0` turns it off. |
+| "remember that we never use mocks" | The agent saves it with `manta_remember` (redacted, durable) and future sessions start warm. |
+| "check on task ab12 / cancel it / tell it to skip the docs" | The orchestrator and `chief` carry the task tools (`manta_task_status`, `manta_task_send`, …) — manage background work conversationally. |
+
+**Slash commands** (Manta's, on top of the runtime's)
+
+| Command | What it shows |
+| --- | --- |
+| `/cost` (or `/spend`) | **This session's spend**: per-agent totals, the most recent model calls with per-call cost, today's total vs your daily budget. Works even while the agent is busy. |
+| `/agents` | Switch agents — your conversation follows you, the new agent's model pin is applied truthfully, `Ctrl+S` sets your default. |
+| `/model` | Opens on Manta's curated lineup (the loop-proven pins + your configured endpoints); `Ctrl+R` toggles **all** workspace models. |
+| `/auth` | Databricks workspace picker on top, provider API keys below; `Tab` moves between the sections. |
+
+Plus the runtime's own: `/clear` (fresh thread), `/threads` (resume any
+conversation), `/tokens`, `/copy`, `/editor`, `/skill:<name>`, `@file` to
+inject file contents, `!cmd` for shell, `Shift+Tab` to toggle auto-approve —
+`/help` lists everything.
+
+**Guardrails you'll meet inline**: approval prompts before `swe` writes or
+executes; a pause-to-continue if an agent hits its budget cap or your daily
+budget; advisory notes ("> **Manta advice:** …") appended to answers when
+you're burning premium tokens on routine work or a cheap model keeps failing.
+
 ## The agents
 
 | Agent | Model (pin) | Boundary |
