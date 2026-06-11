@@ -488,6 +488,55 @@ def rebrand_auth_screen() -> bool:
     return True
 
 
+def extend_recommended_models() -> bool:
+    """Add Manta's curated Databricks endpoints to ``/model``'s default view.
+
+    Upstream's selector opens on a hand-curated "recommended" subset
+    (``Ctrl+R`` toggles all models) — and that set contains no ``databricks:``
+    specs, so a Databricks-first install sees only its recent picks: the
+    "tiny subset" report. This extends the frozenset with Manta's configured
+    endpoints and the agents' model pins (the loop-proven set), so the
+    default view is the Manta-curated lineup and ``Ctrl+R`` still reveals
+    everything the workspace serves.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code.widgets import model_selector
+    except Exception:
+        return False
+
+    current = getattr(model_selector, "_RECOMMENDED_MODELS", None)
+    if current is None:
+        return False
+
+    specs: set[str] = set()
+    try:
+        from manta_code.config import interactive_endpoints, load_config
+
+        specs.update(
+            f"{DATABRICKS_PROVIDER}:{ep}" for ep in interactive_endpoints(load_config())
+        )
+    except Exception:  # noqa: BLE001 - config trouble loses only curation
+        pass
+    try:
+        from manta_code.agents.defaults import merged_agents
+        from manta_code.agents.registry import list_agents
+
+        specs.update(
+            defn.model
+            for defn in merged_agents(list_agents())
+            if defn.model and defn.model.startswith(f"{DATABRICKS_PROVIDER}:")
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    if not specs:
+        return True  # nothing to add (e.g. Databricks not configured)
+
+    model_selector._RECOMMENDED_MODELS = frozenset(current | specs)
+    return True
+
+
 def rebrand_model_selector_footer() -> bool:
     """Show a neutral footer for profile-less Databricks endpoints in ``/model``.
 
@@ -790,6 +839,7 @@ def main() -> None:
     """
     apply_branding()
     rebrand_model_selector_footer()
+    extend_recommended_models()
 
     degraded: list[str] = []
     if not prefer_databricks_models():

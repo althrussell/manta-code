@@ -105,6 +105,12 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         purpose="/model footer wrapped for profile-less Databricks endpoints",
     ),
     PatchTarget(
+        module="deepagents_code.widgets.model_selector",
+        attribute="_RECOMMENDED_MODELS",
+        purpose="/model default view extended with Manta's curated endpoints",
+        kind="attr",
+    ),
+    PatchTarget(
         module="deepagents_code.server",
         attribute="_build_server_cmd",
         purpose="server cmd wrapped to add --allow-blocking (Databricks auth)",

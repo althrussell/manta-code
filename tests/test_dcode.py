@@ -964,3 +964,25 @@ def test_merge_never_overrides_user_default_agent():
     merged = dcode.merge_databricks_provider(existing, ["ep-a"])
     assert merged["agents"]["default"] == "swe"
     assert merged["agents"]["recent"] == "planning"  # untouched
+
+
+def test_extend_recommended_models_adds_manta_lineup(tmp_path, monkeypatch):
+    # Upstream's /model opens on a curated subset with zero databricks: specs;
+    # Manta's configured endpoints + agent pins must join it so the default
+    # view isn't just the user's recent picks (the "tiny subset" report).
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    ms = pytest.importorskip("deepagents_code.widgets.model_selector")
+    original = ms._RECOMMENDED_MODELS
+    try:
+        assert _boot.extend_recommended_models() is True
+        extended = ms._RECOMMENDED_MODELS
+        assert original <= extended  # upstream entries preserved
+        assert "databricks:databricks-gpt-oss-120b" in extended  # default
+        assert "databricks:databricks-claude-opus-4-8" in extended  # planning pin
+        assert "databricks:databricks-gpt-5-4-mini" in extended  # chief pin
+        # Idempotent re-application doesn't balloon the set.
+        size = len(extended)
+        assert _boot.extend_recommended_models() is True
+        assert len(ms._RECOMMENDED_MODELS) == size
+    finally:
+        ms._RECOMMENDED_MODELS = original
