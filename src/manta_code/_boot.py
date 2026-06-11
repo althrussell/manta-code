@@ -72,17 +72,20 @@ MANTA_WORDMARK_ASCII = r"""
 def _compose_banner(ray: str, wordmark: str) -> str:
     """Center the manta-ray mark over the wordmark and stack them.
 
-    The wordmark is the widest element, so each non-blank ray line is left-padded
-    to center it over the wordmark's width. A blank line separates the two. The
-    result is wrapped in newlines so :func:`_versioned` can append the version
-    tag beneath it exactly as upstream's banner constants are shaped.
+    The ray is centered as a **block**: one shared left pad computed from its
+    widest line, so the art's internal alignment (including intentional
+    leading spaces, e.g. the tail row) is preserved exactly as authored.
+    Per-line centering would re-center each row and skew the shape. A blank
+    line separates mark and wordmark; the result is wrapped in newlines so
+    :func:`_versioned` can append the version tag beneath it exactly as
+    upstream's banner constants are shaped.
     """
     word_lines = [ln for ln in wordmark.splitlines() if ln]
     width = max((len(ln) for ln in word_lines), default=0)
-    centered = [
-        "" if not ln.strip() else " " * max(0, (width - len(ln)) // 2) + ln
-        for ln in ray.splitlines()
-    ]
+    ray_lines = ray.splitlines()
+    ray_width = max((len(ln) for ln in ray_lines if ln.strip()), default=0)
+    pad = " " * max(0, (width - ray_width) // 2)
+    centered = ["" if not ln.strip() else pad + ln for ln in ray_lines]
     return "\n" + "\n".join(centered) + "\n\n" + "\n".join(word_lines) + "\n"
 
 

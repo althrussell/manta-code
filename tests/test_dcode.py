@@ -272,13 +272,26 @@ def test_composed_banner_stacks_ray_over_wordmark():
     assert "|_|  |_/_/" in _boot.MANTA_ASCII_BANNER  # ascii wordmark tail
 
 
-def test_compose_banner_centers_ray():
-    ray = "xx"
+def test_compose_banner_centers_ray_as_block():
+    # One shared pad for the whole mark: a line's intentional leading spaces
+    # (the tail row) survive, instead of each row being re-centered and the
+    # shape skewing (the "renders a bit wonky" bug).
+    ray = "wwww\n  tt"
     wordmark = "\n" + "#" * 10 + "\n"
     out = _boot._compose_banner(ray, wordmark)
-    # ray (width 2) centered over wordmark (width 10) -> 4 leading spaces.
-    assert "    xx" in out
+    lines = out.splitlines()
+    assert "   wwww" in lines  # (10-4)//2 = 3 spaces
+    assert "     tt" in lines  # same 3-space pad + the authored 2 spaces
     assert "##########" in out
+
+
+def test_compose_banner_preserves_mark_alignment():
+    out = _boot._compose_banner(_boot.MANTA_RAY_UNICODE, _boot.MANTA_WORDMARK_UNICODE)
+    rows = [ln for ln in out.splitlines() if "▌" in ln or "▜" in ln or "▝▄" in ln]
+    pads = [len(ln) - len(ln.lstrip()) for ln in rows]
+    # Body rows share the pad; the tail keeps its authored +2 indent.
+    assert pads[0] == pads[1]
+    assert pads[2] == pads[0] + 2
 
 
 def test_apply_branding_overrides_upstream_banner():
