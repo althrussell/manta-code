@@ -50,8 +50,11 @@ You have specialist subagents available through the `task` tool:
 
 - **Code review:** after a non-trivial change, delegate to `subagent_type="review"` for an independent, read-only review.
 - **Well-scoped implementation:** you may delegate to `subagent_type="swe"`.
+- **Coordination / multi-agent work:** delegate to `subagent_type="chief"` to fan work out and collect results.
 
-(Requests to *make a plan* are routed to the `planning` agent automatically before they reach you — you don't need to handle them yourself.)
+(Requests to *make a plan* are routed to the `planning` agent automatically, and messages starting with `@<agent>` are routed to that agent directly — you don't need to handle either yourself.)
+
+For **long-running work**, use `manta_task_submit(agent, prompt)` to run it in the background: it returns a task id immediately and survives this session. Track with `manta_task_status` / `manta_task_list`; collect results with `manta_task_output`.
 
 Each subagent is isolated: it does **not** see this conversation, so put everything it needs (files, goal, constraints) in the `task` `description`. Handle small or routine requests yourself rather than delegating."""
 
@@ -91,6 +94,17 @@ def _agent_extra_middleware(defn: Any) -> list[Any]:
         from .middleware.economy import agent_budget_middleware
 
         mw = agent_budget_middleware(defn)
+        if mw is not None:
+            extras.append(mw)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ADR 0010 Phase B: tool-call event log (the `manta status` feed, including
+    # the approval/denial audit records).
+    try:
+        from .tasks.events import agent_event_middleware
+
+        mw = agent_event_middleware(defn)
         if mw is not None:
             extras.append(mw)
     except Exception:  # noqa: BLE001
@@ -163,6 +177,18 @@ def build_orchestrator_middleware() -> list[Any]:
     middleware: list[Any] = []
     defn = _active_profile_def()
 
+    # @agent addressing (ADR 0010 Phase B), outermost in both branches: an
+    # explicit "@swe …" or "@swe … &" turn outranks every other routing
+    # decision (it only fires on an explicit @-mention of a real agent).
+    try:
+        from .middleware.address import agent_address_middleware
+
+        mw = agent_address_middleware()
+        if mw is not None:
+            middleware.append(mw)
+    except Exception:  # noqa: BLE001
+        pass
+
     if defn is not None:
         # Model pin first (outermost) so accounting/routing below see the pinned
         # model, and the primary loop actually runs on the profile's model — not
@@ -197,6 +223,14 @@ def build_orchestrator_middleware() -> list[Any]:
                 middleware.append(mw)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            from .tasks.events import agent_event_middleware
+
+            mw = agent_event_middleware(defn)
+            if mw is not None:
+                middleware.append(mw)
+        except Exception:  # noqa: BLE001
+            pass
     else:
         # Deterministic plan-request delegation, outermost so it can short-circuit
         # the model call entirely (no accounting noise for a call that never runs).
@@ -212,6 +246,14 @@ def build_orchestrator_middleware() -> list[Any]:
             from .middleware.economy import orchestrator_middleware
 
             middleware.extend(orchestrator_middleware())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .tasks.events import orchestrator_event_middleware
+
+            mw = orchestrator_event_middleware()
+            if mw is not None:
+                middleware.append(mw)
         except Exception:  # noqa: BLE001
             pass
 
@@ -239,6 +281,20 @@ def build_databricks_tools() -> list[Any]:
         from .databricks_tools import build_default_databricks_tools
 
         return build_default_databricks_tools()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def build_task_tools() -> list[Any]:
+    """Background-task tools for the main agent (ADR 0010 Phase B).
+
+    Gives the orchestrator the same task surface as the ``chief`` agent so
+    "run this in the background" works from any session.
+    """
+    try:
+        from .tasks.tools import build_task_tools as _build
+
+        return _build()
     except Exception:  # noqa: BLE001
         return []
 
@@ -297,7 +353,7 @@ def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     _maybe_add_delegation_policy(kwargs)
 
-    extra_tools = build_databricks_tools()
+    extra_tools = [*build_databricks_tools(), *build_task_tools()]
     if extra_tools:
         kwargs["tools"] = [*list(kwargs.get("tools") or ()), *extra_tools]
 

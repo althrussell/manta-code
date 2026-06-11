@@ -6,10 +6,17 @@ references), what's missing, and the concrete work to close the gap. Ends with a
 prioritized roadmap.
 
 > **Living tracker** (ADR 0010): items are checked off as the phase PRs land.
-> Status: **Phase A landed** — provider abstraction (`manta_code/providers/`),
-> Databricks-first-not-only model discovery and `/auth`, Databricks-optional
-> launch/doctor/tools, visible degraded mode, and contract tests over every
-> `_boot` patch target. Phases B–D in flight.
+>
+> - **Phase A landed** — provider abstraction (`manta_code/providers/`),
+>   Databricks-first-not-only model discovery and `/auth`, Databricks-optional
+>   launch/doctor/tools, visible degraded mode, contract tests over every
+>   `_boot` patch target.
+> - **Phase B landed** — task store + detached background tasks
+>   (`manta_code/tasks/`), `@agent` addressing (inline + `&` background),
+>   `manta task`/`manta status` CLI, event feed with approval/denial audit,
+>   `chief` built-in agent with in-session task tools, doctor validation of
+>   agent model pins.
+> - Phases C–D in flight.
 
 **TL;DR.** The foundation is genuinely strong — the reliability seam (Pillar 7),
 the enforced agent registry (Pillar 4's bottom half), and token accounting

@@ -40,3 +40,13 @@ def test_defaults_compile():
         sub = compile_subagent(agent)
         assert sub["name"] == agent.name
         assert sub["system_prompt"]
+
+
+def test_chief_is_read_only_with_task_tools():
+    from manta_code.agents.defaults import CHIEF
+
+    # The chief coordinates; it must not write code, and its power comes from
+    # the background-task tools (ADR 0010 Phase B).
+    assert CHIEF.read_only is True
+    assert "tasks" in CHIEF.manta_tools
+    assert CHIEF.model  # pinned, like the other built-ins

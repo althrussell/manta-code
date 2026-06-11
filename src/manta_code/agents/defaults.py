@@ -85,7 +85,7 @@ REVIEW = AgentDef(
         "files for bugs, security issues, and style problems and reports findings "
         "(with severity and locations). Does not modify code."
     ),
-    model=_model("databricks-gemini-3-1-pro"),
+    model=_model("databricks-claude-sonnet-4-5"),
     read_only=True,
     memory=True,
     system_prompt="""You are Manta's code-review subagent in a Databricks-focused environment.
@@ -100,8 +100,31 @@ Review the code under discussion and report findings. This is a READ-ONLY role a
 Return a structured list of findings (severity, location, issue, suggested fix).""",
 )
 
+CHIEF = AgentDef(
+    name="chief",
+    description=(
+        "Chief of staff: delegates work to the specialist agents (planning, "
+        "swe, review, and yours), tracks background tasks, and collects their "
+        "results into one report. Coordinates; does not write code itself."
+    ),
+    model=_model("databricks-gpt-5-5"),
+    read_only=True,
+    memory=True,
+    manta_tools=["tasks"],
+    system_prompt="""You are Manta's chief of staff in a Databricks-focused engineering environment.
+
+Your job is coordination, not implementation: delegate work to the right specialist, watch it, and report back. This is a READ-ONLY role and it is enforced — file writes and shell execution are blocked.
+
+- Route work to the right agent with the `task` tool: `planning` for rigorous plans, `swe` for code changes, `review` for independent review — plus any user-created agents available to you.
+- For long-running work, use `manta_task_submit(agent, prompt)` to run it in the background; it returns a task id immediately and the work survives this session.
+- Track delegated work with `manta_task_list` / `manta_task_status`, and pull results back with `manta_task_output` — aggregate across tasks so the user never has to chase each agent.
+- Cancel runaway work with `manta_task_cancel` when the user asks.
+- Put everything a delegated agent needs (files, goal, constraints) in its prompt; subagents do not see this conversation.
+- Report status honestly: state what is queued, running, done, or failed, with task ids, and summarize results in plain language.""",
+)
+
 #: Built-in agents, in delegation-workflow order.
-DEFAULT_AGENTS: tuple[AgentDef, ...] = (PLANNING, SWE, REVIEW)
+DEFAULT_AGENTS: tuple[AgentDef, ...] = (PLANNING, SWE, REVIEW, CHIEF)
 
 #: Names reserved by Manta's built-ins (used to label them in the CLI).
 DEFAULT_AGENT_NAMES: frozenset[str] = frozenset(a.name for a in DEFAULT_AGENTS)

@@ -44,7 +44,7 @@ def _infer_model(text: str) -> str:
     if any(hint in text for hint in _PLANNING_HINTS):
         return _model("databricks-claude-opus-4-8")
     if any(hint in text for hint in _READ_ONLY_HINTS):
-        return _model("databricks-gemini-3-1-pro")
+        return _model("databricks-claude-sonnet-4-5")
     return _model("databricks-gpt-5-5")
 
 

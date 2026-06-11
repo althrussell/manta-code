@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import pytest
+
+from manta_code.tasks import executor, store
+
+
+@pytest.fixture(autouse=True)
+def _manta_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+
+
+class _FakeProcess:
+    def __init__(self):
+        self.pid = 9999
+
+
+@pytest.fixture()
+def _fake_spawn(monkeypatch):
+    spawned = {}
+
+    def fake_popen(argv, **kwargs):
+        spawned["argv"] = argv
+        spawned["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(executor.subprocess, "Popen", fake_popen)
+    return spawned
+
+
+def test_submit_creates_task_and_spawns_detached_runner(_fake_spawn):
+    record = executor.submit_task("swe", "fix the flaky test")
+    assert record.state == "queued"
+    assert record.pid == 9999
+
+    argv = _fake_spawn["argv"]
+    assert argv[1:3] == ["-m", "manta_code.tasks.runner"]
+    assert argv[3] == record.id
+    kwargs = _fake_spawn["kwargs"]
+    assert kwargs["start_new_session"] is True  # detached: survives the session
+    assert kwargs["env"][executor.TASK_ID_ENV] == record.id
+
+    stored = store.get_task(record.id)
+    assert stored.pid == 9999
+    assert stored.timeout == executor.DEFAULT_TASK_TIMEOUT
+    assert stored.max_turns == executor.DEFAULT_TASK_MAX_TURNS
+    # Submission is audited as an event.
+    kinds = {e.kind for e in store.recent_events(task_id=record.id)}
+    assert "task_submitted" in kinds
+
+
+def test_submit_accepts_at_prefixed_agent(_fake_spawn):
+    record = executor.submit_task("@review", "look at the diff")
+    assert record.agent == "review"
+
+
+def test_submit_rejects_unknown_agent(_fake_spawn):
+    with pytest.raises(executor.TaskError, match="no Manta agent named 'nope'"):
+        executor.submit_task("nope", "anything")
+
+
+def test_submit_rejects_empty_prompt(_fake_spawn):
+    with pytest.raises(executor.TaskError, match="non-empty"):
+        executor.submit_task("swe", "   ")
+
+
+def test_cancel_running_task_signals_group(monkeypatch, _fake_spawn):
+    record = executor.submit_task("swe", "long thing")
+    store.update_task(record.id, state="running")
+
+    killed = {}
+    monkeypatch.setattr(
+        executor.os, "killpg", lambda pid, sig: killed.update(pid=pid, sig=sig)
+    )
+    cancelled = executor.cancel_task(record.id)
+    assert cancelled.state == "cancelled"
+    assert killed["pid"] == 9999
+    assert store.get_task(record.id).state == "cancelled"
+
+
+def test_cancel_finished_task_errors(_fake_spawn):
+    record = executor.submit_task("swe", "quick thing")
+    store.update_task(record.id, state="done")
+    with pytest.raises(executor.TaskError, match="already done"):
+        executor.cancel_task(record.id)
+
+
+def test_cancel_survives_already_dead_process(monkeypatch, _fake_spawn):
+    record = executor.submit_task("swe", "thing")
+
+    def _gone(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(executor.os, "killpg", _gone)
+    cancelled = executor.cancel_task(record.id)
+    assert cancelled.state == "cancelled"
+
+
+def test_task_output_prefers_result_then_log(tmp_path, _fake_spawn):
+    record = executor.submit_task("swe", "thing")
+    # While running with no result: log tail.
+    log = tmp_path / "task.log"
+    log.write_text("streamed output so far", encoding="utf-8")
+    store.update_task(record.id, log_path=str(log))
+    assert executor.task_output(record.id) == "streamed output so far"
+    # Once a result is recorded, it wins.
+    store.update_task(record.id, result="the final answer")
+    assert executor.task_output(record.id) == "the final answer"

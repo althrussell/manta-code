@@ -70,3 +70,23 @@ def test_extra_middleware_is_appended():
         AgentDef(name="budgeted", read_only=True), extra_middleware=[sentinel]
     )
     assert sentinel in sub["middleware"]
+
+
+def test_compile_chief_includes_task_tools():
+    import pytest as _pytest
+
+    _pytest.importorskip("langchain_core")
+    from manta_code.agents.defaults import CHIEF
+    from manta_code.agents.factory import compile_subagent
+
+    compiled = compile_subagent(CHIEF)
+    names = {t.name for t in compiled.get("tools", [])}
+    assert "manta_task_submit" in names
+    assert "manta_task_output" in names
+
+
+def test_compile_without_manta_tools_sets_no_tools_key():
+    from manta_code.agents.defaults import SWE
+    from manta_code.agents.factory import compile_subagent
+
+    assert "tools" not in compile_subagent(SWE)

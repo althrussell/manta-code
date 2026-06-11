@@ -24,7 +24,7 @@ Everything lives in two modules:
       "databricks-gpt-oss-120b",
       "databricks-claude-opus-4-8",
       "databricks-gpt-5-5",
-      "databricks-gemini-3-1-pro",
+      "databricks-claude-sonnet-4-5",
   ]
   ```
 
@@ -72,7 +72,7 @@ pinned to the right Databricks model for its role:
 | Orchestrator (main) | — | `databricks:databricks-gpt-oss-120b` | the `default_endpoint`; fast MoE, strong tool use |
 | Planning | `planning` | `databricks:databricks-claude-opus-4-8` | turns a request into an ordered `write_todos` plan; read-only |
 | Build / SWE | `swe` | `databricks:databricks-gpt-5-5` | implements changes hands-on (edit files, run tests via `execute`) |
-| Review | `review` | `databricks:databricks-gemini-3-1-pro` | read-only review that reports findings; a different vendor catches what the author model misses |
+| Review | `review` | `databricks:databricks-claude-sonnet-4-5` | read-only review that reports findings; a different vendor catches what the author model misses |
 
 **Profile tier (`agents/profiles.py`).** `sync_agent_profiles()` projects every
 registry agent (built-ins + user-created) into a top-level

@@ -27,7 +27,7 @@ default_endpoint = "databricks-gpt-oss-120b"
 extra_endpoints = [
     "databricks-claude-opus-4-8",
     "databricks-gpt-5-5",
-    "databricks-gemini-3-1-pro",
+    "databricks-claude-sonnet-4-5",
 ]
 """
 
@@ -42,7 +42,7 @@ class InteractiveConfig(BaseModel):
         default_factory=lambda: [
             "databricks-claude-opus-4-8",
             "databricks-gpt-5-5",
-            "databricks-gemini-3-1-pro",
+            "databricks-claude-sonnet-4-5",
         ]
     )
 

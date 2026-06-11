@@ -20,7 +20,7 @@ def test_save_load_round_trip(tmp_path):
     defn = AgentDef(
         name="reviewer",
         description="Read-only reviewer",
-        model="databricks:databricks-gemini-3-1-pro",
+        model="databricks:databricks-claude-sonnet-4-5",
         system_prompt="You review code.\n\nBe thorough.",
         read_only=True,
         tools_deny=["execute"],
@@ -42,7 +42,7 @@ def test_save_load_round_trip(tmp_path):
     loaded = registry.load_agent("reviewer", root=tmp_path)
     assert loaded.name == "reviewer"
     assert loaded.read_only is True
-    assert loaded.model == "databricks:databricks-gemini-3-1-pro"
+    assert loaded.model == "databricks:databricks-claude-sonnet-4-5"
     assert loaded.system_prompt.endswith("Be thorough.")
     assert loaded.tools_deny == ["execute"]
     assert loaded.approval == ["write_file"]

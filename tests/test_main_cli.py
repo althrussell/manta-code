@@ -306,3 +306,82 @@ def test_doctor_reports_databricks_optional(monkeypatch):
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "not configured (optional)" in result.stdout
+
+
+# --- manta task / manta status (ADR 0010 Phase B) -------------------------------
+
+
+def test_task_cli_routes_to_typer():
+    from manta_code.main import classify_args
+
+    assert classify_args(["task", "list"])[0] == "delegate"
+    assert classify_args(["status"])[0] == "delegate"
+
+
+def test_task_submit_and_lifecycle_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    from manta_code.tasks import executor
+
+    class _Proc:
+        pid = 4242
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *a, **k: _Proc())
+
+    result = runner.invoke(app, ["task", "submit", "swe", "fix the flaky test"])
+    assert result.exit_code == 0
+    assert "Submitted task" in result.stdout
+    task_id = result.stdout.split("Submitted task")[1].split("to")[0].strip()
+
+    result = runner.invoke(app, ["task", "list"])
+    assert task_id in result.stdout
+    assert "@swe" in result.stdout
+
+    result = runner.invoke(app, ["task", "status", task_id])
+    assert result.exit_code == 0
+    assert "queued" in result.stdout
+
+    result = runner.invoke(app, ["task", "cancel", task_id])
+    assert result.exit_code == 0
+    assert "Cancelled" in result.stdout
+
+    result = runner.invoke(app, ["task", "status", task_id])
+    assert "cancelled" in result.stdout
+
+
+def test_task_output_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    from manta_code.tasks import store
+
+    record = store.create_task(
+        store.TaskRecord(
+            id="cli00001", agent="swe", prompt="x", state="done",
+            result="the answer is 42",
+        )
+    )
+    result = runner.invoke(app, ["task", "output", record.id])
+    assert result.exit_code == 0
+    assert "the answer is 42" in result.stdout
+
+
+def test_task_unknown_agent_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    result = runner.invoke(app, ["task", "submit", "ghost", "boo"])
+    assert result.exit_code == 1
+    assert "no Manta agent named 'ghost'" in result.stdout
+
+
+def test_status_single_pane(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    from manta_code.tasks import store
+
+    store.create_task(
+        store.TaskRecord(id="st000001", agent="review", prompt="audit", state="running")
+    )
+    store.record_event(
+        store.EventRecord(agent="review", kind="denied", detail="write_file(/x)")
+    )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "st000001" in result.stdout
+    assert "@review" in result.stdout
+    assert "denied" in result.stdout

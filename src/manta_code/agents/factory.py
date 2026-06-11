@@ -60,6 +60,24 @@ def _interrupt_on(defn: AgentDef) -> dict[str, Any]:
     return {tool: True for tool in defn.approval}
 
 
+def _manta_tools(defn: AgentDef) -> list[Any]:
+    """Resolve the agent's ``manta_tools`` groups to LangChain tools.
+
+    Currently one group: ``"tasks"`` (background-task submit/status/output/
+    list/cancel — the chief-of-staff surface). Guarded so an unavailable
+    group never blocks agent construction.
+    """
+    tools: list[Any] = []
+    if "tasks" in (defn.manta_tools or []):
+        try:
+            from ..tasks.tools import build_task_tools
+
+            tools.extend(build_task_tools())
+        except Exception:  # noqa: BLE001 - optional; never block construction
+            pass
+    return tools
+
+
 def compile_subagent(
     defn: AgentDef,
     *,
@@ -92,6 +110,10 @@ def compile_subagent(
 
     if defn.skills:
         subagent["skills"] = list(defn.skills)
+
+    manta_tools = _manta_tools(defn)
+    if manta_tools:
+        subagent["tools"] = manta_tools
 
     return subagent
 
