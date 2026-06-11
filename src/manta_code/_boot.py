@@ -95,11 +95,14 @@ MANTA_ASCII_BANNER = _compose_banner(MANTA_RAY_ASCII, MANTA_WORDMARK_ASCII)
 
 
 def _versioned(art: str, version: str) -> str:
-    """Append the runtime version tag so upstream's version logic still works.
+    """Append Manta's version tag beneath the banner.
 
-    ``get_banner`` looks for the literal ``v{version}`` substring to apply the
-    ``(local)`` editable-install suffix and the hide-version behaviour, so the
-    tag must match the live ``deepagents-code`` version.
+    The tag is **Manta's** version (the product the user installed), not the
+    upstream runtime's — showing ``deepagents-code``'s version here confused
+    users into thinking Manta was a different release. Upstream's
+    ``get_banner`` logic that rewrites ``v{upstream_version}`` (the
+    ``(local)`` suffix / hide-version behaviour) simply no-ops on this tag,
+    which is harmless.
     """
     return f"{art.rstrip()}\n                                  v{version}\n"
 
@@ -113,15 +116,16 @@ def apply_branding() -> bool:
     """
     try:
         from deepagents_code import config
-        from deepagents_code._version import __version__ as dcode_version
+
+        from manta_code import __version__ as manta_version
     except Exception:
         return False
 
     if not hasattr(config, "_UNICODE_BANNER") or not hasattr(config, "_ASCII_BANNER"):
         return False
 
-    config._UNICODE_BANNER = _versioned(MANTA_UNICODE_BANNER, dcode_version)
-    config._ASCII_BANNER = _versioned(MANTA_ASCII_BANNER, dcode_version)
+    config._UNICODE_BANNER = _versioned(MANTA_UNICODE_BANNER, manta_version)
+    config._ASCII_BANNER = _versioned(MANTA_ASCII_BANNER, manta_version)
     return True
 
 

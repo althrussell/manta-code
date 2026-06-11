@@ -107,7 +107,7 @@ CHIEF = AgentDef(
         "swe, review, and yours), tracks background tasks, and collects their "
         "results into one report. Coordinates; does not write code itself."
     ),
-    model=_model("databricks-gpt-5-4"),
+    model=_model("databricks-gpt-5-4-mini"),
     read_only=True,
     memory=True,
     manta_tools=["tasks"],

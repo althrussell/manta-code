@@ -53,10 +53,17 @@ Requires Python 3.12+. For Databricks features: the
 and a workspace login.
 
 ```bash
-pip install "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.1.0"
+# Recommended: uv installs `manta` as an isolated tool on your PATH
+uv tool install "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.2.0"
+
 databricks auth login     # once — or skip it and use your own provider keys
 manta doctor              # everything green?
 ```
+
+Upgrade later with `uv tool upgrade manta-code`. Prefer pip? Inside a
+virtualenv: `pip install "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.2.0"`
+(a bare `pip install` fails on PEP 668 "externally managed" system Pythons —
+another reason uv is the recommended path).
 
 No Databricks? Manta still runs: configure Anthropic/OpenAI/Google keys in
 `/auth` and the Databricks features simply stay dormant. Want to confirm your
@@ -91,7 +98,7 @@ manta receipts                         # what did this week cost — and save?
 | Agent | Model (pin) | Boundary |
 | --- | --- | --- |
 | *(orchestrator)* | `databricks-gpt-oss-120b` | cheap by default |
-| `chief` | `databricks-gpt-5-4` | read-only; delegates, tracks, collects |
+| `chief` | `databricks-gpt-5-4-mini` | read-only; cheap coordinator: delegates, tracks, collects |
 | `planning` | `databricks-claude-opus-4-8` | read-only; plans, never edits |
 | `swe` | `databricks-gpt-5-4` | read-write; approval-gated writes/exec |
 | `review` | `databricks-claude-sonnet-4-5` | read-only; a different vendor than the coder, on purpose |
@@ -148,7 +155,7 @@ CI recipe — the read-only `review` agent on every PR:
 [interactive]
 default_endpoint = "databricks-gpt-oss-120b"   # the cheap session default
 extra_endpoints  = ["databricks-claude-opus-4-8", "databricks-gpt-5-4",
-                    "databricks-claude-sonnet-4-5"]
+                    "databricks-gpt-5-4-mini", "databricks-claude-sonnet-4-5"]
 
 [budget]
 daily_max_usd = 25.0        # optional: pause-for-approval at the daily cap
