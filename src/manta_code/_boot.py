@@ -546,6 +546,58 @@ def allow_blocking_server() -> bool:
     return True
 
 
+def align_agent_switch_model() -> bool:
+    """Make the ``/agents`` picker also apply the selected agent's model pin.
+
+    Upstream's agent swap (``DeepAgentsApp._restart_server_for_agent_swap``)
+    restarts the server with the new identity but leaves the *session model*
+    (and therefore the footer) on whatever the session launched with. Manta's
+    pin middleware still runs the agent's calls on its pinned model, but the
+    visible state lies — exactly the mismatch between ``manta agents`` and
+    the footer. This wraps the swap to follow up with upstream's own
+    ``_switch_model`` (thread-preserving, defers until the server is ready)
+    using the Manta agent's pin, with ``persist=False`` so a profile switch
+    never redefines the user's saved default model.
+
+    Returns ``True`` when the override was applied, ``False`` otherwise.
+    """
+    try:
+        from deepagents_code.app import DeepAgentsApp
+    except Exception:
+        return False
+
+    original_swap = getattr(DeepAgentsApp, "_restart_server_for_agent_swap", None)
+    if original_swap is None or getattr(original_swap, "__manta_pin_align__", False):
+        return original_swap is not None
+
+    def _manta_pin(agent_name: str) -> str | None:
+        try:
+            from manta_code.agents.defaults import merged_agents
+            from manta_code.agents.registry import list_agents
+
+            for defn in merged_agents(list_agents()):
+                if defn.name == agent_name:
+                    return defn.model or None
+        except Exception:  # noqa: BLE001 - pin lookup is best-effort
+            pass
+        return None
+
+    async def wrapped(self: object, agent_name: str) -> None:
+        await original_swap(self, agent_name)
+        try:
+            pin = _manta_pin(agent_name)
+            if pin and getattr(self, "_assistant_id", None) == agent_name:
+                await self._switch_model(
+                    pin, persist=False, announce_unchanged=False
+                )
+        except Exception:  # noqa: BLE001 - alignment must never break the swap
+            pass
+
+    wrapped.__manta_pin_align__ = True  # type: ignore[attr-defined]
+    DeepAgentsApp._restart_server_for_agent_swap = wrapped
+    return True
+
+
 def install_manta_build_hook() -> bool:
     """Install Manta's control-plane build hook (best-effort).
 
@@ -579,6 +631,8 @@ def main() -> None:
         degraded.append("Databricks-first model list")
     if not rebrand_auth_screen():
         degraded.append("workspace picker in /auth")
+    if not align_agent_switch_model():
+        degraded.append("agent-pin model alignment in /agents")
     if not allow_blocking_server():
         degraded.append("Databricks auth shim")
     if not install_manta_build_hook():

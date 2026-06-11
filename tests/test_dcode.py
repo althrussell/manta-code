@@ -477,6 +477,7 @@ def test_boot_main_announces_degraded_control_plane(monkeypatch, capsys):
     monkeypatch.setattr(_boot, "rebrand_model_selector_footer", lambda: True)
     monkeypatch.setattr(_boot, "prefer_databricks_models", lambda: True)
     monkeypatch.setattr(_boot, "rebrand_auth_screen", lambda: True)
+    monkeypatch.setattr(_boot, "align_agent_switch_model", lambda: True)
     monkeypatch.setattr(_boot, "allow_blocking_server", lambda: True)
     monkeypatch.setattr(_boot, "install_manta_build_hook", lambda: False)
     monkeypatch.setattr(upstream_main, "cli_main", lambda: None)
@@ -497,6 +498,7 @@ def test_boot_main_silent_when_everything_applies(monkeypatch, capsys):
         "rebrand_model_selector_footer",
         "prefer_databricks_models",
         "rebrand_auth_screen",
+        "align_agent_switch_model",
         "allow_blocking_server",
         "install_manta_build_hook",
     ):
@@ -586,3 +588,72 @@ def test_addressed_agent_parsing():
     assert dcode._addressed_agent(["--agent", "swe"]) == "swe"
     assert dcode._addressed_agent(["--agent=review"]) == "review"
     assert dcode._addressed_agent(["-r"]) is None
+
+
+def test_align_agent_switch_model_applies_pin(tmp_path, monkeypatch):
+    # Selecting a Manta agent in /agents must also switch the session model to
+    # that agent's pin (thread-preserving, non-persisted) so the footer and
+    # `manta agents` agree.
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    app_mod = pytest.importorskip("deepagents_code.app")
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_restart_server_for_agent_swap"]
+    try:
+        assert _boot.align_agent_switch_model() is True
+        # Idempotent: re-applying doesn't double-wrap.
+        wrapped = cls._restart_server_for_agent_swap
+        assert _boot.align_agent_switch_model() is True
+        assert cls._restart_server_for_agent_swap is wrapped
+
+        calls = {}
+
+        class _FakeApp:
+            _assistant_id = "chief"
+
+            async def _switch_model(self, spec, **kwargs):
+                calls["spec"] = spec
+                calls["kwargs"] = kwargs
+
+        async def fake_swap(self, agent_name):
+            calls["swapped"] = agent_name
+
+        # Re-wrap a fresh stub so the wrapper calls our fake original swap.
+        cls._restart_server_for_agent_swap = fake_swap
+        assert _boot.align_agent_switch_model() is True
+        asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
+        assert calls["swapped"] == "chief"
+        assert calls["spec"] == "databricks:databricks-gpt-5-5"
+        assert calls["kwargs"] == {"persist": False, "announce_unchanged": False}
+    finally:
+        cls._restart_server_for_agent_swap = original
+
+
+def test_align_agent_switch_model_skips_non_manta_agents(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    app_mod = pytest.importorskip("deepagents_code.app")
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_restart_server_for_agent_swap"]
+    try:
+        calls = {}
+
+        async def fake_swap(self, agent_name):
+            calls["swapped"] = agent_name
+
+        cls._restart_server_for_agent_swap = fake_swap
+        assert _boot.align_agent_switch_model() is True
+
+        class _FakeApp:
+            _assistant_id = "agent"
+
+            async def _switch_model(self, spec, **kwargs):
+                calls["spec"] = spec
+
+        asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "agent"))
+        assert calls["swapped"] == "agent"
+        assert "spec" not in calls  # base profile has no Manta pin
+    finally:
+        cls._restart_server_for_agent_swap = original
