@@ -137,6 +137,17 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         kind="attr",
     ),
     PatchTarget(
+        module="deepagents_code.app",
+        attribute="DeepAgentsApp._handle_command",
+        purpose="/cost in-session spend command (wrapped dispatch)",
+    ),
+    PatchTarget(
+        module="deepagents_code.command_registry",
+        attribute="SLASH_COMMANDS",
+        purpose="/cost autocomplete entry appended",
+        kind="attr",
+    ),
+    PatchTarget(
         module="deepagents_code.widgets.autocomplete",
         attribute="FuzzyFileController._get_fuzzy_suggestions",
         purpose="@ completion extended with Manta agent names",

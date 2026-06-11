@@ -208,3 +208,15 @@ def test_budget_pause_graph_interrupt_propagates(tmp_path, monkeypatch):
     mw.wrap_model_call(req, lambda r: _Response(result=[_ai({"input_tokens": 100, "output_tokens": 50})]))
     with pytest.raises(GraphInterrupt):
         mw.wrap_model_call(req, lambda r: _Response(result=[_ai({"input_tokens": 1, "output_tokens": 1})]))
+
+
+def test_thread_id_falls_back_to_langgraph_config(monkeypatch):
+    # The real runtime exposes no thread attribute; the live RunnableConfig's
+    # contextvar is the only source. Without this every ledger row carried an
+    # empty thread_id (found while building in-session /cost).
+    import langgraph.config as lg_config
+
+    monkeypatch.setattr(
+        lg_config, "get_config", lambda: {"configurable": {"thread_id": "thr-real"}}
+    )
+    assert E._thread_id(_Request(runtime=_Runtime(thread_id=""))) == "thr-real"

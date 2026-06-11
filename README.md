@@ -26,7 +26,8 @@ things they treat as afterthoughts:
    local ledger with cache-hit and scaffolding-vs-work splits, an advisor
    recommends model switches based on how the session is *actually going*, and
    `manta receipts` shows what cheap-by-default saved you — with the honest
-   counterfactual labelled as such.
+   counterfactual labelled as such. In-session, `/cost` shows the
+   conversation's own spend, per-call costs, and the daily budget.
 2. **Real agents, real boundaries.** `planning`, `swe`, `review`, and `chief`
    (plus any agent you create) have model pins, tool allow/deny lists,
    per-path filesystem rules, approval gates, budgets, and durable memory —
@@ -126,7 +127,7 @@ manta task submit <agent> "..." [--allow-asks]   # detached background task
 manta task list|status|output|send|cancel        # the task lifecycle
 manta status                # chief-of-staff pane: tasks, events, audit, spend
 
-manta cost [--by agent|model|task] [--breakdown] [--advise]
+manta cost [--by agent|model|task] [--breakdown] [--advise]   # (in-session: /cost)
 manta budget | manta watch  # spend windows, live refresh
 manta receipts              # spend vs all-premium counterfactual + advisor stats
 manta gateway               # the AI Gateway surface: providers + governance per endpoint

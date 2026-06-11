@@ -986,3 +986,67 @@ def test_extend_recommended_models_adds_manta_lineup(tmp_path, monkeypatch):
         assert len(ms._RECOMMENDED_MODELS) == size
     finally:
         ms._RECOMMENDED_MODELS = original
+
+
+def test_session_cost_report_contents(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    from manta_code.agents import usage as U
+
+    for agent, cost in (("orchestrator", 0.01), ("swe", 0.20)):
+        U.record_usage(
+            U.UsageRecord(
+                agent=agent, model="databricks-gpt-5-4", input_tokens=1000,
+                output_tokens=100, cost_usd=cost, thread_id="thr-1",
+            )
+        )
+    report = _boot._session_cost_report("thr-1")
+    assert "Session spend: $0.2100" in report
+    assert "swe" in report and "orchestrator" in report
+    assert "Recent calls" in report
+    assert "Today" in report
+    assert "manta receipts" in report
+
+
+def test_session_cost_report_empty_thread(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    report = _boot._session_cost_report(None)
+    assert "No spend recorded" in report
+
+
+def test_cost_command_intercepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    app_mod = pytest.importorskip("deepagents_code.app")
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_handle_command"]
+    try:
+        calls = {"mounted": [], "passed": []}
+
+        async def fake_handle(self, command):
+            calls["passed"].append(command)
+
+        cls._handle_command = fake_handle
+        assert _boot.add_session_cost_command() is True
+        assert _boot.add_session_cost_command() is True  # idempotent
+
+        class _FakeApp:
+            _lc_thread_id = "thr-x"
+
+            async def _mount_message(self, widget):
+                calls["mounted"].append(widget)
+
+        asyncio.run(cls._handle_command(_FakeApp(), "/cost"))
+        assert len(calls["mounted"]) == 2  # echo + report
+        assert calls["passed"] == []  # intercepted, not forwarded
+        asyncio.run(cls._handle_command(_FakeApp(), "/help"))
+        assert calls["passed"] == ["/help"]  # everything else passes through
+    finally:
+        cls._handle_command = original
+
+
+def test_cost_command_registered_for_autocomplete():
+    cr = pytest.importorskip("deepagents_code.command_registry")
+    assert _boot.add_session_cost_command() is True
+    assert any(e.name == "/cost" for e in cr.SLASH_COMMANDS)
+    assert "/cost" in cr.SIDE_EFFECT_FREE  # answers even while the agent is busy
