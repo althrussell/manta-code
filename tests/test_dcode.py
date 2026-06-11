@@ -574,9 +574,9 @@ def test_rebranded_auth_screen_renders_both_sections(tmp_path, monkeypatch):
 def test_build_argv_agent_launch_uses_agent_pin(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
-    # chief pins databricks-gpt-5-4: the session model matches the agent that
-    # actually runs, so the TUI footer tells the truth.
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4"
+    # chief pins databricks-gpt-5-4-mini: the session model matches the agent
+    # that actually runs, so the TUI footer tells the truth.
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4-mini"
     assert "databricks:ep-default" not in argv
 
 
@@ -642,7 +642,7 @@ def test_align_agent_switch_model_applies_pin(tmp_path, monkeypatch):
         assert _boot.align_agent_switch_model() is True
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
         assert calls["swapped"] == "chief"
-        assert calls["spec"] == "databricks:databricks-gpt-5-4"
+        assert calls["spec"] == "databricks:databricks-gpt-5-4-mini"
         assert calls["kwargs"] == {"persist": False, "announce_unchanged": False}
     finally:
         cls._restart_server_for_agent_swap = original
@@ -699,7 +699,7 @@ def test_bare_launch_default_agent_beats_recent(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "chief")
     monkeypatch.setattr(mc, "load_recent_agent", lambda *a, **k: "planning")
     argv = dcode.build_dcode_argv("ep-default", [], python="py")
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4"
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4-mini"
 
 
 def test_bare_launch_base_agent_keeps_cheap_default(tmp_path, monkeypatch):
@@ -716,7 +716,7 @@ def test_a_flag_beats_persisted_agents(tmp_path, monkeypatch):
     mc = pytest.importorskip("deepagents_code.model_config")
     monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "planning")
     argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4"
+    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4-mini"
 
 
 class _FakeCompletionView:
@@ -863,7 +863,7 @@ def test_agent_swap_resumes_previous_thread(tmp_path, monkeypatch):
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
         assert calls["resumed"] == "prev-thread"
         assert calls["notified"] is True
-        assert calls["spec"] == "databricks:databricks-gpt-5-4"  # pin still applies
+        assert calls["spec"] == "databricks:databricks-gpt-5-4-mini"  # pin still applies
     finally:
         cls._restart_server_for_agent_swap = original
 

@@ -68,6 +68,8 @@ DEFAULT_PRICING: dict[str, Price] = {
     "claude-sonnet": Price(input=3.0, output=15.0),
     "claude-haiku": Price(input=0.80, output=4.0),
     "claude": Price(input=3.0, output=15.0),
+    "gpt-5-4-mini": Price(input=0.25, output=2.0),
+    "gpt-5-mini": Price(input=0.25, output=2.0),
     "gpt-5-4": Price(input=1.25, output=10.0),
     "gpt-5": Price(input=1.25, output=10.0),
     "gpt-oss-120b": Price(input=0.15, output=0.60),
