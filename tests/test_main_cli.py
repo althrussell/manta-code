@@ -431,3 +431,50 @@ def test_agents_set_model_non_databricks_skips_verify(tmp_path, monkeypatch):
     from manta_code.agents.registry import load_agent
 
     assert load_agent("swe").model == "anthropic:claude-opus-4-8"
+
+
+def test_classify_endpoint_detects_responses_only(monkeypatch):
+    import manta_code.databricks_chat as dc
+    from manta_code.main import _classify_endpoint
+
+    class _ResponsesOnly:
+        def __init__(self, **kw): pass
+
+        def invoke(self, messages):
+            raise RuntimeError(
+                "Error code: 400 - Model x only supports the Responses API."
+            )
+
+    monkeypatch.setattr(dc, "MantaChatDatabricks", _ResponsesOnly)
+    assert _classify_endpoint("x") == "responses-only"
+
+
+def test_classify_endpoint_passes_chat_models(monkeypatch):
+    import manta_code.databricks_chat as dc
+    from manta_code.main import _classify_endpoint
+
+    class _Fine:
+        def __init__(self, **kw): pass
+
+        def invoke(self, messages):
+            class _R:
+                content = "OK"
+
+            return _R()
+
+    monkeypatch.setattr(dc, "MantaChatDatabricks", _Fine)
+    assert _classify_endpoint("x") == "chat"
+
+
+def test_classify_endpoint_other_errors(monkeypatch):
+    import manta_code.databricks_chat as dc
+    from manta_code.main import _classify_endpoint
+
+    class _Boom:
+        def __init__(self, **kw): pass
+
+        def invoke(self, messages):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(dc, "MantaChatDatabricks", _Boom)
+    assert _classify_endpoint("x") == "error"

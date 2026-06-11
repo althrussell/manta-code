@@ -338,8 +338,23 @@ def doctor(
             pin = defn.model or ""
             if pin.startswith("databricks:"):
                 endpoints.add(pin.split(":", 1)[1])
-        console.print(f"\nProbing {len(endpoints)} model(s) in the live agent loop…")
+        console.print(f"\nProbing {len(endpoints)} model(s)…")
         for name in sorted(endpoints):
+            verdict = _classify_endpoint(name)
+            if verdict == "responses-only":
+                # Hard incompatibility, caught cheaply without a loop run:
+                # the endpoint only speaks the Responses API; Manta's model
+                # layer speaks chat-completions.
+                all_ok = False
+                console.print(
+                    f"  [red]FAIL[/red]  {name} [dim](Responses-API-only — "
+                    "unsupported by Manta's chat-completions model layer)[/dim]"
+                )
+                continue
+            if verdict == "error":
+                all_ok = False
+                console.print(f"  [red]FAIL[/red]  {name} [dim](direct call failed)[/dim]")
+                continue
             code = dcode.run_headless(
                 profile=profile,
                 default_endpoint=None,
@@ -352,11 +367,15 @@ def doctor(
             )
             ok = code == 0
             all_ok = all_ok and ok
-            mark = "[green]pass[/green]" if ok else "[red]FAIL[/red]"
+            mark = (
+                "[green]pass[/green]"
+                if ok
+                else "[red]FAIL[/red] [dim](rejects the agent loop's requests)[/dim]"
+            )
             console.print(f"  {mark}  {name}")
         console.print(
-            "[dim]A FAIL means the endpoint rejects the agent loop's requests "
-            "— repin with `manta agents set-model`.[/dim]"
+            "[dim]A FAIL means the model cannot run Manta sessions — repin "
+            "with `manta agents set-model`.[/dim]"
         )
 
     console.print("[green]Status: OK[/green]" if all_ok else "[yellow]Status: issues found[/yellow]")
@@ -1189,6 +1208,37 @@ def task_cancel(task_id: str = typer.Argument(..., help="Task id.")) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     console.print(f"Cancelled task [bold]{record.id}[/bold] (@{record.agent}).")
+
+
+def _classify_endpoint(name: str, *, timeout_seconds: int = 60) -> str:
+    """Cheap direct-call classification before the expensive loop probe.
+
+    Returns ``"chat"`` (proceed to the loop probe), ``"responses-only"``
+    (the endpoint rejects chat-completions outright — e.g. the codex / 5-5-pro
+    family), or ``"error"``. Bounded with SIGALRM: one probed endpoint was
+    observed hanging for minutes on a cold chat-completions call.
+    """
+    import signal
+
+    def _bail(*_args: object) -> None:
+        raise TimeoutError(f"no response in {timeout_seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _bail)
+    signal.alarm(timeout_seconds)
+    try:
+        from langchain_core.messages import HumanMessage
+
+        from .databricks_chat import MantaChatDatabricks
+
+        MantaChatDatabricks(model=name).invoke([HumanMessage(content="Reply OK")])
+        return "chat"
+    except Exception as exc:  # noqa: BLE001 - classify, don't crash doctor
+        if "Responses API" in str(exc):
+            return "responses-only"
+        return "error"
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @app.command()
