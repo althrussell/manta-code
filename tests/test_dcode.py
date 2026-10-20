@@ -6,6 +6,7 @@ import tomllib
 import pytest
 
 from manta_code import _boot, dcode
+from manta_code.model_defaults import role_model
 
 
 # --- merge_databricks_provider -------------------------------------------------
@@ -37,6 +38,32 @@ def test_merge_does_not_mutate_input():
     existing = {"models": {"providers": {}}}
     dcode.merge_databricks_provider(existing, ["ep-a"])
     assert existing == {"models": {"providers": {}}}
+
+
+def test_refresh_inventory_preserves_user_models_and_default_across_workspaces():
+    initial = {"models": {"default": "databricks:my-user-pin", "providers": {
+        "databricks": {"models": ["my-user-pin"], "params": {"timeout": 17}},
+        "openai": {"models": ["gpt"]},
+    }}}
+    first = dcode.merge_databricks_provider(initial, ["workspace-a-only"])
+    first["models"]["providers"]["databricks"]["models"].append("hand-added")
+    second = dcode.merge_databricks_provider(first, ["workspace-b-only"])
+    provider = second["models"]["providers"]["databricks"]
+    assert provider["models"] == ["my-user-pin", "hand-added", "workspace-b-only"]
+    assert provider["params"] == {"timeout": 17}
+    assert second["models"]["default"] == "databricks:my-user-pin"
+    assert second["models"]["providers"]["openai"] == {"models": ["gpt"]}
+
+
+def test_only_owned_defaults_migrate_and_user_edits_revoke_ownership():
+    first = dcode.merge_databricks_provider({}, ["old"], default_endpoint="old")
+    second = dcode.merge_databricks_provider(first, ["new"], default_endpoint="new")
+    assert second["models"]["default"] == "databricks:new"
+    second["models"]["default"] = "openai:user-choice"
+    third = dcode.merge_databricks_provider(second, ["newer"], default_endpoint="newer")
+    assert third["models"]["default"] == "openai:user-choice"
+    unmarked = {"models": {"default": "databricks:old"}}
+    assert dcode.merge_databricks_provider(unmarked, ["new"], default_endpoint="new")["models"]["default"] == "databricks:old"
 
 
 def test_merge_applies_params():
@@ -126,6 +153,13 @@ def test_build_launch_env_sets_profile(monkeypatch):
     assert env[dcode.SPLASH_SUBHEADER_ENV] == dcode.SPLASH_SUBHEADER
 
 
+def test_explicit_launch_profile_overrides_inherited_manta_profile(monkeypatch):
+    monkeypatch.setenv("MANTA_PROFILE", "old")
+    monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "older")
+    env = dcode.build_launch_env("selected")
+    assert env["MANTA_PROFILE"] == env["DATABRICKS_CONFIG_PROFILE"] == "selected"
+
+
 def test_build_launch_env_no_profile_no_var(monkeypatch):
     for var in ("MANTA_PROFILE", "DATABRICKS_CONFIG_PROFILE"):
         monkeypatch.delenv(var, raising=False)
@@ -206,7 +240,7 @@ def test_build_run_argv_options_and_passthrough():
     assert "--no-stream" not in argv
     assert "--timeout" not in argv
     assert "--max-turns" not in argv
-    assert argv[argv.index("--json-output") + 1] == "stream-json"
+    assert "--json-output" not in argv
     assert argv[argv.index("--shell-allow-list") + 1] == "ls,cat"
     assert argv[-1] == "--extra"
 
@@ -223,11 +257,13 @@ def test_ensure_dcode_config_roundtrip_idempotent(tmp_path):
     pytest.importorskip("tomli_w")
     cfg = tmp_path / "config.toml"
     dcode.ensure_dcode_config(["ep-a", "ep-b"], config_path=cfg)
-    dcode.ensure_dcode_config(["ep-b", "ep-c"], config_path=cfg)  # idempotent union
+    dcode.ensure_dcode_config(["ep-b", "ep-c"], config_path=cfg)
     data = tomllib.loads(cfg.read_text())
     provider = data["models"]["providers"]["databricks"]
     assert provider["class_path"] == dcode.DATABRICKS_CLASS_PATH
-    assert provider["models"] == ["ep-a", "ep-b", "ep-c"]
+    assert provider["models"] == ["ep-b", "ep-c"]
+    dcode.ensure_dcode_config(["ep-b", "ep-c"], config_path=cfg)
+    assert tomllib.loads(cfg.read_text()) == data
 
 
 def test_ensure_dcode_config_writes_default_endpoint(tmp_path):
@@ -363,8 +399,21 @@ def test_prefer_databricks_models_patches_discovery():
         _boot._original_get_available_models = saved_original
 
 
+def test_prefer_databricks_models_updates_loaded_catalog(monkeypatch):
+    model_config = pytest.importorskip("deepagents_code.model_config")
+    catalog = pytest.importorskip("deepagents_code.model_catalog")
+    def discover():
+        return {"openai": ["gpt"], "databricks": ["team-chat"]}
+
+    monkeypatch.setattr(model_config, "get_available_models", discover)
+    monkeypatch.setattr(catalog, "get_available_models", discover)
+    monkeypatch.setattr(_boot, "_original_get_available_models", None)
+    assert _boot.prefer_databricks_models() is True
+    assert list(catalog.get_available_models()) == ["databricks", "openai"]
+
+
 def test_rebrand_auth_screen_replaces_screen_internals():
-    auth = pytest.importorskip("deepagents_code.widgets.auth")
+    auth = pytest.importorskip("deepagents_code.tui.widgets.auth")
     screen = auth.AuthManagerScreen
     original_compose = screen.compose
     original_on_mount = screen.on_mount
@@ -381,8 +430,38 @@ def test_rebrand_auth_screen_replaces_screen_internals():
         screen.on_option_list_option_selected = original_selected
 
 
+def test_auth_provider_selection_preserves_upstream_handler():
+    auth = pytest.importorskip("deepagents_code.tui.widgets.auth")
+    from types import SimpleNamespace
+
+    screen = auth.AuthManagerScreen
+    names = (
+        "compose", "on_mount", "on_option_list_option_selected",
+        "action_cursor_down", "action_cursor_up",
+    )
+    original = {name: getattr(screen, name) for name in names}
+    calls = []
+
+    def upstream_selected(self, event):
+        calls.append(event.option.id)
+
+    try:
+        screen.on_option_list_option_selected = upstream_selected
+        assert _boot.rebrand_auth_screen() is True
+        assert _boot.rebrand_auth_screen() is True
+        event = SimpleNamespace(
+            option=SimpleNamespace(id="openai_codex"),
+            option_list=SimpleNamespace(id="auth-manager-options"),
+        )
+        screen.on_option_list_option_selected(object(), event)
+        assert calls == ["openai_codex"]
+    finally:
+        for name, value in original.items():
+            setattr(screen, name, value)
+
+
 def test_rebrand_model_selector_footer_neutralizes_databricks(monkeypatch):
-    model_selector = pytest.importorskip("deepagents_code.widgets.model_selector")
+    model_selector = pytest.importorskip("deepagents_code.tui.widgets.model_selector")
     screen = model_selector.ModelSelectorScreen
     original = screen._update_footer
     try:
@@ -414,7 +493,7 @@ def test_rebrand_model_selector_footer_neutralizes_databricks(monkeypatch):
 
 
 def test_allow_blocking_server_appends_flag(monkeypatch):
-    server = pytest.importorskip("deepagents_code.server")
+    server = pytest.importorskip("deepagents_code.client.launch.server")
     original = server._build_server_cmd
     try:
         monkeypatch.setattr(
@@ -447,25 +526,34 @@ class _FakeApp:
 def test_switch_databricks_workspace_sets_env_and_restarts(monkeypatch):
     import asyncio
 
+    monkeypatch.setenv("MANTA_PROFILE", "old")
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    refreshed = []
+    monkeypatch.setattr(_boot, "_refresh_workspace_inventory", lambda *args: refreshed.append(args))
     app = _FakeApp()
+    app._effective_model_spec = lambda: "databricks:custom.team.current"
 
     async def run():
         _boot.switch_databricks_workspace(app, "acme-prod")
         # Let the scheduled restart task run.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        for _ in range(20):
+            if app.restarted:
+                break
+            await asyncio.sleep(0.005)
 
     asyncio.run(run())
 
     import os
 
     assert os.environ["DATABRICKS_CONFIG_PROFILE"] == "acme-prod"
+    assert os.environ["MANTA_PROFILE"] == "acme-prod"
     assert app.restarted is True
+    assert refreshed == [("acme-prod", "databricks:custom.team.current")]
     assert any("Switching to workspace 'acme-prod'" in msg for _, msg in app.notifications)
 
 
 def test_switch_databricks_workspace_without_restart_hook(monkeypatch):
+    monkeypatch.setenv("MANTA_PROFILE", "old")
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
 
     class _NoRestartApp:
@@ -544,7 +632,7 @@ def test_rebranded_auth_screen_renders_both_sections(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
 
     assert _boot.rebrand_auth_screen() is True
-    from deepagents_code.widgets.auth import AuthManagerScreen
+    from deepagents_code.tui.widgets.auth import AuthManagerScreen
 
     class _Harness(App):
         pass
@@ -576,7 +664,7 @@ def test_build_argv_agent_launch_uses_agent_pin(tmp_path, monkeypatch):
     argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
     # chief pins databricks-gpt-5-4-mini: the session model matches the agent
     # that actually runs, so the TUI footer tells the truth.
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4-mini"
+    assert argv[argv.index("-M") + 1] == role_model("chief")
     assert "databricks:ep-default" not in argv
 
 
@@ -598,7 +686,7 @@ def test_build_run_argv_agent_launch_uses_agent_pin(tmp_path, monkeypatch):
     # pinned model too — not the cheap session default.
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     argv = dcode.build_run_argv("ep-default", "do it", ["-a", "planning"], python="py")
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-claude-opus-4-8"
+    assert argv[argv.index("-M") + 1] == role_model("planning")
 
 
 def test_addressed_agent_parsing():
@@ -634,15 +722,16 @@ def test_align_agent_switch_model_applies_pin(tmp_path, monkeypatch):
                 calls["spec"] = spec
                 calls["kwargs"] = kwargs
 
-        async def fake_swap(self, agent_name):
+        async def fake_swap(self, agent_name, **kwargs):
             calls["swapped"] = agent_name
+            return True
 
         # Re-wrap a fresh stub so the wrapper calls our fake original swap.
         cls._restart_server_for_agent_swap = fake_swap
         assert _boot.align_agent_switch_model() is True
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
         assert calls["swapped"] == "chief"
-        assert calls["spec"] == "databricks:databricks-gpt-5-4-mini"
+        assert calls["spec"] == role_model("chief")
         assert calls["kwargs"] == {"persist": False, "announce_unchanged": False}
     finally:
         cls._restart_server_for_agent_swap = original
@@ -658,8 +747,9 @@ def test_align_agent_switch_model_skips_non_manta_agents(tmp_path, monkeypatch):
     try:
         calls = {}
 
-        async def fake_swap(self, agent_name):
+        async def fake_swap(self, agent_name, **kwargs):
             calls["swapped"] = agent_name
+            return True
 
         cls._restart_server_for_agent_swap = fake_swap
         assert _boot.align_agent_switch_model() is True
@@ -677,7 +767,7 @@ def test_align_agent_switch_model_skips_non_manta_agents(tmp_path, monkeypatch):
         monkeypatch.setattr(manta_auth, "databricks_configured", lambda profile=None: True)
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "agent"))
         assert calls["swapped"] == "agent"
-        assert calls["spec"] == "databricks:databricks-gpt-oss-120b"
+        assert calls["spec"] == role_model("orchestrator")
     finally:
         cls._restart_server_for_agent_swap = original
 
@@ -690,7 +780,7 @@ def test_bare_launch_uses_recent_agent_pin(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: None)
     monkeypatch.setattr(mc, "load_recent_agent", lambda *a, **k: "planning")
     argv = dcode.build_dcode_argv("ep-default", [], python="py")
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-claude-opus-4-8"
+    assert argv[argv.index("-M") + 1] == role_model("planning")
 
 
 def test_bare_launch_default_agent_beats_recent(tmp_path, monkeypatch):
@@ -699,7 +789,7 @@ def test_bare_launch_default_agent_beats_recent(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "chief")
     monkeypatch.setattr(mc, "load_recent_agent", lambda *a, **k: "planning")
     argv = dcode.build_dcode_argv("ep-default", [], python="py")
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4-mini"
+    assert argv[argv.index("-M") + 1] == role_model("chief")
 
 
 def test_bare_launch_base_agent_keeps_cheap_default(tmp_path, monkeypatch):
@@ -716,7 +806,7 @@ def test_a_flag_beats_persisted_agents(tmp_path, monkeypatch):
     mc = pytest.importorskip("deepagents_code.model_config")
     monkeypatch.setattr(mc, "load_default_agent", lambda *a, **k: "planning")
     argv = dcode.build_dcode_argv("ep-default", ["-a", "chief"], python="py")
-    assert argv[argv.index("-M") + 1] == "databricks:databricks-gpt-5-4-mini"
+    assert argv[argv.index("-M") + 1] == role_model("chief")
 
 
 class _FakeCompletionView:
@@ -734,7 +824,7 @@ class _FakeCompletionView:
 
 
 def _fresh_controller(tmp_path):
-    from deepagents_code.widgets.autocomplete import FuzzyFileController
+    from deepagents_code.tui.widgets.autocomplete import FuzzyFileController
 
     controller = FuzzyFileController(_FakeCompletionView(), cwd=tmp_path)
     controller._file_cache = ["src/main.py", "chart.py"]
@@ -743,7 +833,7 @@ def _fresh_controller(tmp_path):
 
 def test_agent_mentions_complete_at_message_start(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
-    pytest.importorskip("deepagents_code.widgets.autocomplete")
+    pytest.importorskip("deepagents_code.tui.widgets.autocomplete")
     assert _boot.add_agent_mentions_to_autocomplete() is True
     assert _boot.add_agent_mentions_to_autocomplete() is True  # idempotent
 
@@ -759,7 +849,7 @@ def test_agent_mentions_complete_at_message_start(tmp_path, monkeypatch):
 
 def test_agent_mentions_not_offered_mid_message(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
-    pytest.importorskip("deepagents_code.widgets.autocomplete")
+    pytest.importorskip("deepagents_code.tui.widgets.autocomplete")
     assert _boot.add_agent_mentions_to_autocomplete() is True
 
     controller = _fresh_controller(tmp_path)
@@ -769,11 +859,14 @@ def test_agent_mentions_not_offered_mid_message(tmp_path, monkeypatch):
     assert "@chief" not in labels  # mid-message @ stays a file mention
 
 
-def test_resume_launch_gets_no_model_injection(tmp_path, monkeypatch):
+@pytest.mark.parametrize("resume_args", [
+    ["-r", "thread-1"], ["-rthread-1"], ["--resume=thread-1"],
+])
+def test_resume_launch_gets_no_model_injection(tmp_path, monkeypatch, resume_args):
     # A resumed thread adopts its own model; injecting -M would override it
     # (review finding).
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
-    argv = dcode.build_dcode_argv("ep-default", ["-r", "thread-1"], python="py")
+    argv = dcode.build_dcode_argv("ep-default", resume_args, python="py")
     assert "-M" not in argv
 
 
@@ -786,7 +879,7 @@ def test_databricks_pin_skipped_when_unconfigured(tmp_path, monkeypatch):
 
 
 def test_auth_screen_tab_actions_switch_focus_target():
-    auth_widgets = pytest.importorskip("deepagents_code.widgets.auth")
+    auth_widgets = pytest.importorskip("deepagents_code.tui.widgets.auth")
     screen = auth_widgets.AuthManagerScreen
     original = (
         screen.compose,
@@ -817,7 +910,7 @@ def test_agent_swap_resumes_previous_thread(tmp_path, monkeypatch):
     # can /clear to start over.
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     app_mod = pytest.importorskip("deepagents_code.app")
-    from deepagents_code.widgets.message_store import MessageType
+    from deepagents_code.tui.widgets.message_store import MessageType
     import asyncio
 
     cls = app_mod.DeepAgentsApp
@@ -825,11 +918,13 @@ def test_agent_swap_resumes_previous_thread(tmp_path, monkeypatch):
     try:
         calls = {}
 
-        async def fake_swap(self, agent_name):
+        async def fake_swap(self, agent_name, **kwargs):
             calls["swapped"] = agent_name
-            # The real swap clears the store and moves to a new thread.
-            self._lc_thread_id = "new-thread"
+            calls["resumed"] = kwargs["resume_thread_id"]
+            # Upstream resumes within the restart, before returning success.
+            self._lc_thread_id = kwargs["resume_thread_id"] or "new-thread"
             self._message_store = _FakeMessageStore([])
+            return True
 
         class _FakeMessage:
             def __init__(self, type_):
@@ -863,7 +958,7 @@ def test_agent_swap_resumes_previous_thread(tmp_path, monkeypatch):
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
         assert calls["resumed"] == "prev-thread"
         assert calls["notified"] is True
-        assert calls["spec"] == "databricks:databricks-gpt-5-4-mini"  # pin still applies
+        assert calls["spec"] == role_model("chief")  # pin still applies
     finally:
         cls._restart_server_for_agent_swap = original
 
@@ -874,7 +969,7 @@ def test_agent_swap_skips_resume_for_empty_thread(tmp_path, monkeypatch):
     # gating).
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     app_mod = pytest.importorskip("deepagents_code.app")
-    from deepagents_code.widgets.message_store import MessageType
+    from deepagents_code.tui.widgets.message_store import MessageType
     import asyncio
 
     cls = app_mod.DeepAgentsApp
@@ -882,8 +977,10 @@ def test_agent_swap_skips_resume_for_empty_thread(tmp_path, monkeypatch):
     try:
         calls = {}
 
-        async def fake_swap(self, agent_name):
+        async def fake_swap(self, agent_name, **kwargs):
             calls["swapped"] = agent_name
+            calls["resume_thread_id"] = kwargs["resume_thread_id"]
+            return True
 
         class _FakeMessage:
             type = MessageType.USER
@@ -907,6 +1004,7 @@ def test_agent_swap_skips_resume_for_empty_thread(tmp_path, monkeypatch):
         assert _boot.align_agent_switch_model() is True
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
         assert "resumed" not in calls
+        assert calls["resume_thread_id"] is None
         assert calls["spec"]  # pin alignment still applies
     finally:
         cls._restart_server_for_agent_swap = original
@@ -916,7 +1014,7 @@ def test_agent_swap_resume_disabled_by_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     monkeypatch.setenv("MANTA_SWAP_RESUME", "0")
     app_mod = pytest.importorskip("deepagents_code.app")
-    from deepagents_code.widgets.message_store import MessageType
+    from deepagents_code.tui.widgets.message_store import MessageType
     import asyncio
 
     cls = app_mod.DeepAgentsApp
@@ -924,8 +1022,10 @@ def test_agent_swap_resume_disabled_by_env(tmp_path, monkeypatch):
     try:
         calls = {}
 
-        async def fake_swap(self, agent_name):
+        async def fake_swap(self, agent_name, **kwargs):
             calls["swapped"] = agent_name
+            calls["resume_thread_id"] = kwargs["resume_thread_id"]
+            return True
 
         class _FakeMessage:
             type = MessageType.ASSISTANT
@@ -949,6 +1049,46 @@ def test_agent_swap_resume_disabled_by_env(tmp_path, monkeypatch):
         assert _boot.align_agent_switch_model() is True
         asyncio.run(cls._restart_server_for_agent_swap(_FakeApp(), "chief"))
         assert "resumed" not in calls
+        assert calls["resume_thread_id"] is None
+    finally:
+        cls._restart_server_for_agent_swap = original
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_agent_swap_preserves_explicit_transition_arguments(tmp_path, monkeypatch, success):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    app_mod = pytest.importorskip("deepagents_code.app")
+    import asyncio
+
+    cls = app_mod.DeepAgentsApp
+    original = cls.__dict__["_restart_server_for_agent_swap"]
+    calls = {}
+    payload = object()
+
+    async def fake_swap(self, agent_name, **kwargs):
+        calls["transition"] = kwargs
+        return success
+
+    class FakeApp:
+        _assistant_id = "chief"
+
+        async def _switch_model(self, spec, **kwargs):
+            calls["model"] = spec
+
+    try:
+        cls._restart_server_for_agent_swap = fake_swap
+        assert _boot.align_agent_switch_model() is True
+        result = asyncio.run(cls._restart_server_for_agent_swap(
+            FakeApp(), "chief", resume_thread_id="requested-thread",
+            preloaded_payload=payload, persist_default_agent=False,
+        ))
+        assert result is success
+        assert calls["transition"] == {
+            "resume_thread_id": "requested-thread",
+            "preloaded_payload": payload,
+            "persist_default_agent": False,
+        }
+        assert "model" not in calls
     finally:
         cls._restart_server_for_agent_swap = original
 
@@ -971,21 +1111,88 @@ def test_extend_recommended_models_adds_manta_lineup(tmp_path, monkeypatch):
     # Manta's configured endpoints + agent pins must join it so the default
     # view isn't just the user's recent picks (the "tiny subset" report).
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
-    ms = pytest.importorskip("deepagents_code.widgets.model_selector")
+    ms = pytest.importorskip("deepagents_code.tui.widgets.model_selector")
     original = ms._RECOMMENDED_MODELS
     try:
         assert _boot.extend_recommended_models() is True
         extended = ms._RECOMMENDED_MODELS
-        assert original <= extended  # upstream entries preserved
-        assert "databricks:databricks-gpt-oss-120b" in extended  # default
-        assert "databricks:databricks-claude-opus-4-8" in extended  # planning pin
-        assert "databricks:databricks-gpt-5-4-mini" in extended  # chief pin
+        assert original.items() <= extended.items()  # upstream labels preserved
+        assert role_model("orchestrator") in extended  # default
+        assert role_model("planning") in extended  # planning pin
+        assert role_model("chief") in extended  # chief pin
         # Idempotent re-application doesn't balloon the set.
         size = len(extended)
         assert _boot.extend_recommended_models() is True
         assert len(ms._RECOMMENDED_MODELS) == size
     finally:
         ms._RECOMMENDED_MODELS = original
+
+
+def test_model_picker_renders_and_filters_offline_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    ms = pytest.importorskip("deepagents_code.tui.widgets.model_selector")
+    import asyncio
+
+    from deepagents_code.model_catalog import CatalogProvider, ModelCatalog
+    from deepagents_code.model_config import ProviderAuthState
+    from textual.app import App
+    from textual.widgets import Static
+
+    default = role_model("orchestrator")
+    custom = "databricks:team-chat"
+    catalog = ModelCatalog(
+        models=[default, "anthropic:claude-opus-4-8", custom],
+        profiles={},
+        providers={
+            provider: CatalogProvider(state=ProviderAuthState.MANAGED)
+            for provider in ("databricks", "anthropic")
+        },
+    )
+
+    async def load_catalog(*_args):
+        return catalog
+
+    class Harness(App):
+        pass
+
+    original_recommended = ms._RECOMMENDED_MODELS
+    original_footer = ms.ModelSelectorScreen._update_footer
+    try:
+        assert _boot.extend_recommended_models() is True
+        assert _boot.rebrand_model_selector_footer() is True
+
+        async def render():
+            app = Harness()
+            async with app.run_test(size=(100, 40)) as pilot:
+                screen = ms.ModelSelectorScreen(
+                    current_model="databricks-gpt-oss-120b",
+                    current_provider="databricks",
+                    default_scope=None,
+                    include_recent_models=False,
+                    check_provider_requirements=False,
+                    catalog_loader=load_catalog,
+                )
+                await app.push_screen(screen)
+                await pilot.pause()
+                assert screen._loaded
+                assert default in dict(screen._filtered_models)
+                assert custom not in dict(screen._filtered_models)
+                footer = screen.query_one("#model-detail-footer", Static)
+                assert "Databricks AI Gateway endpoint" in str(footer.content)
+                await pilot.press("ctrl+r")
+                await pilot.pause()
+                assert custom in dict(screen._filtered_models)
+                await pilot.press("t", "e", "a", "m")
+                await pilot.pause()
+                # The upstream selector uses fuzzy matching; a service FQN
+                # may also match characters spread across the search term.
+                assert screen._filtered_models[0] == (custom, "databricks")
+                assert ("anthropic:claude-opus-4-8", "anthropic") not in screen._filtered_models
+
+        asyncio.run(render())
+    finally:
+        ms._RECOMMENDED_MODELS = original_recommended
+        ms.ModelSelectorScreen._update_footer = original_footer
 
 
 def test_session_cost_report_contents(tmp_path, monkeypatch):
@@ -1048,5 +1255,9 @@ def test_cost_command_intercepted(tmp_path, monkeypatch):
 def test_cost_command_registered_for_autocomplete():
     cr = pytest.importorskip("deepagents_code.command_registry")
     assert _boot.add_session_cost_command() is True
-    assert any(e.name == "/cost" for e in cr.SLASH_COMMANDS)
+    assert any(e.name == "/cost" for e in cr.get_slash_commands())
     assert "/cost" in cr.SIDE_EFFECT_FREE  # answers even while the agent is busy
+    assert "/cost" not in cr.QUEUE_BOUND
+    definitions = [e for e in cr.COMMANDS if e.name == "/cost"]
+    assert len(definitions) == 1
+    assert definitions[0].aliases == ("/spend",)

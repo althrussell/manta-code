@@ -1,11 +1,10 @@
 """Cost-aware model routing (ADR 0008, Phase 4).
 
-"Cheap-by-default, premium-when-it-matters." Manta's primary routing lever is the
-per-agent model pin (the planning/review agents pin a premium model, the SWE/
-orchestrator default to a cheap one — see :mod:`manta_code.agents.defaults`). This
-module adds an *optional, dynamic* second lever: a middleware that escalates a
-single model call to a premium endpoint when the upcoming step looks genuinely
-hard (a planning/architecture/debugging ask), then drops back to cheap.
+Manta's primary routing lever is the per-agent model pin, centralized in
+:mod:`manta_code.model_defaults`. This module adds an optional dynamic lever:
+a middleware that selects the planning model for a planning, architecture, or
+debugging step, then returns to the role model. Relative prices require known
+rates and are not inferred from role names.
 
 It is deliberately conservative and inert unless wired with a model resolver: the
 heuristic is a pure, unit-tested function, and if escalation can't resolve a
@@ -19,6 +18,8 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware
+
+from ..model_defaults import ROLE_TARGETS
 
 logger = logging.getLogger("manta.routing")
 
@@ -64,8 +65,14 @@ def _latest_human_text(request: Any) -> str:
     return ""
 
 
+def _explicit_runtime_model(request: Any) -> bool:
+    """A model chosen through /model takes precedence over role defaults."""
+    context = getattr(getattr(request, "runtime", None), "context", None)
+    return bool(context.get("model") if isinstance(context, dict) else getattr(context, "model", None))
+
+
 class ModelRoutingMiddleware(AgentMiddleware):
-    """Escalate to a premium model for hard steps, otherwise stay cheap.
+    """Select the planning model for hard steps, otherwise retain the role model.
 
     Args:
         resolve_model: callable mapping an endpoint name to a model object the
@@ -80,7 +87,7 @@ class ModelRoutingMiddleware(AgentMiddleware):
         self,
         *,
         resolve_model: Callable[[str], Any] | None = None,
-        premium_endpoint: str = "databricks-claude-opus-4-8",
+        premium_endpoint: str = ROLE_TARGETS["planning"],
         hints: frozenset[str] | None = None,
     ) -> None:
         super().__init__()
@@ -93,6 +100,8 @@ class ModelRoutingMiddleware(AgentMiddleware):
         return "Manta.Routing"
 
     def _route(self, request: Any) -> Any:
+        if _explicit_runtime_model(request):
+            return request
         if self._resolve_model is None:
             return request
         if not should_escalate(_latest_human_text(request), hints=self._hints):
@@ -120,10 +129,8 @@ class ModelPinMiddleware(AgentMiddleware):
     agent: deepagents keeps the session's launch model for the primary loop, so
     without this the planner/review profile would run on the orchestrator's model.
     This overrides the model per call (the same ``request.override(model=...)``
-    mechanism :class:`ModelRoutingMiddleware` uses), resolving the endpoint once
-    and caching it. Fully guarded — if the model can't be resolved it leaves the
-    request untouched, so a bad pin degrades to "use the session model" rather
-    than breaking the call.
+    mechanism :class:`ModelRoutingMiddleware` uses), resolving the target once
+    and caching it. An invalid explicit pin fails clearly before inference.
     """
 
     def __init__(
@@ -142,16 +149,21 @@ class ModelPinMiddleware(AgentMiddleware):
         return "Manta.ModelPin"
 
     def _pin(self, request: Any) -> Any:
+        if _explicit_runtime_model(request):
+            return request
         if not self._endpoint:
             return request
         try:
             if self._model is None:
                 self._model = self._resolve_model(self._endpoint)
             if self._model is None:
-                return request
-            return request.override(model=self._model)
-        except Exception:  # noqa: BLE001 - pin must never break a call
-            return request
+                raise ValueError("the model resolver returned no model")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot resolve pinned model {self._endpoint!r}: {exc}. "
+                "Correct the agent's model pin or select an available target."
+            ) from exc
+        return request.override(model=self._model)
 
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
         return handler(self._pin(request))
@@ -216,7 +228,7 @@ def databricks_model_resolver() -> Callable[[str], Any] | None:
 
 
 def default_routing_middleware(
-    premium_endpoint: str = "databricks-claude-opus-4-8",
+    premium_endpoint: str = ROLE_TARGETS["planning"],
 ) -> list[AgentMiddleware]:
     """Cost-aware routing middleware for the orchestrator (empty if unavailable)."""
     resolver = databricks_model_resolver()

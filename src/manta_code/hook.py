@@ -186,6 +186,9 @@ def build_orchestrator_middleware() -> list[Any]:
     orchestrator instance so a call is never double-counted in the ledger. Each
     piece is guarded so a missing module is simply skipped.
     """
+    import os
+
+    explicit_model = os.environ.get("MANTA_EXPLICIT_MODEL") == "1"
     middleware: list[Any] = []
     defn = _active_profile_def()
 
@@ -221,7 +224,7 @@ def build_orchestrator_middleware() -> list[Any]:
             from .middleware.routing import agent_model_pin_middleware
 
             mw = agent_model_pin_middleware(defn)
-            if mw is not None:
+            if mw is not None and not explicit_model:
                 middleware.append(mw)
         except Exception:  # noqa: BLE001
             pass
@@ -308,7 +311,8 @@ def build_orchestrator_middleware() -> list[Any]:
     try:
         from .middleware.routing import default_routing_middleware
 
-        middleware.extend(default_routing_middleware())
+        if not explicit_model:
+            middleware.extend(default_routing_middleware())
     except Exception:  # noqa: BLE001
         pass
     return middleware
@@ -404,10 +408,18 @@ def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         kwargs["subagents"] = merged or None
 
     orchestrator_mw = build_orchestrator_middleware()
-    if orchestrator_mw:
-        # Manta middleware runs first (outermost) so accounting/policy wrap
-        # everything below.
-        kwargs["middleware"] = [*orchestrator_mw, *list(kwargs.get("middleware") or ())]
+    upstream = list(kwargs.get("middleware") or ())
+    configurable = [mw for mw in upstream if type(mw).__name__ == "ConfigurableModelMiddleware"]
+    other = [mw for mw in upstream if mw not in configurable]
+    economy = [mw for mw in orchestrator_mw if type(mw).__name__ == "TokenEconomyMiddleware"]
+    control = [mw for mw in orchestrator_mw if mw not in economy]
+    # Account only after runtime overrides, explicit pins and optional routing
+    # have selected the model that will actually receive the request.
+    # Protocol restoration also precedes accounting so receipts describe the
+    # dialect used for resumed calls.
+    from .middleware.session_policy import SessionPolicyMiddleware
+
+    kwargs["middleware"] = [*configurable, *control, *other, SessionPolicyMiddleware(), *economy]
 
     _maybe_add_delegation_policy(kwargs)
 

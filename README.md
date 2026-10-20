@@ -6,8 +6,8 @@ token — and lets you hand long-running work to named, *enforced* agents you
 can steer mid-flight, coordinated by a chief of staff.
 
 Databricks is Manta's home and power source — models brokered through
-gateway-governed serving endpoints, Unity Catalog and Jobs tools bounded by
-your permissions — but never a cage: point it at any stack, configure any
+Unity Gateway model services or serving endpoints, Unity Catalog and Jobs tools
+bounded by your permissions — but never a cage: point it at any stack, configure any
 provider, and it stays just as sharp. ([VISION.md](VISION.md))
 
 ```text
@@ -21,13 +21,13 @@ provider, and it stays just as sharp. ([VISION.md](VISION.md))
 The incumbents proved the interactive coding-agent UX. Manta bets on the three
 things they treat as afterthoughts:
 
-1. **The token economy is the product.** Routine turns run on a cheap model;
-   specialists escalate only when the role warrants it. Every call lands in a
+1. **The token economy is the product.** Roles select qualified model services;
+   specialists escalate when the role warrants it. Every call lands in a
    local ledger with cache-hit and scaffolding-vs-work splits, an advisor
    recommends model switches based on how the session is *actually going*, and
-   `manta receipts` shows what cheap-by-default saved you — with the honest
+   `manta receipts` estimates savings when prices are known, with the
    counterfactual labelled as such. In-session, `/cost` shows the
-   conversation's own spend, per-call costs, and the daily budget.
+   conversation's known spend, price completeness, and the daily budget.
 2. **Real agents, real boundaries.** `planning`, `swe`, `review`, and `chief`
    (plus any agent you create) have model pins, tool allow/deny lists,
    per-path filesystem rules, approval gates, budgets, and durable memory —
@@ -42,34 +42,55 @@ things they treat as afterthoughts:
 
 And underneath: **reliability as a feature**. Manta enriches the upstream
 [`deepagents-code`](https://pypi.org/project/deepagents-code/) runtime through
-a contract-tested seam (21 verified patch targets); if anything moves, Manta
+a contract-tested seam (28 verified patch targets); if anything moves, Manta
 falls back to a clean vanilla launch and *says so*. `manta doctor --probe`
 even live-tests every pinned model in the real agent loop before you bet a
 session on it.
 
 ## Install
 
-Requires Python 3.12+. For Databricks features: the
-[Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install)
-and a workspace login.
+**v0.3.0 requires Python 3.12+** and is distributed through
+[GitHub Releases](https://github.com/althrussell/manta-code/releases).
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
+then install the tagged release with its qualified dependency constraints:
 
 ```bash
-# Recommended: uv installs `manta` as an isolated tool on your PATH
-uv tool install "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.2.0"
-
-databricks auth login     # once — or skip it and use your own provider keys
-manta doctor              # everything green?
+uv python install 3.12
+uv tool install --python 3.12 \
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+uv tool update-shell
+manta --version
 ```
 
-Upgrade later with `uv tool upgrade manta-code`. Prefer pip? Inside a
-virtualenv: `pip install "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.2.0"`
-(a bare `pip install` fails on PEP 668 "externally managed" system Pythons —
-another reason uv is the recommended path).
+Open a new terminal if `manta` is not yet on your PATH. For Databricks, install
+the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install)
+and log in to the workspace you intend to use:
 
-No Databricks? Manta still runs: configure Anthropic/OpenAI/Google keys in
-`/auth` and the Databricks features simply stay dormant. Want to confirm your
-workspace's models behave before betting a session on them?
-`manta doctor --probe` live-tests every pinned model (~a cent per model).
+```bash
+databricks auth login --host https://YOUR-WORKSPACE --profile my-workspace
+manta -p my-workspace doctor
+manta -p my-workspace
+```
+
+To upgrade an older tagged install, explicitly select the new tag and replace
+the tool environment:
+
+```bash
+uv tool install --force --upgrade --python 3.12 \
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+```
+
+A tag-pinned installation stays on that tag when you run `uv tool upgrade`.
+Existing user model pins and defaults are preserved; see the
+[installation and upgrade guide](docs/16-installation-and-upgrades.md) for pip,
+release assets, migration, and troubleshooting, and the [changelog](CHANGELOG.md)
+for release notes.
+
+No Databricks? Configure your other provider keys in `/auth`. To qualify the
+selected workspace models, run `manta -p my-workspace doctor --probe`; it makes
+two inference requests per distinct configured target and incurs model charges.
 
 ## Sixty seconds
 
@@ -114,7 +135,7 @@ Everything below happens inline, without leaving the conversation.
 | --- | --- |
 | `/cost` (or `/spend`) | **This session's spend**: per-agent totals, the most recent model calls with per-call cost, today's total vs your daily budget. Works even while the agent is busy. |
 | `/agents` | Switch agents — your conversation follows you, the new agent's model pin is applied truthfully, `Ctrl+S` sets your default. |
-| `/model` | Opens on Manta's curated lineup (the loop-proven pins + your configured endpoints); `Ctrl+R` toggles **all** workspace models. |
+| `/model` | Opens on Manta's role models and configured targets; `Ctrl+R` includes discovered Unity services and legacy chat endpoints for the active workspace. |
 | `/auth` | Databricks workspace picker on top, provider API keys below; `Tab` moves between the sections. |
 
 Plus the runtime's own: `/clear` (fresh thread), `/threads` (resume any
@@ -131,17 +152,18 @@ you're burning premium tokens on routine work or a cheap model keeps failing.
 
 | Agent | Model (pin) | Boundary |
 | --- | --- | --- |
-| *(orchestrator)* | `databricks-gpt-oss-120b` | cheap by default |
-| `chief` | `databricks-gpt-5-4-mini` | read-only; cheap coordinator: delegates, tracks, collects |
-| `planning` | `databricks-claude-opus-4-8` | read-only; plans, never edits |
-| `swe` | `databricks-gpt-5-4` | read-write; approval-gated writes/exec |
-| `review` | `databricks-claude-sonnet-4-5` | read-only; a different vendor than the coder, on purpose |
+| *(orchestrator)* | `system.ai.gpt-6-luna` | general coordination |
+| `chief` | `system.ai.gpt-6-luna` | read-only; delegates, tracks, collects |
+| `planning` | `system.ai.claude-opus-5-5` | read-only; plans, never edits |
+| `swe` | `system.ai.gpt-6-1-sol` | read-write; approval-gated writes/exec |
+| `review` | `system.ai.claude-sonnet-5-5` | read-only; a different vendor than the coder, on purpose |
 
 Create your own with `manta agents create <name> --describe "..."` — model
 pin, tools, filesystem rules, ask-gates, budget, and memory all live in
 `~/.manta/agents/<name>/`, the single source of truth. Switch any agent's
-model live with `manta agents set-model` (validated against your workspace's
-real endpoints). Agents remember: they save durable learnings with
+model for the next session or `/restart` with `manta agents set-model` (verified
+against your workspace's Unity services and legacy endpoints). Agents remember:
+they save durable learnings with
 `manta_remember` and recall them next session.
 
 ## Command reference
@@ -153,7 +175,7 @@ manta doctor [--probe]      # preflight; --probe live-tests every pinned model
 manta init                  # write .manta/config.toml
 
 manta agents                # list agents + enforcement   (show/create/edit/delete/sync/import)
-manta agents set-model <name> <model>      # live re-pin, workspace-validated
+manta agents set-model <name> <model>      # next session or /restart; workspace-validated
 manta agents memory <name>  # inspect an agent's durable memory
 
 manta task submit <agent> "..." [--allow-asks]   # detached background task
@@ -163,7 +185,7 @@ manta status                # chief-of-staff pane: tasks, events, audit, spend
 manta cost [--by agent|model|task] [--breakdown] [--advise]   # (in-session: /cost)
 manta budget | manta watch  # spend windows, live refresh
 manta receipts              # spend vs all-premium counterfactual + advisor stats
-manta gateway               # the AI Gateway surface: providers + governance per endpoint
+manta gateway               # Unity services and legacy endpoint gateway metadata
 ```
 
 Python, with the same enforcement:
@@ -187,9 +209,16 @@ CI recipe — the read-only `review` agent on every PR:
 
 ```toml
 [interactive]
-default_endpoint = "databricks-gpt-oss-120b"   # the cheap session default
-extra_endpoints  = ["databricks-claude-opus-4-8", "databricks-gpt-5-4",
-                    "databricks-gpt-5-4-mini", "databricks-claude-sonnet-4-5"]
+default_endpoint = "system.ai.gpt-6-luna"
+extra_endpoints = ["system.ai.claude-opus-5-5", "system.ai.gpt-6-1-sol",
+                   "system.ai.claude-sonnet-5-5"]
+
+[databricks]
+discovery_schemas = ["system.ai"]
+service_api = "auto"
+
+[databricks.request_tags]
+application = "manta-code"
 
 [budget]
 daily_max_usd = 25.0        # optional: pause-for-approval at the daily cap
@@ -198,6 +227,27 @@ daily_max_usd = 25.0        # optional: pause-for-approval at the daily cap
 input  = 2.0                # USD per 1M tokens
 output = 8.0
 ```
+
+Databricks targets can also be exact Unity Catalog model-service names:
+
+```bash
+manta -M databricks:system.ai.gpt-6-1-sol
+```
+
+Exact service names use the workspace's Unity Gateway. Discovery merges Unity
+services and legacy chat endpoints independently, with profile-scoped caching.
+Automatic policy prefers supported Responses, uses Chat for Chat-only or exactly qualified services,
+and supports explicit native OpenAI routes. New services can be selected without
+adding their names to Manta. The shared policy applies to sessions, delegated
+agents, routing, and background tasks.
+
+Existing user pins, defaults, and explicit `-M` selections take precedence. Only
+Manta-owned inventory/defaults migrate; resumed threads retain their effective
+protocol. Incompatible switches with opaque reasoning/tool state require a fresh
+thread. Unknown service prices remain unknown and dollar reports show coverage.
+See the [configuration reference](docs/10-config-schema.md),
+[integration guide](docs/13-deepagents-integration.md), and
+[qualification results](docs/15-unity-gateway-qualification.md).
 
 Env toggles: `MANTA_AGENT_ADDRESSING=0`, `MANTA_ADVICE=0`,
 `MANTA_SWAP_RESUME=0`, `MANTA_NOTIFY=0`, `MANTA_HOME=<dir>`.
@@ -212,6 +262,12 @@ to a vanilla launch with a visible warning. Everything is local-first:
 agents, memory, the usage ledger, tasks, and audit events live in
 `~/.manta/` as SQLite/TOML — the enterprise fleet layer (ADR 0009) bolts on
 later without a rewrite.
+
+The runtime pins `deepagents-code==0.1.86` with `deepagents==0.7.28` and
+requires Python 3.12+. Databricks models use the official
+`langchain-openai` adapter with refreshable Databricks SDK authentication.
+The Databricks LangChain/OpenAI bridge packages are no longer dependencies;
+their current MCP requirements conflict with this Deep Agents runtime.
 
 ```text
 src/manta_code/

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from manta_code.agents import usage as U
 
 
@@ -38,7 +40,7 @@ def test_breakdown_without_cache_detail():
 
 
 def test_cost_prices_buckets_separately():
-    price = U.Price(input=15.0, output=75.0)  # cache_read=1.5, cache_write=18.75
+    price = U.Price(input=15.0, output=75.0, cache_read=1.5, cache_creation=18.75)
     bd = U.TokenBreakdown(
         input_tokens=1_000_000,
         output_tokens=1_000_000,
@@ -236,3 +238,142 @@ def test_effective_pricing_skips_malformed_entries(tmp_path, monkeypatch):
         assert U.price_for("databricks-claude-opus-4-8") is not None
     finally:
         U.clear_pricing_cache()
+
+
+def test_services_require_exact_prices_and_provenance():
+    service = "system.ai.claude-opus-4-8"
+    assert U.price_for(service) is None
+    assert U.price_for("databricks:" + service) is None
+    assert U.price_for("team.models.gpt-5-fallback") is None
+    explicit = {
+        "claude-opus": U.Price(99, 999),
+        service: U.Price(2, 7),
+        "backend-model-v1": U.Price(4, 12),
+    }
+    match = U.pricing_for("databricks:" + service, explicit, observed_backend="backend-model-v1")
+    assert match.price == U.Price(2, 7)
+    assert match.source == "override:exact:system.ai.claude-opus-4-8"
+    assert match.version
+    assert U.pricing_for("team.models.router", explicit, observed_backend="backend-model-v1").price == U.Price(4, 12)
+    assert U.pricing_for("team.models.router", explicit, observed_backend="claude-opus-new").price is None
+    # A deliberately empty override table must not silently restore defaults.
+    assert U.price_for("databricks-gpt-5-4", {}) is None
+
+
+def test_config_service_rates_are_exact_and_fingerprinted(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[pricing."system.ai.private-gpt-5"]\ninput = 2.0\noutput = 8.0\n', encoding="utf-8"
+    )
+    U.clear_pricing_cache()
+    try:
+        match = U.pricing_for("system.ai.private-gpt-5")
+        assert match.price == U.Price(2, 8)
+        assert match.source == "config:exact:system.ai.private-gpt-5"
+        assert len(match.version) == 16
+        assert U.price_for("system.ai.private-gpt-5-fallback") is None
+    finally:
+        U.clear_pricing_cache()
+
+
+def test_missing_usage_and_unknown_cache_rates_do_not_become_zero_cost():
+    assert U.extract_breakdown(None).usage_complete is False
+    assert U.extract_breakdown({}).cost_usd(U.Price(1, 2)) is None
+    assert U.extract_breakdown({"input_tokens": 12}).cost_usd(U.Price(1, 2)) is None
+    assert U.extract_breakdown({"input_tokens": -1, "output_tokens": 3}).usage_complete is False
+    assert U.extract_breakdown({"input_tokens": True, "output_tokens": 3}).usage_complete is False
+    cached = U.extract_breakdown({
+        "input_tokens": 100, "output_tokens": 20,
+        "input_token_details": {"cache_read": 50},
+    })
+    # Cache rates cannot be derived from an unrelated vendor's economics.
+    assert cached.cost_usd(U.Price(1, 2)) is None
+    assert cached.cost_usd(U.Price(1, 2, cache_read=0.2)) == (50 + 10 + 40) / 1_000_000
+    assert U.extract_breakdown({"input_tokens": 0, "output_tokens": 0}).cost_usd(U.Price(1, 2)) == 0
+
+
+def test_reasoning_tokens_are_a_subset_of_output():
+    detail = U.extract_breakdown({
+        "input_tokens": 100, "output_tokens": 80,
+        "output_token_details": {"reasoning": 60},
+    })
+    assert detail.reasoning_tokens == 60
+    assert detail.total_tokens == 180
+    assert detail.cost_usd(U.Price(1, 2)) == 260 / 1_000_000
+    assert U.extract_breakdown({
+        "input_tokens": 100, "output_tokens": 80,
+        "output_token_details": {"reasoning": 90},
+    }).usage_complete is False
+
+
+def test_ledger_migration_preserves_historical_data_and_unknown_completeness(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(U._SCHEMA)
+    conn.execute(
+        "INSERT INTO usage (ts, agent, model, input_tokens, output_tokens, cost_usd) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (time.time(), "old", "legacy-endpoint", 100, 20, 0.005),
+    )
+    conn.commit()
+    conn.close()
+    # Opening twice proves the additive migration is idempotent.
+    U.connect(db).close()
+    conn = U.connect(db)
+    row = conn.execute("SELECT * FROM usage").fetchone()
+    conn.close()
+    assert (row["model"], row["input_tokens"], row["cost_usd"]) == ("legacy-endpoint", 100, 0.005)
+    assert row["usage_complete"] is None
+    assert row["observed_backend"] is None
+    total = U.totals(path=db)
+    assert total.cost_usd == 0.005
+    assert total.priced_calls == 1
+    assert total.cost_known is False
+    assert total.missing_usage_calls == 1
+
+
+def test_ledger_provenance_roundtrip_and_partial_totals(tmp_path):
+    db = tmp_path / "usage.db"
+    U.record_usage(U.UsageRecord(
+        model="system.ai.private", requested_target="system.ai.private",
+        requested_service="system.ai.private", observed_backend="backend-v1",
+        surface="unified", protocol="responses", request_id="req-1",
+        usage_complete=True, cache_available=False, reasoning_tokens=20,
+        pricing_source="config:exact:system.ai.private", pricing_version="v1",
+        input_tokens=10, output_tokens=30, cost_usd=0.05, thread_id="t-1",
+    ), path=db)
+    U.record_usage(U.UsageRecord(
+        model="system.ai.other", usage_complete=False, cost_usd=None, thread_id="t-1",
+    ), path=db)
+    conn = U.connect(db)
+    row = conn.execute("SELECT * FROM usage ORDER BY id LIMIT 1").fetchone()
+    conn.close()
+    assert row["observed_backend"] == "backend-v1"
+    assert row["request_id"] == "req-1"
+    assert row["reasoning_tokens"] == 20
+    assert row["pricing_source"] == "config:exact:system.ai.private"
+    total = U.totals(path=db)
+    assert total.cost_usd == 0.05
+    assert total.cost_known is False
+    assert total.priced_calls == 1 and total.unknown_price_calls == 1
+    assert total.missing_usage_calls == 1
+    assert "1/2 calls priced" in total.completeness_label
+    assert U.thread_totals("t-1", path=db)[0].missing_usage_calls == 1
+    assert U.today_totals(path=db).cost_known is False
+    assert U.receipts(path=db).estimated_savings_usd is None
+
+
+def test_daily_budget_cache_respects_ledger_identity_and_record_day(tmp_path):
+    first, second = tmp_path / "one.db", tmp_path / "two.db"
+    U.record_usage(U.UsageRecord(cost_usd=0.1), path=first)
+    U.record_usage(U.UsageRecord(cost_usd=0.8), path=second)
+    assert U.today_total_usd(path=first) == 0.1
+    assert U.today_total_usd(path=second) == 0.8
+    U.record_usage(U.UsageRecord(cost_usd=100, ts=time.time() - 86400 * 2), path=second)
+    assert U.today_total_usd(path=second) == 0.8
+    U.record_usage(U.UsageRecord(cost_usd=0.2), path=first)
+    assert U.today_total_usd(path=second) == 0.8
+    assert U.today_total_usd(path=first) == pytest.approx(0.3)

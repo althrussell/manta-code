@@ -1,8 +1,8 @@
 """Run the evals: ``python -m evals`` (canned) or ``python -m evals --live``.
 
 Default mode compares the premium-only baseline against Manta's cost-aware
-routing on the canned benchmark and exits non-zero if the candidate fails to
-win (holds quality at lower-or-equal cost) — the CI tripwire.
+routing on the canned benchmark. Known prices qualify a quality-and-cost win;
+unpriced services run as a quality-only demo and make no savings claim.
 
 ``--live`` (ADR 0010 Phase D) runs the benchmark through the real runtime
 (``manta run`` against the live workspace) and reports graded quality plus
@@ -24,7 +24,7 @@ def _run_canned() -> int:
     candidate = run_suite(cost_aware_solver(), config_name="cost-aware")
     cmp = compare(baseline, candidate)
     print(render_comparison(cmp))
-    return 0 if cmp.wins else 1
+    return 0 if (cmp.wins if cmp.cost_delta is not None else cmp.quality_ok) else 1
 
 
 def _run_live(task_ids: list[str] | None, timeout: int, max_turns: int) -> int:
@@ -45,14 +45,17 @@ def _run_live(task_ids: list[str] | None, timeout: int, max_turns: int) -> int:
     )
     print(f"Live eval — {len(suite.results)} task(s) through the real runtime\n")
     for r in suite.results:
+        cost = f"${r.cost_usd:.4f}" if r.cost_usd is not None else "cost unknown"
         print(
             f"  {r.task_id:<18} score={r.score:.2f}  "
-            f"${r.cost_usd:.4f}  {r.tokens} tok  [{r.model}]"
+            f"{cost}  {r.tokens} tok  [{r.model}]"
         )
         if r.notes:
             print(f"    {r.notes}")
+    total_cost = suite.total_cost
+    total = f"${total_cost:.4f}" if total_cost is not None else f"unknown (known ${suite.known_cost:.4f}; {suite.priced_tasks}/{len(suite.results)} tasks priced)"
     print(
-        f"\nQuality {suite.quality:.2f}  •  total ${suite.total_cost:.4f}  "
+        f"\nQuality {suite.quality:.2f}  •  total {total}  "
         f"•  {suite.total_tokens} tokens (real ledger figures)"
     )
     return 0

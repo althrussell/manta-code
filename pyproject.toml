@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel>=0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "manta-code"
-version = "0.2.0"
+version = "0.3.0"
 description = "Databricks-preconfigured launcher for the deepagents-code coding agent"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<4"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Al Russell" }]
@@ -18,15 +18,16 @@ classifiers = [
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-  "typer>=0.12",
-  "rich>=13.7",
-  "pydantic>=2.7",
-  "typing-extensions>=4.12",
+  "typer>=0.27.3",
+  "rich>=15.0.0",
+  "pydantic>=2.13.5",
+  "typing-extensions>=4.16.0",
 ]
 
 [project.urls]
@@ -36,9 +37,9 @@ Issues = "https://github.com/althrussell/manta-code/issues"
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.0",
-  "ruff>=0.5",
-  "mypy>=1.10",
+  "pytest>=9.1.1",
+  "ruff>=0.17.1",
+  "mypy>=2.4.0",
 ]
 agent = [
   # Interactive coding-agent TUI (the `manta` runtime surface). Manta launches
@@ -49,16 +50,19 @@ agent = [
   # (deepagents_code.agent.create_deep_agent, deepagents._models.resolve_model).
   # An upstream bump can move those symbols, so we pin exact versions and guard
   # with `manta doctor` + tests/test_reliability.py. Bump deliberately, together.
-  "deepagents-code==0.1.7",
-  "deepagents==0.6.7",
-  # Databricks model + auth: ChatDatabricks is wired into deepagents-code via a
-  # `class_path` provider in ~/.deepagents/config.toml; the SDK resolves the
-  # active profile from DATABRICKS_CONFIG_PROFILE.
-  "databricks-langchain>=0.4",
-  "databricks-sdk>=0.40",
+  "deepagents-code==0.1.86",
+  "deepagents==0.7.28",
+  # OpenAI-compatible inference with request-time Databricks unified auth.
+  # Keep the stable Manta class_path provider for both serving endpoints and
+  # Unity AI Gateway model-service names. Databricks-LangChain currently pulls
+  # MCP 1, which conflicts with the latest TUI's MCP 2 requirement.
+  "langchain-openai>=1.7.2",
+  "openai>=3.31.0",
+  "httpx>=0.28.1",
+  "databricks-sdk>=0.154.0",
   # Used by the launcher to safely merge the Databricks provider into the
   # user's deepagents-code config.toml (tomllib reads, tomli-w writes).
-  "tomli-w>=1.0",
+  "tomli-w>=1.2.0",
 ]
 
 [project.scripts]
@@ -69,7 +73,11 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
+
+[tool.ruff.lint]
+# Keep the established lint contract explicit as Ruff expands its defaults.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

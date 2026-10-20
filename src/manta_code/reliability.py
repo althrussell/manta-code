@@ -48,6 +48,21 @@ class PatchTarget:
 #: the modules referenced in each ``purpose``.
 PATCH_TARGETS: tuple[PatchTarget, ...] = (
     PatchTarget(
+        module="langchain_openai.chat_models.base",
+        attribute="BaseChatOpenAI._create_chat_result",
+        purpose="capture Unity Chat tool and content signatures before upstream normalization",
+    ),
+    PatchTarget(
+        module="langchain_openai.chat_models.base",
+        attribute="BaseChatOpenAI._convert_chunk_to_generation_chunk",
+        purpose="capture Unity Chat stream signatures before upstream normalization",
+    ),
+    PatchTarget(
+        module="langchain_openai.chat_models.base",
+        attribute="_convert_responses_chunk_to_generation_chunk",
+        purpose="context-scoped preservation of Unity function-call encrypted continuation state",
+    ),
+    PatchTarget(
         module="deepagents_code.agent",
         attribute="create_deep_agent",
         purpose="build hook (manta_code.hook) injects agents/middleware/store/tools",
@@ -61,6 +76,16 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         module="deepagents._models",
         attribute="resolve_model",
         purpose="subagent provider:model resolver (manta_code.databricks_chat)",
+    ),
+    PatchTarget(
+        module="deepagents_code.config",
+        attribute="create_model",
+        purpose="explicit constructor-option provenance for shared Databricks target policy",
+    ),
+    PatchTarget(
+        module="deepagents_code.config",
+        attribute="_create_model_from_class",
+        purpose="class-path construction provenance, including first import of Databricks adapter",
     ),
     PatchTarget(
         module="deepagents_code.config",
@@ -80,38 +105,38 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         purpose="model discovery wrapped Databricks-first by manta_code._boot",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.auth",
+        module="deepagents_code.model_catalog",
+        attribute="get_available_models",
+        purpose="model catalog's imported discovery function wrapped by manta_code._boot",
+    ),
+    PatchTarget(
+        module="deepagents_code.tui.widgets.auth",
         attribute="AuthManagerScreen.compose",
         purpose="/auth screen recomposed (workspace picker + provider keys)",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.auth",
+        module="deepagents_code.tui.widgets.auth",
         attribute="AuthManagerScreen._build_options_with_warning",
         purpose="upstream provider-key list reused by Manta's /auth compose",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.auth",
-        attribute="AuthPromptScreen",
-        purpose="upstream API-key prompt pushed from Manta's /auth screen",
+        module="deepagents_code.tui.widgets.auth",
+        attribute="AuthManagerScreen.on_option_list_option_selected",
+        purpose="upstream auth provider/OAuth handling retained by Manta's /auth screen",
     ),
     PatchTarget(
-        module="deepagents_code.model_config",
-        attribute="get_credential_env_var",
-        purpose="provider env-var lookup used by Manta's /auth screen",
-    ),
-    PatchTarget(
-        module="deepagents_code.widgets.model_selector",
+        module="deepagents_code.tui.widgets.model_selector",
         attribute="ModelSelectorScreen._update_footer",
         purpose="/model footer wrapped for profile-less Databricks endpoints",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.model_selector",
+        module="deepagents_code.tui.widgets.model_selector",
         attribute="_RECOMMENDED_MODELS",
         purpose="/model default view extended with Manta's curated endpoints",
         kind="attr",
     ),
     PatchTarget(
-        module="deepagents_code.server",
+        module="deepagents_code.client.launch.server",
         attribute="_build_server_cmd",
         purpose="server cmd wrapped to add --allow-blocking (Databricks auth)",
     ),
@@ -131,7 +156,7 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         purpose="upstream thread resume reused for conversation continuity on /agents swap",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.message_store",
+        module="deepagents_code.tui.widgets.message_store",
         attribute="MessageType",
         purpose="agent-output gating for swap continuity",
         kind="attr",
@@ -143,17 +168,28 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
     ),
     PatchTarget(
         module="deepagents_code.command_registry",
-        attribute="SLASH_COMMANDS",
+        attribute="COMMANDS",
         purpose="/cost autocomplete entry appended",
         kind="attr",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.autocomplete",
+        module="deepagents_code.command_registry",
+        attribute="SlashCommand",
+        purpose="/cost command definition",
+    ),
+    PatchTarget(
+        module="deepagents_code.command_registry",
+        attribute="BypassTier.SIDE_EFFECT_FREE",
+        purpose="/cost remains available while the model is busy",
+        kind="attr",
+    ),
+    PatchTarget(
+        module="deepagents_code.tui.widgets.autocomplete",
         attribute="FuzzyFileController._get_fuzzy_suggestions",
         purpose="@ completion extended with Manta agent names",
     ),
     PatchTarget(
-        module="deepagents_code.widgets.autocomplete",
+        module="deepagents_code.tui.widgets.autocomplete",
         attribute="FuzzyFileController.on_text_changed",
         purpose="@ completion position check for agent addressing",
     ),

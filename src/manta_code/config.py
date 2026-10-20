@@ -7,30 +7,31 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .model_defaults import ROLE_TARGETS, extra_role_targets
 
-DEFAULT_CONFIG_TEXT = """\
+
+DEFAULT_CONFIG_TEXT = (
+    """\
 # Manta launches deepagents-code's interactive TUI preconfigured for Databricks.
-# `provider` is fixed to databricks; Manta wires ChatDatabricks into
+# Manta wires its SDK-authenticated OpenAI adapter into
 # deepagents-code via a class_path provider in ~/.deepagents/config.toml.
 [runtime]
 provider = "databricks"
 
-# `default_endpoint` is the Databricks Model Serving / Foundation Model API
-# endpoint that `manta` launches with (passed as `databricks:<endpoint>`).
+# `default_endpoint` is a Databricks serving endpoint or exact three-part Unity
+# model-service name (passed as `databricks:<target>`).
 # `extra_endpoints` are also registered in deepagents-code's `/model` switcher
 # so you can switch between them in-session.
 # The default is the orchestration model; `extra_endpoints` includes the models
 # Manta's planning/swe/review agents use (see manta_code.agents.defaults) so they
 # are all available in deepagents-code's `/model` switcher.
 [interactive]
-default_endpoint = "databricks-gpt-oss-120b"
-extra_endpoints = [
-    "databricks-claude-opus-4-8",
-    "databricks-gpt-5-4",
-    "databricks-gpt-5-4-mini",
-    "databricks-claude-sonnet-4-5",
-]
 """
+    + f'default_endpoint = "{ROLE_TARGETS["orchestrator"]}"\n'
+    + "extra_endpoints = [\n"
+    + "".join(f'    "{target}",\n' for target in extra_role_targets())
+    + "]\n"
+)
 
 
 class RuntimeConfig(BaseModel):
@@ -38,14 +39,9 @@ class RuntimeConfig(BaseModel):
 
 
 class InteractiveConfig(BaseModel):
-    default_endpoint: str = "databricks-gpt-oss-120b"
+    default_endpoint: str = ROLE_TARGETS["orchestrator"]
     extra_endpoints: list[str] = Field(
-        default_factory=lambda: [
-            "databricks-claude-opus-4-8",
-            "databricks-gpt-5-4",
-            "databricks-gpt-5-4-mini",
-            "databricks-claude-sonnet-4-5",
-        ]
+        default_factory=extra_role_targets
     )
 
 
@@ -56,12 +52,26 @@ class BudgetConfig(BaseModel):
     daily_max_usd: float | None = None
 
 
+class DatabricksConfig(BaseModel):
+    """Nonsecret discovery and inference policy, shared by all model paths."""
+
+    discovery_schemas: list[str] = Field(default_factory=lambda: ["system.ai"])
+    service_api: str = "auto"
+    params: dict[str, Any] = Field(default_factory=dict)
+    targets: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    request_tags: dict[str, str] = Field(default_factory=dict)
+    discovery_timeout_seconds: float = Field(default=4.0, gt=0, le=30)
+    discovery_cache_seconds: float = Field(default=120.0, ge=0, le=3600)
+
+
 class MantaConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     interactive: InteractiveConfig = Field(default_factory=InteractiveConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    databricks: DatabricksConfig = Field(default_factory=DatabricksConfig)
     #: Per-model pricing overrides (USD / 1M tokens), merged over Manta's
-    #: built-in table — keys are substring-matched against model names, e.g.::
+    #: built-in table. Service keys are exact FQNs; legacy endpoint keys retain
+    #: substring matching. Cache rates are optional and never vendor-derived.::
     #:
     #:     [pricing."my-finetune"]
     #:     input = 2.0
@@ -72,7 +82,7 @@ class MantaConfig(BaseModel):
 
 
 def interactive_endpoints(cfg: MantaConfig) -> list[str]:
-    """Return the deduped set of Databricks endpoints to register with the TUI.
+    """Return the deduped set of Databricks targets to register with the TUI.
 
     The default endpoint is listed first (it is what ``manta`` launches with),
     followed by every distinct extra endpoint so they appear in deepagents-code's

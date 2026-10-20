@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Literal, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import __version__
@@ -17,6 +18,7 @@ from .config import (
     load_config,
     project_manta_dir,
 )
+from .installation import runtime_install_command
 
 app = typer.Typer(
     help="Manta Code — Databricks-preconfigured launcher for the deepagents-code coding agent",
@@ -98,11 +100,21 @@ def main_entry() -> None:
     _launch_interactive(profile=profile, passthrough=passthrough or [])
 
 
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     profile: Optional[str] = typer.Option(
         None, "-p", "--profile", help="Databricks config profile (default: env or default profile)"
+    ),
+    version: bool = typer.Option(
+        False, "--version", callback=_show_version, is_eager=True,
+        help="Print the Manta version and exit.",
     ),
 ) -> None:
     """Manta Code. Run with no subcommand to launch the interactive coding agent.
@@ -119,19 +131,22 @@ def main(
 
 @contextmanager
 def _databricks_profile_env(profile: Optional[str]) -> Iterator[None]:
-    """Temporarily set ``DATABRICKS_CONFIG_PROFILE`` for SDK-backed checks."""
+    """Temporarily select the same profile for Manta and SDK-backed checks."""
     if not profile:
         yield
         return
-    previous = os.environ.get("DATABRICKS_CONFIG_PROFILE")
-    os.environ["DATABRICKS_CONFIG_PROFILE"] = profile
+    variables = ("MANTA_PROFILE", "DATABRICKS_CONFIG_PROFILE")
+    previous = {key: os.environ.get(key) for key in variables}
+    for key in variables:
+        os.environ[key] = profile
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop("DATABRICKS_CONFIG_PROFILE", None)
-        else:
-            os.environ["DATABRICKS_CONFIG_PROFILE"] = previous
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _launch_interactive(*, profile: Optional[str], passthrough: list[str]) -> None:
@@ -141,7 +156,7 @@ def _launch_interactive(*, profile: Optional[str], passthrough: list[str]) -> No
     if find_spec("deepagents_code") is None:
         console.print(
             "[red]The interactive runtime (deepagents-code) is not installed.[/red]\n"
-            "Install it with: [bold]pip install -e '.[agent]'[/bold]"
+            f"Install it with: [bold]{escape(runtime_install_command())}[/bold]"
         )
         raise typer.Exit(code=1)
 
@@ -157,33 +172,29 @@ def _launch_interactive(*, profile: Optional[str], passthrough: list[str]) -> No
             "models and tools.[/dim]"
         )
     try:
+        inventory = dcode._target_inventory(profile, passthrough) if configured else None
         dcode.launch(
             profile=profile,
             default_endpoint=cfg.interactive.default_endpoint if configured else None,
-            endpoints=_resolve_endpoints(cfg, profile) if configured else [],
+            endpoints=_resolve_endpoints(cfg, profile, inventory=inventory) if configured else [],
             passthrough=passthrough,
+            inventory=inventory,
         )
     except dcode.LauncherError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
 
-def _resolve_endpoints(cfg: MantaConfig, profile: Optional[str]) -> list[str]:
-    """Merge configured endpoints with chat endpoints discovered in the workspace.
-
-    The configured ``default_endpoint`` stays first (it is what ``manta``
-    launches with) and the explicit ``extra_endpoints`` follow, so a curated
-    ordering is preserved even when discovery succeeds. Every chat-capable
-    serving endpoint found in the workspace is then appended (deduped), so
-    ``/model`` reflects the live workspace rather than a hardcoded pair.
-    Discovery is best-effort: on any failure the configured endpoints are used
-    unchanged.
-    """
-    from .auth import list_serving_chat_endpoints
+def _resolve_endpoints(cfg: MantaConfig, profile: Optional[str], *, inventory=None) -> list[str]:
+    """Merge explicit targets with independent legacy and Unity inventories."""
+    from .providers.discovery import discover_databricks_targets
 
     configured = interactive_endpoints(cfg)
-    discovered = list_serving_chat_endpoints(profile)
-    return list(dict.fromkeys([*configured, *discovered]))
+    if inventory is None:
+        inventory = discover_databricks_targets(
+            profile, schemas=cfg.databricks.discovery_schemas, configured=configured,
+        )
+    return list(dict.fromkeys([*configured, *inventory.names]))
 
 
 @app.command()
@@ -192,7 +203,7 @@ def doctor(
     probe: bool = typer.Option(
         False,
         "--probe",
-        help="Live-test each pinned model in the real agent loop (spends ~1 cent per model).",
+        help="Qualify each pinned target with a bounded two-request tool loop (spends tokens).",
     ),
 ) -> None:
     """Check local Manta setup, dependencies, and Databricks auth."""
@@ -218,15 +229,15 @@ def doctor(
     add(
         "deepagents-code",
         dcode_ok,
-        "interactive runtime" if dcode_ok else "pip install -e '.[agent]'",
+        "interactive runtime" if dcode_ok else escape(runtime_install_command()),
     )
 
     try:
-        import databricks_langchain  # noqa: F401
+        import langchain_openai  # noqa: F401
 
-        add("databricks-langchain", True, "")
+        add("langchain-openai", True, "")
     except Exception as exc:  # noqa: BLE001
-        add("databricks-langchain", False, f"pip install -e '.[agent]' ({exc})")
+        add("langchain-openai", False, f"{escape(runtime_install_command())} ({exc})")
 
     cfg = load_config()
     endpoint = cfg.interactive.default_endpoint
@@ -274,39 +285,54 @@ def doctor(
         )
     else:
         try:
-            from .auth import current_username, is_authenticated, resolve_profile
+            from .diagnostics import credential_context
 
-            authed = is_authenticated(profile)
-            who = current_username(profile) if authed else (resolve_profile(profile) or "default profile")
-            add("databricks auth", authed, who or "")
-        except Exception as exc:  # noqa: BLE001
-            add("databricks auth", False, str(exc))
+            add("databricks credentials", True, credential_context(profile))
+        except Exception as exc:  # noqa: BLE001 - safe credential construction check
+            add("databricks credentials", False, type(exc).__name__ + ": SDK auth unavailable")
 
-        # Validate every agent's Databricks model pin against the live
-        # workspace. A pin to a nonexistent serving endpoint otherwise only
-        # surfaces mid-run as a cryptic NotFoundError from the server.
+        from .agents.defaults import merged_agents
+        from .agents.registry import list_agents
+        from .providers.discovery import discover_databricks_targets, lookup_databricks_target
+
+        pins = {
+            defn.name: defn.model.split(":", 1)[1]
+            for defn in merged_agents(list_agents())
+            if defn.model and defn.model.startswith("databricks:")
+        }
+        inventory = discover_databricks_targets(
+            profile, schemas=cfg.databricks.discovery_schemas,
+            configured=[endpoint, *pins.values()], refresh=True,
+        )
+        services = sum(info.target.kind.value == "service" for info in inventory.targets)
+        add("Databricks targets", True,
+            f"{services} model service(s), {len(inventory.targets) - services} legacy endpoint(s); "
+            "tool support and inference permissions require --probe")
+        for outcome in inventory.outcomes:
+            label = outcome.source + (f": {outcome.schema}" if outcome.schema else "")
+            detail = outcome.status
+            if outcome.message:
+                detail += "; " + outcome.message
+            if outcome.status not in {"success", "absent"}:
+                detail += "; metadata is inconclusive; inference access remains unverified"
+            add(f"inventory: {label}", True, detail)
+        for agent_name, name in {"session default": endpoint, **pins}.items():
+            lookup = lookup_databricks_target(name, profile=profile)
+            if lookup.exists is True:
+                detail = f"{name}; metadata visible; EXECUTE not tested"
+            elif lookup.exists is False:
+                detail = f"{name} not found in workspace — fix with `manta agents set-model {agent_name}`"
+            else:
+                detail = f"{name}; {lookup.outcome.status}; unverified (metadata access does not establish inference access)"
+            add(f"agent pin: {agent_name}", lookup.exists is not False, detail)
         try:
-            from .agents.defaults import merged_agents
-            from .agents.registry import list_agents
-            from .auth import list_serving_chat_endpoints
+            from .diagnostics import upstream_default_diagnostic
 
-            live = set(list_serving_chat_endpoints(profile))
-            if live:
-                for defn in merged_agents(list_agents()):
-                    pin = defn.model or ""
-                    if not pin.startswith("databricks:"):
-                        continue
-                    endpoint_name = pin.split(":", 1)[1]
-                    ok = endpoint_name in live
-                    add(
-                        f"agent pin: {defn.name}",
-                        ok,
-                        endpoint_name
-                        if ok
-                        else f"{endpoint_name} not found in workspace — "
-                        f"fix with `manta agents edit {defn.name}`",
-                    )
-        except Exception:  # noqa: BLE001 - validation is best-effort
+            diagnostic = upstream_default_diagnostic()
+            if diagnostic:
+                model, detail = diagnostic
+                add("upstream default", True, f"{model}; {detail}")
+        except Exception:  # noqa: BLE001 - optional user-owned config diagnostic
             pass
 
     # Control-plane hooks: Manta monkeypatches a few internal upstream symbols
@@ -329,53 +355,27 @@ def doctor(
     # fail inside the agent loop (request-shape incompatibilities) — three
     # such pins were found only by live use. Opt-in because it spends tokens.
     if probe and dcode_ok and db_configured:
-        from . import dcode
         from .agents.defaults import merged_agents
         from .agents.registry import list_agents
+        from .diagnostics import probe_databricks_target
 
         endpoints = {endpoint}
         for defn in merged_agents(list_agents()):
             pin = defn.model or ""
             if pin.startswith("databricks:"):
                 endpoints.add(pin.split(":", 1)[1])
-        console.print(f"\nProbing {len(endpoints)} model(s)…")
+        console.print(f"\nProbing {len(endpoints)} model(s) with a bounded tool roundtrip…")
         for name in sorted(endpoints):
-            verdict = _classify_endpoint(name)
-            if verdict == "responses-only":
-                # Hard incompatibility, caught cheaply without a loop run:
-                # the endpoint only speaks the Responses API; Manta's model
-                # layer speaks chat-completions.
-                all_ok = False
-                console.print(
-                    f"  [red]FAIL[/red]  {name} [dim](Responses-API-only — "
-                    "unsupported by Manta's chat-completions model layer)[/dim]"
-                )
-                continue
-            if verdict == "error":
-                all_ok = False
-                console.print(f"  [red]FAIL[/red]  {name} [dim](direct call failed)[/dim]")
-                continue
-            code = dcode.run_headless(
-                profile=profile,
-                default_endpoint=None,
-                endpoints=[],
-                message="Reply with exactly: OK",
-                passthrough=["-a", "agent", "-M", f"databricks:{name}"],
-                timeout=120,
-                max_turns=2,
-                quiet=True,
+            result = probe_databricks_target(name, profile=profile)
+            all_ok = all_ok and result.ok
+            mark = "[green]pass[/green]" if result.ok else "[red]FAIL[/red]"
+            console.print(
+                f"  {mark}  {name} [{result.surface}/{result.protocol}] "
+                f"— {result.detail} ({result.calls} request(s))"
             )
-            ok = code == 0
-            all_ok = all_ok and ok
-            mark = (
-                "[green]pass[/green]"
-                if ok
-                else "[red]FAIL[/red] [dim](rejects the agent loop's requests)[/dim]"
-            )
-            console.print(f"  {mark}  {name}")
         console.print(
-            "[dim]A FAIL means the model cannot run Manta sessions — repin "
-            "with `manta agents set-model`.[/dim]"
+            "[dim]A failed qualification stays on the selected target/protocol. "
+            "Check model capabilities, EXECUTE privileges, and target settings.[/dim]"
         )
 
     console.print("[green]Status: OK[/green]" if all_ok else "[yellow]Status: issues found[/yellow]")
@@ -602,14 +602,15 @@ def agents_edit(name: str = typer.Argument(..., help="Agent name")) -> None:
 
 @agents_app.command("set-model")
 def agents_set_model(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Agent name."),
     model: str = typer.Argument(
-        ..., help="Model ref (databricks:<endpoint>, anthropic:<model>, or bare endpoint)."
+        ..., help="Model ref (databricks:<target>, anthropic:<model>, or bare endpoint/service)."
     ),
     verify: bool = typer.Option(
         True,
         "--verify/--no-verify",
-        help="Check databricks: refs against the live workspace's endpoints.",
+        help="Look up the Databricks endpoint or Unity model service; metadata denial is inconclusive.",
     ),
 ) -> None:
     """Switch an agent's pinned model — takes effect on its next call.
@@ -621,6 +622,7 @@ def agents_set_model(
     from .agents.registry import agent_exists, save_agent
     from .providers import parse_model_ref
 
+    profile = (ctx.obj or {}).get("profile")
     defn, _source = _resolve_agent(name)
     if defn is None:
         console.print(f"[red]No Manta agent named '{name}'.[/red]")
@@ -633,19 +635,26 @@ def agents_set_model(
         ref = parse_model_ref(model)
 
     if verify and ref is not None and ref.provider == "databricks":
-        from .auth import databricks_configured, list_serving_chat_endpoints
+        from .auth import databricks_configured
+        from .providers.discovery import lookup_databricks_target
+        from .providers.targets import parse_target
 
-        if databricks_configured():
-            live = list_serving_chat_endpoints()
-            if live and ref.model not in live:
-                near = [e for e in live if ref.model.split("-")[-1] in e][:5]
-                console.print(
-                    f"[red]Endpoint '{ref.model}' not found in this workspace.[/red]"
-                )
-                if near:
-                    console.print(f"[dim]Close matches: {', '.join(near)}[/dim]")
+        if databricks_configured(profile):
+            try:
+                target = parse_target(ref.model)
+            except ValueError as exc:
+                console.print(f"[red]Invalid Databricks target: {exc}[/red]")
+                raise typer.Exit(code=1) from exc
+            lookup = lookup_databricks_target(target.name, profile=profile)
+            if lookup.exists is False:
+                console.print(f"[red]Target '{ref.model}' not found in this workspace.[/red]")
                 console.print("[dim]Override with --no-verify if intentional.[/dim]")
                 raise typer.Exit(code=1)
+            if lookup.exists is None:
+                console.print(
+                    f"[yellow]{ref.model}: metadata {lookup.outcome.status}; "
+                    "pin saved as unverified. Inference permission is checked at call time.[/yellow]"
+                )
 
     if not agent_exists(name):
         console.print(f"[dim]Copied built-in '{name}' into your registry.[/dim]")
@@ -769,8 +778,11 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def _fmt_cost(usd: float, known: bool) -> str:
-    return f"${usd:.4f}" if known else f"~${usd:.4f}*"
+def _fmt_cost(usd: float, known: bool, completeness: str = "") -> str:
+    if known:
+        return f"${usd:.4f}"
+    suffix = f" ({completeness})" if completeness else ""
+    return f"${usd:.4f} known subtotal; partial{suffix}"
 
 
 def _since_timestamp(days: Optional[int]) -> Optional[float]:
@@ -795,9 +807,7 @@ def cost(
 ) -> None:
     """Historical token + dollar spend from the local usage ledger.
 
-    Answers "which agents/models/tasks cost the most" with a cache-hit rate per
-    group. ``*`` marks rows whose dollar cost is partly estimated (an endpoint
-    with unknown pricing). All data is local — nothing leaves the machine.
+    Reports known dollar subtotals and the coverage of pricing/usage data.
     """
     from .agents import usage
 
@@ -822,6 +832,7 @@ def cost(
 
     grand = 0.0
     grand_known = True
+    priced_calls = calls = missing_usage = 0
     for r in rows:
         hit = r.cache_hit_rate
         hit_str = f"{hit * 100:.0f}%" if hit is not None else "[dim]n/a[/dim]"
@@ -831,14 +842,18 @@ def cost(
             _fmt_tokens(r.input_tokens),
             _fmt_tokens(r.output_tokens),
             hit_str,
-            _fmt_cost(r.cost_usd, r.cost_known),
+            _fmt_cost(r.cost_usd, r.cost_known, r.completeness_label),
         )
         grand += r.cost_usd
         grand_known = grand_known and r.cost_known
+        priced_calls += r.priced_calls
+        calls += r.calls
+        missing_usage += r.missing_usage_calls
     console.print(table)
-    console.print(f"Total: [bold]{_fmt_cost(grand, grand_known)}[/bold]")
+    coverage = f"{priced_calls}/{calls} calls priced; {missing_usage} usage unavailable/unconfirmed"
+    console.print(f"Total: [bold]{_fmt_cost(grand, grand_known, coverage)}[/bold]")
     if not grand_known:
-        console.print("[dim]* cost partly estimated (endpoint pricing unknown).[/dim]")
+        console.print("[dim]Unknown charges are excluded from this local subtotal and USD budget checks.[/dim]")
 
     if breakdown:
         sb = usage.scaffold_breakdown(since=since, agent=agent)
@@ -897,11 +912,12 @@ def budget(
     table.add_column("Tokens", justify="right")
     table.add_column("Cost (USD)", justify="right")
     for r in rows:
-        table.add_row(r.key, _fmt_tokens(r.total_tokens), _fmt_cost(r.cost_usd, r.cost_known))
+        table.add_row(r.key, _fmt_tokens(r.total_tokens),
+                      _fmt_cost(r.cost_usd, r.cost_known, r.completeness_label))
     console.print(table)
     console.print(
         f"Total: [bold]{_fmt_tokens(total.total_tokens)} tokens / "
-        f"{_fmt_cost(total.cost_usd, total.cost_known)}[/bold]"
+        f"{_fmt_cost(total.cost_usd, total.cost_known, total.completeness_label)}[/bold]"
     )
 
 
@@ -916,8 +932,8 @@ def run(
         600, "--timeout", help="Hard wall-clock timeout in seconds (bounds startup hangs)."
     ),
     max_turns: int = typer.Option(50, "--max-turns", help="Max agentic turns before stopping."),
-    json_output: Optional[str] = typer.Option(
-        None, "--json", help="Emit machine-readable output: text | stream-json."
+    json_output: Optional[Literal["text", "stream-json"]] = typer.Option(
+        None, "--json", help="Emit a JSON result (text) or JSONL output events (stream-json)."
     ),
     stream: bool = typer.Option(False, "--stream/--no-stream", help="Stream tokens (default off)."),
     allow_shell: Optional[str] = typer.Option(
@@ -938,7 +954,7 @@ def run(
     if find_spec("deepagents_code") is None:
         console.print(
             "[red]The runtime (deepagents-code) is not installed.[/red]\n"
-            "Install it with: [bold]pip install -e '.[agent]'[/bold]"
+            f"Install it with: [bold]{escape(runtime_install_command())}[/bold]"
         )
         raise typer.Exit(code=1)
 
@@ -948,10 +964,11 @@ def run(
     cfg = load_config()
     db_configured = databricks_configured(profile)
     try:
+        inventory = dcode._target_inventory(profile, ctx.args) if db_configured else None
         code = dcode.run_headless(
             profile=profile,
             default_endpoint=cfg.interactive.default_endpoint if db_configured else None,
-            endpoints=_resolve_endpoints(cfg, profile) if db_configured else [],
+            endpoints=_resolve_endpoints(cfg, profile, inventory=inventory) if db_configured else [],
             message=task,
             passthrough=list(ctx.args),
             timeout=timeout,
@@ -959,6 +976,7 @@ def run(
             no_stream=not stream,
             json_output=json_output,
             shell_allow_list=allow_shell,
+            inventory=inventory,
         )
     except dcode.LauncherError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -969,15 +987,13 @@ def run(
 @app.command()
 def gateway(
     ctx: typer.Context,
-    limit: int = typer.Option(100, "--limit", help="Max endpoints to inspect."),
+    limit: int = typer.Option(100, "--limit", min=1, max=1000, help="Max targets to inspect."),
+    target: Optional[str] = typer.Option(
+        None, "--target", help="Exact endpoint or service FQN, including outside discovery schemas.",
+    ),
+    refresh: bool = typer.Option(False, "--refresh", help="Refresh the active workspace inventory."),
 ) -> None:
-    """Show the AI Gateway surface: brokered providers and governance per endpoint.
-
-    Inspects every chat serving endpoint for its gateway posture — usage
-    tracking, rate limits, guardrails, fallbacks — and which underlying vendor
-    serves it (Databricks-hosted or an external provider brokered through the
-    gateway). One live ``get`` per endpoint, so this is an on-demand view.
-    """
+    """Inspect Unity services and legacy endpoint gateway metadata on demand."""
     profile = (ctx.obj or {}).get("profile")
     from .auth import databricks_configured
     from .providers.gateway import discover_gateway_surface
@@ -989,24 +1005,40 @@ def gateway(
         )
         raise typer.Exit(code=1)
 
-    with console.status("Inspecting serving endpoints…"):
-        surface = discover_gateway_surface(profile, limit=limit)
+    cfg = load_config()
+    with console.status("Inspecting gateway metadata…"):
+        surface = discover_gateway_surface(
+            profile, limit=limit, names=[target] if target else None,
+            schemas=cfg.databricks.discovery_schemas, refresh=refresh,
+        )
+    for outcome in surface.outcomes:
+        label = outcome.source + (f":{outcome.schema}" if outcome.schema else "")
+        console.print(f"[dim]Inventory {label}: {outcome.status}[/dim]")
     if not surface.endpoints:
-        console.print("[yellow]No chat endpoints found (or not authenticated).[/yellow]")
+        console.print(
+            "[yellow]No visible coding targets. Metadata access may be denied or unavailable; "
+            "this does not establish inference access. Use --target for an explicit service.[/yellow]"
+        )
         raise typer.Exit(code=1)
 
-    table = Table(title="AI Gateway surface (chat endpoints)")
-    table.add_column("Endpoint", style="bold")
-    table.add_column("Source")
-    table.add_column("Gateway governance")
+    table = Table(title="AI Gateway targets")
+    table.add_column("Target", style="bold")
+    table.add_column("Kind / source")
+    table.add_column("APIs / metadata")
+    table.add_column("Visible governance")
     for info in surface.endpoints:
-        feats = ", ".join(info.features) if info.features else "[dim]none[/dim]"
-        table.add_row(info.name, info.source, feats)
+        apis = ", ".join(info.supported_api_types) or "not advertised"
+        metadata = apis if info.metadata_status == "success" else info.metadata_status
+        table.add_row(info.name, info.source, metadata, info.governance)
     console.print(table)
+    for info in surface.endpoints:
+        if info.destinations:
+            console.print(f"[dim]{info.name} routes: {', '.join(info.destinations)}[/dim]")
+        if info.fallback_destinations:
+            console.print(f"[dim]{info.name} fallback: {', '.join(info.fallback_destinations)}[/dim]")
     console.print(
-        f"Providers brokered: [bold]{', '.join(surface.providers)}[/bold] • "
-        f"{len(surface.governed)}/{len(surface.endpoints)} endpoints "
-        "gateway-governed"
+        f"{len(surface.governed)}/{len(surface.endpoints)} targets expose policy configuration. "
+        "Absent visible policy is unknown; metadata visibility does not verify EXECUTE."
     )
 
 
@@ -1212,37 +1244,6 @@ def task_cancel(task_id: str = typer.Argument(..., help="Task id.")) -> None:
     console.print(f"Cancelled task [bold]{record.id}[/bold] (@{record.agent}).")
 
 
-def _classify_endpoint(name: str, *, timeout_seconds: int = 60) -> str:
-    """Cheap direct-call classification before the expensive loop probe.
-
-    Returns ``"chat"`` (proceed to the loop probe), ``"responses-only"``
-    (the endpoint rejects chat-completions outright — e.g. the codex / 5-5-pro
-    family), or ``"error"``. Bounded with SIGALRM: one probed endpoint was
-    observed hanging for minutes on a cold chat-completions call.
-    """
-    import signal
-
-    def _bail(*_args: object) -> None:
-        raise TimeoutError(f"no response in {timeout_seconds}s")
-
-    previous = signal.signal(signal.SIGALRM, _bail)
-    signal.alarm(timeout_seconds)
-    try:
-        from langchain_core.messages import HumanMessage
-
-        from .databricks_chat import MantaChatDatabricks
-
-        MantaChatDatabricks(model=name).invoke([HumanMessage(content="Reply OK")])
-        return "chat"
-    except Exception as exc:  # noqa: BLE001 - classify, don't crash doctor
-        if "Responses API" in str(exc):
-            return "responses-only"
-        return "error"
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
-
-
 @app.command()
 def receipts(
     days: int = typer.Option(7, "--days", help="Window in days."),
@@ -1261,14 +1262,16 @@ def receipts(
     console.print(f"[bold]Manta receipts — last {r.days} day(s)[/bold]")
     console.print(f"  Calls:            {r.calls}")
     console.print(f"  Tokens:           {_fmt_tokens(r.total_tokens)}")
-    console.print(f"  Spend:            ${r.actual_usd:.2f}")
+    coverage = f"{r.priced_calls}/{r.calls} calls priced; {r.missing_usage_calls} usage unavailable/unconfirmed"
+    console.print(f"  Spend:            {_fmt_cost(r.actual_usd, r.cost_known, coverage)}")
     console.print(
         f"  Premium baseline: ${r.premium_baseline_usd:.2f} "
-        "[dim](same tokens, all-opus — counterfactual)[/dim]"
+        "[dim](observed tokens only, all-opus — counterfactual)[/dim]"
     )
-    console.print(
-        f"  Est. savings:     [green]${r.estimated_savings_usd:.2f}[/green]"
-    )
+    if r.estimated_savings_usd is None:
+        console.print("  Est. savings:     unavailable (pricing/usage incomplete)")
+    else:
+        console.print(f"  Est. savings:     [green]${r.estimated_savings_usd:.2f}[/green]")
     if r.advice_delivered:
         console.print(
             f"  Advisor:          {r.advice_delivered} recommendation(s), "
@@ -1328,12 +1331,12 @@ def status(
         for r in rows:
             table.add_row(
                 r.key, str(r.calls), _fmt_tokens(r.total_tokens),
-                _fmt_cost(r.cost_usd, r.cost_known),
+                _fmt_cost(r.cost_usd, r.cost_known, r.completeness_label),
             )
         table.add_section()
         table.add_row(
             "[bold]TOTAL[/bold]", str(total.calls),
-            _fmt_tokens(total.total_tokens), _fmt_cost(total.cost_usd, total.cost_known),
+            _fmt_tokens(total.total_tokens), _fmt_cost(total.cost_usd, total.cost_known, total.completeness_label),
         )
         console.print(table)
 
@@ -1367,14 +1370,14 @@ def watch(
         for r in rows:
             table.add_row(
                 r.key, str(r.calls), _fmt_tokens(r.total_tokens),
-                _fmt_cost(r.cost_usd, r.cost_known),
+                _fmt_cost(r.cost_usd, r.cost_known, r.completeness_label),
             )
         if not rows:
             table.add_row("[dim]waiting for activity…[/dim]", "", "", "")
         table.add_section()
         table.add_row(
             "[bold]TOTAL[/bold]", str(total.calls), _fmt_tokens(total.total_tokens),
-            _fmt_cost(total.cost_usd, total.cost_known),
+            _fmt_cost(total.cost_usd, total.cost_known, total.completeness_label),
         )
         return table
 

@@ -129,13 +129,14 @@ def test_model_pin_overrides_every_call():
     assert resolved == ["databricks-claude-opus-4-8"]
 
 
-def test_model_pin_failure_falls_back():
+def test_model_pin_failure_is_actionable_and_never_uses_session_model():
     def resolver(name):
         raise RuntimeError("nope")
 
     mw = R.ModelPinMiddleware(endpoint="x", resolve_model=resolver)
     req = _Request(messages=[HumanMessage(content="hi")])
-    assert mw.wrap_model_call(req, lambda r: "ok") == "ok"
+    with pytest.raises(RuntimeError, match="Cannot resolve pinned model 'x'"):
+        mw.wrap_model_call(req, lambda r: pytest.fail("must not infer with session model"))
     assert req._overridden is None
 
 

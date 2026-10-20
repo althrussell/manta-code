@@ -31,6 +31,7 @@ Everything is stdlib + the dependency-light registry, so it runs inside
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,8 +40,8 @@ from typing import Any
 #: deepagents' default profile name; Manta never manages this one.
 DEFAULT_AGENT_NAME = "agent"
 
-#: ``~/.deepagents`` base (hard-coded upstream; mirrors ``dcode`` constants).
-DEEPAGENTS_CONFIG_DIR = Path.home() / ".deepagents"
+#: Mirrors the upstream profile selection and ``dcode`` constants.
+DEEPAGENTS_CONFIG_DIR = Path(os.environ.get("DEEPAGENTS_HOME", Path.home() / ".deepagents")).expanduser()
 DEEPAGENTS_STATE_DIR = DEEPAGENTS_CONFIG_DIR / ".state"
 
 #: Records the set of profile names Manta currently manages, so profiles for

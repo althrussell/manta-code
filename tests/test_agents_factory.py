@@ -20,7 +20,8 @@ def test_plain_agent_compiles_to_minimal_subagent():
     # denies them: subagents inherit the orchestrator's extra tools, and a
     # read-only agent must not route around its boundary by submitting a
     # background swe task.
-    (policy,) = sub["middleware"]
+    policy, continuity = sub["middleware"]
+    assert type(continuity).__name__ == "SessionPolicyMiddleware"
     assert "manta_task_submit" in policy._deny
     assert "manta_task_cancel" in policy._deny
 
@@ -87,6 +88,53 @@ def test_extra_middleware_is_appended():
     assert sentinel in sub["middleware"]
 
 
+def test_delegated_accounting_follows_saved_protocol(tmp_path):
+    import sqlite3
+    from types import SimpleNamespace
+
+    import httpx
+    from langchain.agents import create_agent
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from manta_code.databricks_chat import MantaChatDatabricks
+    from manta_code.middleware.economy import TokenEconomyMiddleware
+
+    ledger = tmp_path / "usage.db"
+    economy = TokenEconomyMiddleware(agent="helper", ledger_path=ledger)
+    sub = compile_subagent(AgentDef(name="helper"), extra_middleware=[economy])
+    assert sub["middleware"][-1] is economy
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(200, json={
+            "id": "fixture", "object": "chat.completion", "created": 0,
+            "model": "system.ai.delegated", "choices": [{"index": 0,
+                "finish_reason": "stop", "message": {"role": "assistant", "content": "OK"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+        })
+
+    workspace = SimpleNamespace(config=SimpleNamespace(
+        host="https://workspace.invalid", authenticate=lambda: {"Authorization": "Bearer test"},
+    ))
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        model = MantaChatDatabricks(
+            model="system.ai.delegated", api="chat", workspace_client=workspace,
+            http_client=client, max_retries=0,
+        )
+        saver = InMemorySaver()
+        config = {"configurable": {"thread_id": "delegated-protocol"}}
+        first = create_agent(model, middleware=sub["middleware"], checkpointer=saver)
+        first.invoke({"messages": [HumanMessage(content="start")]}, config)
+        changed = model.clone_with_policy(api="responses", surface="unified")
+        resumed = create_agent(changed, middleware=sub["middleware"], checkpointer=saver)
+        resumed.invoke({"messages": [HumanMessage(content="continue")]}, config)
+    assert paths == ["/ai-gateway/mlflow/v1/chat/completions"] * 2
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT protocol, surface FROM usage").fetchall() == [("chat", "unified")] * 2
+
+
 def test_compile_chief_includes_task_tools():
     import pytest as _pytest
 
@@ -105,3 +153,23 @@ def test_compile_without_manta_tools_sets_no_tools_key():
     from manta_code.agents.factory import compile_subagent
 
     assert "tools" not in compile_subagent(SWE)
+
+
+def test_compiled_policy_and_databricks_pin_build_real_graph_offline(monkeypatch):
+    from deepagents import create_deep_agent
+
+    from manta_code import auth
+    from manta_code.databricks_chat import MantaChatDatabricks
+
+    def no_auth(*args, **kwargs):
+        raise AssertionError("graph compilation must not request credentials")
+
+    monkeypatch.setattr(auth, "resolve_workspace_client", no_auth)
+    subagent = compile_subagent(AgentDef(
+        name="offline-review", description="Review without edits", read_only=True,
+        model="databricks:legacy-review", approval=["write_file"],
+    ))
+    graph = create_deep_agent(
+        model=MantaChatDatabricks(model="legacy-session"), subagents=[subagent],
+    )
+    assert {"__start__", "model", "tools"} <= set(graph.get_graph().nodes)

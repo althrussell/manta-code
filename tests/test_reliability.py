@@ -49,14 +49,15 @@ def test_boot_patch_surfaces_are_declared():
     names = {(t.module, t.attribute) for t in reliability.PATCH_TARGETS}
     assert ("deepagents_code.config", "_UNICODE_BANNER") in names
     assert ("deepagents_code.model_config", "get_available_models") in names
-    assert ("deepagents_code.widgets.auth", "AuthManagerScreen.compose") in names
+    assert ("deepagents_code.model_catalog", "get_available_models") in names
+    assert ("deepagents_code.tui.widgets.auth", "AuthManagerScreen.compose") in names
     assert (
-        "deepagents_code.widgets.auth",
+        "deepagents_code.tui.widgets.auth",
         "AuthManagerScreen._build_options_with_warning",
     ) in names
-    assert ("deepagents_code.server", "_build_server_cmd") in names
+    assert ("deepagents_code.client.launch.server", "_build_server_cmd") in names
     assert (
-        "deepagents_code.widgets.model_selector",
+        "deepagents_code.tui.widgets.model_selector",
         "ModelSelectorScreen._update_footer",
     ) in names
 

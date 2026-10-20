@@ -29,11 +29,8 @@ from langchain.agents.middleware.types import AgentMiddleware
 
 from ..agents.usage import (
     Price,
-    TokenBreakdown,
-    UsageRecord,
-    extract_breakdown,
-    price_for,
-    record_usage,
+    model_call_identity,
+    record_model_response,
 )
 
 logger = logging.getLogger("manta.economy")
@@ -107,7 +104,16 @@ def _ai_message_with_usage(response: Any) -> Any | None:
     for msg in candidates:
         if getattr(msg, "usage_metadata", None):
             return msg
+    # Missing usage is itself an accounting event. Keep the AI message so its
+    # request/backend metadata is preserved even when token totals are absent.
+    for msg in candidates:
+        if getattr(msg, "type", None) == "ai" or hasattr(msg, "usage_metadata"):
+            return msg
     return None
+
+
+def _call_identity(model: Any, message: Any | None) -> dict[str, Any]:
+    return model_call_identity(model, message)
 
 
 def _tool_text(tools: Any) -> str:
@@ -215,6 +221,8 @@ class TokenEconomyMiddleware(AgentMiddleware):
         self._approved: set[str] = set()
         #: Threads where the human rejected continuing: end turns gracefully.
         self._stopped: set[str] = set()
+        self._uncertain_budget_threads: set[str] = set()
+        self._daily_coverage_checked: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -227,7 +235,7 @@ class TokenEconomyMiddleware(AgentMiddleware):
     # --- budget bookkeeping ------------------------------------------------
 
     def _running(self, thread: str) -> dict[str, float]:
-        return self._totals.setdefault(thread, {"tokens": 0.0, "usd": 0.0})
+        return self._totals.setdefault(thread, {"tokens": 0.0, "usd": 0.0, "unknown_calls": 0.0})
 
     def _over_cap(self, running: dict[str, float]) -> bool:
         if self._max_tokens is not None and running["tokens"] >= self._max_tokens:
@@ -254,6 +262,12 @@ class TokenEconomyMiddleware(AgentMiddleware):
         """
         if thread in self._stopped:
             return "stop"
+        if self._daily_max_usd is not None and thread not in self._daily_coverage_checked:
+            from ..agents.usage import today_totals
+
+            if not today_totals(path=self._ledger_path).cost_known:
+                self._warn_incomplete_budget(thread)
+            self._daily_coverage_checked.add(thread)
         running = self._running(thread)
         over_agent_cap = self.has_budget and self._over_cap(running)
         over_daily_cap = self._over_daily_cap()
@@ -272,6 +286,8 @@ class TokenEconomyMiddleware(AgentMiddleware):
                 "spent_tokens": int(running["tokens"]),
                 "max_usd": self._max_usd,
                 "max_tokens": self._max_tokens,
+                "spend_complete": running.get("unknown_calls", 0) == 0,
+                "unpriced_calls": int(running.get("unknown_calls", 0)),
             }
         else:
             description = (
@@ -324,7 +340,7 @@ class TokenEconomyMiddleware(AgentMiddleware):
         try:
             from ..agents.usage import today_total_usd
 
-            return today_total_usd() >= self._daily_max_usd
+            return today_total_usd(path=self._ledger_path) >= self._daily_max_usd
         except Exception:  # noqa: BLE001
             return False
 
@@ -351,14 +367,6 @@ class TokenEconomyMiddleware(AgentMiddleware):
         """Price a completed call and persist a ledger row. Never raises."""
         try:
             message = _ai_message_with_usage(response)
-            breakdown: TokenBreakdown = (
-                extract_breakdown(getattr(message, "usage_metadata", None))
-                if message is not None
-                else TokenBreakdown()
-            )
-            model = _model_name(getattr(request, "model", None))
-            price = price_for(model, self._pricing)
-            cost = breakdown.cost_usd(price)
             scaffold, net_new = estimate_scaffolding(request)
             thread = _thread_id(request)
 
@@ -368,27 +376,22 @@ class TokenEconomyMiddleware(AgentMiddleware):
             import os
 
             task = os.environ.get("MANTA_TASK_ID") or self._agent
-            record_usage(
-                UsageRecord(
-                    agent=self._agent,
-                    model=model,
-                    input_tokens=breakdown.input_tokens,
-                    output_tokens=breakdown.output_tokens,
-                    cache_read=breakdown.cache_read,
-                    cache_creation=breakdown.cache_creation,
-                    cost_usd=cost,
-                    scaffold_tokens=scaffold,
-                    net_new_tokens=net_new,
-                    thread_id=thread,
-                    task=task,
-                ),
-                path=self._ledger_path,
+            record = record_model_response(
+                getattr(request, "model", None), message,
+                agent=self._agent, task=task, thread_id=thread,
+                scaffold_tokens=scaffold, net_new_tokens=net_new,
+                pricing=self._pricing, path=self._ledger_path,
             )
+            cost = record.cost_usd
 
             running = self._running(thread)
-            running["tokens"] += breakdown.total_tokens
+            running["tokens"] += record.total_tokens
             if cost is not None:
                 running["usd"] += cost
+            else:
+                running["unknown_calls"] = running.get("unknown_calls", 0) + 1
+                if self._max_usd is not None or self._daily_max_usd is not None:
+                    self._warn_incomplete_budget(thread)
             if self._over_soft(running) and thread not in self._approved:
                 logger.info(
                     "Manta budget heads-up: '%s' at %d tokens / $%.2f.",
@@ -398,6 +401,18 @@ class TokenEconomyMiddleware(AgentMiddleware):
                 )
         except Exception:  # noqa: BLE001 - accounting must never break a run
             logger.debug("Manta token accounting failed", exc_info=True)
+
+    def _warn_incomplete_budget(self, thread: str) -> None:
+        if thread in self._uncertain_budget_threads:
+            return
+        description = (
+            "Manta USD budget coverage is incomplete: missing token usage "
+            "or unknown pricing cannot count toward the client USD cap. "
+            "Known charges still count; gateway budgets and billing are separate."
+        )
+        logger.warning(description)
+        self._record_budget_event(description)
+        self._uncertain_budget_threads.add(thread)
 
     def _stop_message(self) -> Any:
         from langchain_core.messages import AIMessage

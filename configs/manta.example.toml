@@ -5,9 +5,20 @@
 provider = "databricks"
 
 [interactive]
-# Databricks Model Serving / Foundation Model API endpoint `manta` launches with.
-default_endpoint = "databricks-claude-sonnet-4-5"
-# Additional endpoints registered in the deepagents-code `/model` switcher.
+# Exact Unity model-service identity; legacy endpoint names also work.
+default_endpoint = "system.ai.gpt-6-luna"
 extra_endpoints = [
-    "databricks-meta-llama-3-3-70b-instruct",
+    "system.ai.claude-opus-5-5",
+    "system.ai.gpt-6-1-sol",
+    "system.ai.claude-sonnet-5-5",
 ]
+
+[databricks]
+discovery_schemas = ["system.ai"]
+service_api = "auto"
+
+[databricks.targets."system.ai.gpt-6-1-sol"]
+max_output_tokens = 4096
+
+[databricks.request_tags]
+application = "manta-code"

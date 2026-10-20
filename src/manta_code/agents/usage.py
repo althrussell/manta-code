@@ -23,6 +23,10 @@ heavy ``agent`` extra installed. The middleware in
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -40,12 +44,10 @@ USAGE_DB_PATH = Path(".state") / "usage.db"
 
 @dataclass(frozen=True)
 class Price:
-    """USD price per **1M tokens** for each token bucket.
+    """USD per million tokens; cache rates must be explicitly supplied.
 
-    ``cache_read`` and ``cache_creation`` default to derivations of ``input``
-    (Anthropic's economics: cache reads ~0.1x input, cache writes ~1.25x input)
-    so a model only needs to declare ``input``/``output`` to get sane cache
-    pricing.
+    Cache discounts and write premiums are provider-specific. A missing cache
+    rate is unknown, rather than an Anthropic-derived rate for every vendor.
     """
 
     input: float
@@ -53,21 +55,25 @@ class Price:
     cache_read: float | None = None
     cache_creation: float | None = None
 
-    def read_rate(self) -> float:
-        return self.cache_read if self.cache_read is not None else self.input * 0.1
+    def __post_init__(self) -> None:
+        for value in (self.input, self.output, self.cache_read, self.cache_creation):
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError("token prices must be finite and nonnegative")
 
-    def write_rate(self) -> float:
-        return self.cache_creation if self.cache_creation is not None else self.input * 1.25
+    def read_rate(self) -> float | None:
+        return self.cache_read
+
+    def write_rate(self) -> float | None:
+        return self.cache_creation
 
 
-#: Default per-endpoint pricing (USD / 1M tokens), matched by substring against
-#: the model/endpoint name. Approximate list prices kept in one place so they are
-#: easy to correct; unknown endpoints fall back to "cost unknown" (token-only).
+#: Historical endpoint estimates. Substring matching is retained only for
+#: unqualified legacy endpoint names. Unity services require an exact identity.
 DEFAULT_PRICING: dict[str, Price] = {
-    "claude-opus": Price(input=15.0, output=75.0),
-    "claude-sonnet": Price(input=3.0, output=15.0),
-    "claude-haiku": Price(input=0.80, output=4.0),
-    "claude": Price(input=3.0, output=15.0),
+    "claude-opus": Price(15.0, 75.0, cache_read=1.5, cache_creation=18.75),
+    "claude-sonnet": Price(3.0, 15.0, cache_read=0.3, cache_creation=3.75),
+    "claude-haiku": Price(0.80, 4.0, cache_read=0.08, cache_creation=1.0),
+    "claude": Price(3.0, 15.0, cache_read=0.3, cache_creation=3.75),
     "gpt-5-4-mini": Price(input=0.25, output=2.0),
     "gpt-5-mini": Price(input=0.25, output=2.0),
     "gpt-5-4": Price(input=1.25, output=10.0),
@@ -79,59 +85,104 @@ DEFAULT_PRICING: dict[str, Price] = {
     "llama": Price(input=0.20, output=0.60),
 }
 
-
-#: Cache of the merged built-in + config pricing table (``None`` = unloaded).
+#: Exact service prices are deliberately separate from historical family rates.
+#: Add a rate here only with a verified service-specific published price.
+DEFAULT_SERVICE_PRICING: dict[str, Price] = {}
+PRICING_VERSION = "legacy-estimates-2026-10-20"
 _effective_pricing_cache: dict[str, Price] | None = None
+_config_pricing_keys: set[str] = set()
+
+
+def _pricing_identity(model: str) -> str:
+    name = model.strip().lower()
+    if name.startswith("databricks:"):
+        name = name.removeprefix("databricks:")
+    return name.removeprefix("/model-services/").removeprefix("model-services/")
+
+
+def _is_service(model: str) -> bool:
+    return bool(re.fullmatch(r"[^./: ]+\.[^./: ]+\.[^./: ]+", model))
 
 
 def effective_pricing() -> dict[str, Price]:
-    """Built-in pricing merged with the user's ``[pricing]`` config overrides.
-
-    ADR 0010 Phase D: pricing is pluggable — a config entry replaces or adds a
-    substring-matched key, so private endpoints and rate changes don't need a
-    Manta release. Cached per process; guarded (a malformed config entry is
-    skipped, never fatal).
-    """
-    global _effective_pricing_cache  # noqa: PLW0603 - module-level cache
+    """Merge exact service/config rates and historical endpoint estimates."""
+    global _effective_pricing_cache, _config_pricing_keys  # noqa: PLW0603
     if _effective_pricing_cache is not None:
         return _effective_pricing_cache
-    table = dict(DEFAULT_PRICING)
+    table = {**DEFAULT_PRICING, **DEFAULT_SERVICE_PRICING}
+    _config_pricing_keys = set()
     try:
         from ..config import load_config
 
         for key, fields in (load_config().pricing or {}).items():
             try:
-                table[key.lower()] = Price(**fields)
-            except Exception:  # noqa: BLE001 - skip a malformed entry
+                identity = _pricing_identity(key)
+                table[identity] = Price(**fields)
+                _config_pricing_keys.add(identity)
+            except Exception:  # noqa: BLE001 - malformed pricing cannot stop inference
                 continue
-    except Exception:  # noqa: BLE001 - config trouble keeps the built-ins
+    except Exception:  # noqa: BLE001
         pass
     _effective_pricing_cache = table
     return table
 
 
 def clear_pricing_cache() -> None:
-    """Reset the merged pricing cache (tests / config reload)."""
-    global _effective_pricing_cache  # noqa: PLW0603
+    global _effective_pricing_cache, _config_pricing_keys  # noqa: PLW0603
     _effective_pricing_cache = None
+    _config_pricing_keys = set()
+
+
+@dataclass(frozen=True)
+class PricingMatch:
+    price: Price | None = None
+    source: str = "unknown"
+    version: str = ""
+    identity: str = ""
+
+
+def pricing_for(
+    model: str | None,
+    pricing: dict[str, Price] | None = None,
+    *,
+    observed_backend: str | None = None,
+) -> PricingMatch:
+    """Resolve a rate with auditable provenance, without guessing service families.
+
+    Exact requested identities (including explicit overrides) win, followed by
+    an exact observed backend identity. Only legacy endpoint requests may use
+    family substrings. A service's opaque name cannot reveal its backend rate.
+    """
+    if not model:
+        return PricingMatch()
+    explicit = pricing is not None
+    raw_table = effective_pricing() if pricing is None else pricing
+    table = {_pricing_identity(key): value for key, value in raw_table.items()}
+    name = _pricing_identity(model)
+    backend = _pricing_identity(observed_backend) if observed_backend else ""
+    key = name if name in table else backend if backend in table else ""
+    exact = bool(key)
+    if not key and not _is_service(name):
+        matches = [candidate for candidate in table if not _is_service(candidate) and candidate in name]
+        key = max(matches, key=len, default="")
+    if not key:
+        return PricingMatch()
+    price = table[key]
+    configured = explicit or key in _config_pricing_keys
+    method = "exact" if exact else "legacy-substring"
+    source = f"{'override' if explicit else 'config' if configured else 'builtin'}:{method}:{key}"
+    if configured:
+        payload = {"key": key, "input": price.input, "output": price.output,
+                   "cache_read": price.cache_read, "cache_creation": price.cache_creation}
+        version = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    else:
+        version = PRICING_VERSION
+    return PricingMatch(price, source, version, key)
 
 
 def price_for(model: str | None, pricing: dict[str, Price] | None = None) -> Price | None:
-    """Return the best matching :class:`Price` for ``model`` or ``None``.
-
-    Matching is by longest substring key so ``...claude-opus-4-8`` matches the
-    ``claude-opus`` entry before the generic ``claude`` entry. With no explicit
-    ``pricing`` table, the merged built-in + config table applies.
-    """
-    if not model:
-        return None
-    table = pricing or effective_pricing()
-    name = model.lower()
-    best_key: str | None = None
-    for key in table:
-        if key in name and (best_key is None or len(key) > len(best_key)):
-            best_key = key
-    return table[best_key] if best_key else None
+    """Compatibility accessor for the resolved rate; see :func:`pricing_for`."""
+    return pricing_for(model, pricing).price
 
 
 # --- token breakdown -------------------------------------------------------
@@ -149,6 +200,10 @@ class TokenBreakdown:
     cache_creation: int = 0
     #: ``True`` when the provider surfaced cache detail; gates hit-rate reporting.
     cache_available: bool = False
+    #: False when either authoritative token total was absent or malformed.
+    usage_complete: bool = True
+    #: Reasoning is a subset of output, never an additional charge.
+    reasoning_tokens: int | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -161,44 +216,64 @@ class TokenBreakdown:
 
     def cost_usd(self, price: Price | None) -> float | None:
         """Cost of this call in USD, or ``None`` when pricing is unknown."""
-        if price is None:
+        if price is None or not self.usage_complete:
+            return None
+        if self.cache_read and price.read_rate() is None:
+            return None
+        if self.cache_creation and price.write_rate() is None:
             return None
         per = 1_000_000.0
         return (
             self.uncached_input * price.input
-            + self.cache_read * price.read_rate()
-            + self.cache_creation * price.write_rate()
+            + self.cache_read * (price.read_rate() or 0.0)
+            + self.cache_creation * (price.write_rate() or 0.0)
             + self.output_tokens * price.output
         ) / per
 
 
-def extract_breakdown(usage_metadata: Any) -> TokenBreakdown:
-    """Build a :class:`TokenBreakdown` from a langchain ``usage_metadata`` dict.
+def _token_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
-    Handles the standard shape (``input_tokens`` / ``output_tokens`` /
-    ``input_token_details.{cache_read,cache_creation}``) and degrades to zeros for
-    anything missing, so a provider that omits cache detail simply reports no
-    cache rather than raising.
+
+def extract_breakdown(usage_metadata: Any) -> TokenBreakdown:
+    """Read authoritative totals; missing counts never become a free call.
+
+    Standard LangChain metadata is already normalized by the selected protocol
+    adapter. Reasoning detail is recorded as a subset of output tokens. Cache
+    detail stays explicitly unavailable when the provider does not report it.
     """
     if not isinstance(usage_metadata, dict):
-        return TokenBreakdown()
-    input_tokens = int(usage_metadata.get("input_tokens") or 0)
-    output_tokens = int(usage_metadata.get("output_tokens") or 0)
+        return TokenBreakdown(usage_complete=False)
+    inputs = _token_count(usage_metadata.get("input_tokens"))
+    outputs = _token_count(usage_metadata.get("output_tokens"))
     details = usage_metadata.get("input_token_details") or {}
-    cache_read = 0
-    cache_creation = 0
+    cache_read = cache_creation = 0
     cache_available = False
+    valid_details = True
     if isinstance(details, dict):
-        if "cache_read" in details or "cache_creation" in details:
-            cache_available = True
-        cache_read = int(details.get("cache_read") or 0)
-        cache_creation = int(details.get("cache_creation") or 0)
+        cache_available = "cache_read" in details or "cache_creation" in details
+        for key in ("cache_read", "cache_creation"):
+            if key in details and _token_count(details[key]) is None:
+                valid_details = False
+        cache_read = _token_count(details.get("cache_read")) or 0
+        cache_creation = _token_count(details.get("cache_creation")) or 0
+    output_details = usage_metadata.get("output_token_details") or {}
+    reasoning = _token_count(output_details.get("reasoning")) if isinstance(output_details, dict) else None
+    complete = inputs is not None and outputs is not None and valid_details
+    if inputs is not None and cache_read + cache_creation > inputs:
+        complete = False
+    if outputs is not None and reasoning is not None and reasoning > outputs:
+        complete = False
     return TokenBreakdown(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
+        input_tokens=inputs or 0,
+        output_tokens=outputs or 0,
         cache_read=cache_read,
         cache_creation=cache_creation,
         cache_available=cache_available,
+        usage_complete=complete,
+        reasoning_tokens=reasoning,
     )
 
 
@@ -223,6 +298,17 @@ class UsageRecord:
     thread_id: str = ""
     task: str = ""
     ts: float = field(default_factory=time.time)
+    requested_target: str = ""
+    requested_service: str = ""
+    observed_backend: str | None = None
+    surface: str = ""
+    protocol: str = ""
+    request_id: str | None = None
+    usage_complete: bool | None = True
+    cache_available: bool | None = None
+    reasoning_tokens: int | None = None
+    pricing_source: str = ""
+    pricing_version: str = ""
 
     @property
     def total_tokens(self) -> int:
@@ -261,19 +347,46 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    # Additive migrations keep historical costs/tokens intact. Historical usage
+    # completeness is unknown (NULL), never retroactively asserted as complete.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(usage)")}
+    additions = {
+        "requested_target": "TEXT NOT NULL DEFAULT ''",
+        "requested_service": "TEXT NOT NULL DEFAULT ''",
+        "observed_backend": "TEXT",
+        "surface": "TEXT NOT NULL DEFAULT ''",
+        "protocol": "TEXT NOT NULL DEFAULT ''",
+        "request_id": "TEXT",
+        "usage_complete": "INTEGER",
+        "cache_available": "INTEGER",
+        "reasoning_tokens": "INTEGER",
+        "pricing_source": "TEXT NOT NULL DEFAULT ''",
+        "pricing_version": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            try:
+                conn.execute(f"ALTER TABLE usage ADD COLUMN {name} {definition}")
+            except sqlite3.OperationalError:
+                # Another Manta process may have completed this migration.
+                if name not in {row["name"] for row in conn.execute("PRAGMA table_info(usage)")}:
+                    conn.close()
+                    raise
+    conn.commit()
     return conn
 
 
 #: (utc_day, total_usd, fetched_at_monotonic) — short-TTL cache so N economy
 #: middleware instances don't each hit SQLite per model call (ADR 0011).
 _day_total_cache: tuple[str, float, float] | None = None
+_day_total_cache_path: str | None = None
 _DAY_TOTAL_TTL_SECONDS = 30.0
 
 
 def _utc_day_start(now: float | None = None) -> tuple[str, float]:
     import datetime as _dt
 
-    moment = _dt.datetime.fromtimestamp(now or time.time(), tz=_dt.UTC)
+    moment = _dt.datetime.fromtimestamp(time.time() if now is None else now, tz=_dt.UTC)
     day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
     return moment.strftime("%Y-%m-%d"), day_start.timestamp()
 
@@ -281,15 +394,19 @@ def _utc_day_start(now: float | None = None) -> tuple[str, float]:
 def today_total_usd(*, path: Path | None = None) -> float:
     """Total USD recorded in the ledger for the current UTC day.
 
+    This is only the known subtotal: unknown charges cannot count toward a
+    client USD cap. Use :func:`today_totals` for coverage and presentation.
     Cached with a short TTL and bumped locally by :func:`record_usage`, so the
     per-model-call daily-budget check is a dict read, with periodic refresh to
     pick up other processes' spend (background runners share the ledger).
     """
-    global _day_total_cache  # noqa: PLW0603 - module-level cache
+    global _day_total_cache, _day_total_cache_path  # noqa: PLW0603
+    cache_path = str(usage_db_path(path).absolute())
     day, day_start = _utc_day_start()
     now = time.monotonic()
     if (
         _day_total_cache is not None
+        and _day_total_cache_path == cache_path
         and _day_total_cache[0] == day
         and now - _day_total_cache[2] < _DAY_TOTAL_TTL_SECONDS
     ):
@@ -297,27 +414,32 @@ def today_total_usd(*, path: Path | None = None) -> float:
     try:
         conn = connect(path)
     except Exception:  # noqa: BLE001
-        return _day_total_cache[1] if _day_total_cache else 0.0
+        return _day_total_cache[1] if _day_total_cache and _day_total_cache_path == cache_path else 0.0
     try:
         row = conn.execute(
-            "SELECT SUM(cost_usd) FROM usage WHERE ts >= ?", (day_start,)
+            "SELECT SUM(cost_usd) FROM usage WHERE ts >= ? AND ts < ?", (day_start, day_start + 86400)
         ).fetchone()
         total = float(row[0] or 0.0)
     except Exception:  # noqa: BLE001
-        total = _day_total_cache[1] if _day_total_cache else 0.0
+        total = _day_total_cache[1] if _day_total_cache and _day_total_cache_path == cache_path else 0.0
     finally:
         conn.close()
     _day_total_cache = (day, total, now)
+    _day_total_cache_path = cache_path
     return total
 
 
-def _bump_today_total(cost: float | None) -> None:
+def _bump_today_total(record: UsageRecord, path: Path | None) -> None:
     global _day_total_cache  # noqa: PLW0603
-    if cost is None or _day_total_cache is None:
+    if record.cost_usd is None or _day_total_cache is None:
         return
-    day, _ = _utc_day_start()
-    if _day_total_cache[0] == day:
-        _day_total_cache = (day, _day_total_cache[1] + cost, _day_total_cache[2])
+    day, start = _utc_day_start()
+    if (
+        _day_total_cache[0] == day
+        and _day_total_cache_path == str(usage_db_path(path).absolute())
+        and start <= record.ts < start + 86400
+    ):
+        _day_total_cache = (day, _day_total_cache[1] + record.cost_usd, _day_total_cache[2])
 
 
 def record_usage(record: UsageRecord, *, path: Path | None = None) -> None:
@@ -327,31 +449,112 @@ def record_usage(record: UsageRecord, *, path: Path | None = None) -> None:
     except Exception:  # noqa: BLE001 - accounting must not break a run
         return
     try:
+        columns = tuple(UsageRecord.__dataclass_fields__)
         conn.execute(
-            "INSERT INTO usage (ts, agent, model, input_tokens, output_tokens, "
-            "cache_read, cache_creation, cost_usd, scaffold_tokens, net_new_tokens, "
-            "thread_id, task) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                record.ts,
-                record.agent,
-                record.model,
-                record.input_tokens,
-                record.output_tokens,
-                record.cache_read,
-                record.cache_creation,
-                record.cost_usd,
-                record.scaffold_tokens,
-                record.net_new_tokens,
-                record.thread_id,
-                record.task,
-            ),
+            f"INSERT INTO usage ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            tuple(getattr(record, name) for name in columns),
         )
         conn.commit()
-        _bump_today_total(record.cost_usd)
+        _bump_today_total(record, path)
     except Exception:  # noqa: BLE001
         pass
     finally:
         conn.close()
+
+
+def model_name(model: Any) -> str:
+    """Read the requested model identity without loading provider libraries."""
+    if model is None:
+        return ""
+    if isinstance(model, str):
+        return model
+    for attr in ("model", "model_name", "endpoint", "name"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return type(model).__name__
+
+
+def model_call_identity(model: Any, message: Any | None) -> dict[str, Any]:
+    """Separate the requested service from backend identity actually reported.
+
+    ``model_name`` echoed as the requested service does not identify a backend.
+    Request/response object ids are not gateway request ids either.
+    """
+    name = model_name(model)
+    target = name.removeprefix("databricks:")
+    policy = getattr(model, "target_policy", None)
+    policy_target = getattr(policy, "target", None)
+    if policy_target is not None:
+        target = str(getattr(policy_target, "name", target))
+    kind = getattr(policy_target, "kind", None)
+    service = target if kind == "service" or (target.count(".") == 2 and "/" not in target) else ""
+    metadata = getattr(message, "response_metadata", None) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    observed = None
+    for key in ("resolved_model", "backend_model", "model_name", "model"):
+        value = metadata.get(key)
+        if not isinstance(value, str) or not value or value.removeprefix("databricks:") == target:
+            continue
+        # Generic model fields may identify another gateway service rather than
+        # a resolved provider model. Only explicit backend fields can disambiguate.
+        reported = value.removeprefix("databricks:")
+        if key in {"model_name", "model"} and (reported.count(".") == 2 or "model-services/" in reported):
+            continue
+        observed = value
+        break
+    request_id = metadata.get("request_id") or metadata.get("_request_id")
+    if not isinstance(request_id, str):
+        request_id = None
+    headers = metadata.get("headers") or {}
+    if not request_id and isinstance(headers, dict):
+        normalized = {str(key).lower(): value for key, value in headers.items()}
+        for key in ("x-request-id", "x-databricks-request-id"):
+            if isinstance(normalized.get(key), str):
+                request_id = normalized[key]
+                break
+    return {
+        "requested_target": target,
+        "requested_service": service,
+        "observed_backend": observed,
+        "surface": getattr(policy, "surface", None) or getattr(model, "transport_surface", ""),
+        "protocol": getattr(policy, "api", None) or getattr(model, "transport_api", ""),
+        "request_id": request_id,
+    }
+
+def record_model_response(
+    model: Any,
+    message: Any,
+    *,
+    agent: str = "orchestrator",
+    task: str = "",
+    thread_id: str = "",
+    path: Path | None = None,
+    pricing: dict[str, Price] | None = None,
+    scaffold_tokens: int = 0,
+    net_new_tokens: int = 0,
+) -> UsageRecord:
+    """Account an actual response, including direct qualification model calls.
+
+    Uses only returned metadata and configured prices, performs no inference or
+    metadata lookup, and preserves missing usage as unknown. The returned record
+    is also useful for a caller's running budget; ledger writes are best-effort.
+    """
+    identity = model_call_identity(model, message)
+    breakdown = extract_breakdown(getattr(message, "usage_metadata", None))
+    match = pricing_for(model_name(model), pricing, observed_backend=identity["observed_backend"])
+    record = UsageRecord(
+        agent=agent, model=model_name(model), task=task, thread_id=thread_id,
+        input_tokens=breakdown.input_tokens, output_tokens=breakdown.output_tokens,
+        cache_read=breakdown.cache_read, cache_creation=breakdown.cache_creation,
+        cost_usd=breakdown.cost_usd(match.price), usage_complete=breakdown.usage_complete,
+        cache_available=breakdown.cache_available, reasoning_tokens=breakdown.reasoning_tokens,
+        pricing_source=match.source, pricing_version=match.version,
+        scaffold_tokens=scaffold_tokens, net_new_tokens=net_new_tokens, **identity,
+    )
+    record_usage(record, path=path)
+    return record
 
 
 # --- aggregation / reporting -----------------------------------------------
@@ -369,6 +572,20 @@ class AggRow:
     cache_creation: int
     cost_usd: float
     cost_known: bool
+    priced_calls: int = 0
+    unknown_price_calls: int = 0
+    missing_usage_calls: int = 0
+
+    @property
+    def usage_complete(self) -> bool:
+        return self.missing_usage_calls == 0
+
+    @property
+    def completeness_label(self) -> str:
+        label = f"{self.priced_calls}/{self.calls} calls priced"
+        if self.missing_usage_calls:
+            label += f"; {self.missing_usage_calls} usage unavailable/unconfirmed"
+        return label
 
     @property
     def total_tokens(self) -> int:
@@ -421,7 +638,8 @@ def aggregate(
             "SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
             "SUM(cache_read) AS cache_read, SUM(cache_creation) AS cache_creation, "
             "SUM(COALESCE(cost_usd, 0)) AS cost_usd, "
-            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unknown_cost "
+            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unknown_cost, "
+            "SUM(CASE WHEN usage_complete IS NOT 1 THEN 1 ELSE 0 END) AS missing_usage "
             f"FROM usage{clause} GROUP BY {column}"
         )
         rows = conn.execute(sql, params).fetchall()
@@ -439,7 +657,10 @@ def aggregate(
             cache_read=int(r["cache_read"] or 0),
             cache_creation=int(r["cache_creation"] or 0),
             cost_usd=float(r["cost_usd"] or 0.0),
-            cost_known=int(r["unknown_cost"] or 0) == 0,
+            cost_known=int(r["unknown_cost"] or 0) == 0 and int(r["missing_usage"] or 0) == 0,
+            priced_calls=int(r["calls"]) - int(r["unknown_cost"] or 0),
+            unknown_price_calls=int(r["unknown_cost"] or 0),
+            missing_usage_calls=int(r["missing_usage"] or 0),
         )
         for r in rows
     ]
@@ -508,7 +729,15 @@ def totals(*, since: float | None = None, path: Path | None = None) -> AggRow:
         agg.cache_creation += r.cache_creation
         agg.cost_usd += r.cost_usd
         agg.cost_known = agg.cost_known and r.cost_known
+        agg.priced_calls += r.priced_calls
+        agg.unknown_price_calls += r.unknown_price_calls
+        agg.missing_usage_calls += r.missing_usage_calls
     return agg
+
+
+def today_totals(*, path: Path | None = None) -> AggRow:
+    """Today's known subtotal and coverage; unknown charges are not zero spend."""
+    return totals(since=_utc_day_start()[1], path=path)
 
 
 # --- advice ledger (ADR 0010, Phase C) --------------------------------------
@@ -690,9 +919,14 @@ class Receipts:
     premium_baseline_usd: float
     advice_delivered: int
     advice_accepted: int
+    cost_known: bool = True
+    priced_calls: int = 0
+    missing_usage_calls: int = 0
 
     @property
-    def estimated_savings_usd(self) -> float:
+    def estimated_savings_usd(self) -> float | None:
+        if not self.cost_known:
+            return None
         return max(0.0, self.premium_baseline_usd - self.actual_usd)
 
 
@@ -728,6 +962,9 @@ def receipts(*, days: int = 7, path: Path | None = None) -> Receipts:
         premium_baseline_usd=baseline,
         advice_delivered=len(advice),
         advice_accepted=accepted,
+        cost_known=all(row.cost_known for row in rows),
+        priced_calls=sum(row.priced_calls for row in rows),
+        missing_usage_calls=sum(row.missing_usage_calls for row in rows),
     )
 
 
@@ -759,7 +996,8 @@ def thread_totals(thread_id: str, *, path: Path | None = None) -> list[AggRow]:
             "SELECT agent AS key, COUNT(*) AS calls, SUM(input_tokens) AS i, "
             "SUM(output_tokens) AS o, SUM(cache_read) AS cr, "
             "SUM(cache_creation) AS cc, SUM(cost_usd) AS cost, "
-            "SUM(cost_usd IS NULL) AS unknown FROM usage WHERE thread_id = ? "
+            "SUM(cost_usd IS NULL) AS unknown, "
+            "SUM(usage_complete IS NOT 1) AS missing_usage FROM usage WHERE thread_id = ? "
             "GROUP BY agent ORDER BY cost DESC",
             (thread_id,),
         ).fetchall()
@@ -772,7 +1010,10 @@ def thread_totals(thread_id: str, *, path: Path | None = None) -> list[AggRow]:
                 cache_read=int(r["cr"] or 0),
                 cache_creation=int(r["cc"] or 0),
                 cost_usd=float(r["cost"] or 0.0),
-                cost_known=not r["unknown"],
+                cost_known=not r["unknown"] and not r["missing_usage"],
+                priced_calls=r["calls"] - (r["unknown"] or 0),
+                unknown_price_calls=r["unknown"] or 0,
+                missing_usage_calls=r["missing_usage"] or 0,
             )
             for r in rows
         ]

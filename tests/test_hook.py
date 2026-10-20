@@ -75,6 +75,34 @@ def test_enrich_pins_model_for_active_profile(monkeypatch, tmp_path):
     assert "ModelPinMiddleware" in mw_names
 
 
+def test_explicit_launch_model_outranks_managed_role_pin_and_routing(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", "planning")
+    monkeypatch.setenv("MANTA_EXPLICIT_MODEL", "1")
+    names = {type(m).__name__ for m in hook.build_orchestrator_middleware()}
+    assert "ModelPinMiddleware" not in names
+    assert "ModelRoutingMiddleware" not in names
+    assert "ToolPolicyMiddleware" in names
+
+
+def test_model_selection_and_continuity_precede_accounting(monkeypatch):
+    from manta_code.middleware.economy import TokenEconomyMiddleware
+    from manta_code.middleware.routing import ModelPinMiddleware
+
+    class ConfigurableModelMiddleware:
+        pass
+
+    configurable = ConfigurableModelMiddleware()
+    economy = TokenEconomyMiddleware(agent="test")
+    pin = ModelPinMiddleware(endpoint="test", resolve_model=lambda n: n)
+    monkeypatch.setattr(hook, "build_orchestrator_middleware", lambda: [economy, pin])
+    monkeypatch.setattr(hook, "build_manta_subagents", lambda: [])
+    kwargs = {"middleware": [configurable]}
+    hook.enrich_kwargs(kwargs)
+    names = [type(m).__name__ for m in kwargs["middleware"]]
+    assert names == ["ConfigurableModelMiddleware", "ModelPinMiddleware", "SessionPolicyMiddleware", "TokenEconomyMiddleware"]
+
+
 def test_enrich_base_agent_no_top_level_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_ASSISTANT_ID", raising=False)

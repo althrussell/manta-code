@@ -1,0 +1,668 @@
+# Latest compatible development + agent environment, resolved 2026-10-20.
+# Regenerate: uv pip compile pyproject.toml --extra dev --extra agent --upgrade \
+#   --universal --python-version 3.12 --no-header --output-file requirements-dev.lock
+# Upstream caps intentionally retain Pydantic <2.14, filelock <3.30 and uuid-utils <1.
+agent-client-protocol==0.12.1
+    # via deepagents-acp
+aiofile==3.12.3
+    # via py-key-value-aio
+aiosqlite==0.22.1
+    # via
+    #   deepagents-code
+    #   langgraph-checkpoint-sqlite
+annotated-doc==0.0.5
+    # via typer
+annotated-types==0.8.0
+    # via pydantic
+anthropic==1.15.0
+    # via langchain-anthropic
+anyio==4.15.1
+    # via
+    #   anthropic
+    #   deepagents-code
+    #   google-genai
+    #   httpx
+    #   httpx2
+    #   langgraph-api
+    #   langsmith
+    #   mcp
+    #   openai
+    #   py-key-value-aio
+    #   sse-starlette
+    #   starlette
+    #   watchfiles
+ast-serialize==0.13.0
+    # via mypy
+attrs==26.1.0
+    # via
+    #   cyclopts
+    #   jsonschema
+    #   jsonschema-path
+    #   referencing
+authlib==1.9.1
+    # via fastmcp-slim
+beartype==0.23.1
+    # via
+    #   fastmcp-slim
+    #   py-key-value-aio
+beautifulsoup4==4.15.0
+    # via markdownify
+blockbuster==1.5.29
+    # via langgraph-runtime-inmem
+bracex==3.1
+    # via wcmatch
+bsdiff4==1.2.6
+    # via langchain-quickjs
+cachetools==7.2.2
+    # via py-key-value-aio
+caio==0.12.9
+    # via aiofile
+certifi==2026.7.22
+    # via
+    #   httpcore
+    #   httpx
+    #   langchain-openai
+    #   requests
+cffi==2.1.1 ; platform_python_implementation != 'PyPy'
+    # via cryptography
+charset-normalizer==3.5.2
+    # via requests
+click==8.5.0
+    # via
+    #   langgraph-cli
+    #   uvicorn
+cloudpickle==3.1.2
+    # via langgraph-api
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via
+    #   pytest
+    #   typer
+croniter==6.2.4
+    # via langgraph-runtime-inmem
+cryptography==50.0.2
+    # via
+    #   authlib
+    #   google-auth
+    #   joserfc
+    #   langgraph-api
+    #   pyjwt
+    #   secretstorage
+cyclopts==5.2.0
+    # via fastmcp-slim
+databricks-sdk==0.154.0
+    # via manta-code (pyproject.toml)
+deepagents==0.7.28
+    # via
+    #   manta-code (pyproject.toml)
+    #   deepagents-acp
+    #   deepagents-code
+    #   langchain-quickjs
+deepagents-acp==0.0.13
+    # via deepagents-code
+deepagents-code==0.1.86
+    # via manta-code (pyproject.toml)
+distro==1.9.0
+    # via
+    #   google-genai
+    #   langsmith
+dnspython==2.9.0
+    # via email-validator
+docstring-parser==0.18.0
+    # via
+    #   anthropic
+    #   cyclopts
+email-validator==2.3.0
+    # via pydantic
+exceptiongroup==1.3.1
+    # via fastmcp-slim
+fastmcp==4.1.0
+    # via
+    #   deepagents-code
+fastmcp-slim==4.1.0
+    # via fastmcp
+filelock==3.29.7
+    # via
+    #   deepagents-code
+filetype==1.2.0
+    # via langchain-google-genai
+forbiddenfruit==0.1.4 ; implementation_name == 'cpython'
+    # via blockbuster
+genai-prices==0.1.13
+    # via deepagents-code
+google-auth==2.62.0
+    # via
+    #   databricks-sdk
+    #   google-genai
+google-genai==2.31.0
+    # via langchain-google-genai
+googleapis-common-protos==1.75.5
+    # via opentelemetry-exporter-otlp-proto-http
+griffelib==2.3.2
+    # via fastmcp-slim
+grpcio==1.81.1
+    # via
+    #   grpcio-health-checking
+    #   grpcio-tools
+    #   langgraph-api
+grpcio-health-checking==1.81.1
+    # via langgraph-api
+grpcio-tools==1.81.1
+    # via langgraph-api
+h11==0.16.0
+    # via
+    #   httpcore
+    #   httpcore2
+    #   uvicorn
+httpcore==1.0.9
+    # via httpx
+httpcore2==2.13.1 ; sys_platform != 'emscripten'
+    # via httpx2
+httptools==0.9.0 ; sys_platform != 'win32'
+    # via langgraph-api
+httpx==0.28.1
+    # via
+    #   manta-code (pyproject.toml)
+    #   deepagents-code
+    #   google-genai
+    #   langchain-core
+    #   langgraph-api
+    #   langgraph-cli
+    #   langgraph-sdk
+    #   tavily-python
+httpx2==2.13.1
+    # via
+    #   anthropic
+    #   fastmcp-slim
+    #   genai-prices
+    #   langsmith
+    #   mcp
+    #   openai
+httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
+    # via httpx2
+idna==3.20
+    # via
+    #   anyio
+    #   email-validator
+    #   httpx
+    #   httpx2
+    #   requests
+iniconfig==2.3.1
+    # via pytest
+jaraco-classes==3.4.0
+    # via keyring
+jaraco-context==6.1.2
+    # via keyring
+jaraco-functools==4.6.0
+    # via keyring
+jeepney==0.9.0 ; sys_platform == 'linux'
+    # via
+    #   keyring
+    #   secretstorage
+jiter==0.17.0
+    # via
+    #   anthropic
+    #   openai
+joserfc==1.7.5
+    # via
+    #   authlib
+    #   fastmcp-slim
+jsonpatch==1.35
+    # via langchain-core
+jsonpointer==3.2.1
+    # via jsonpatch
+jsonref==1.1.0
+    # via fastmcp-slim
+jsonschema==4.26.0
+    # via mcp
+jsonschema-path==0.5.0
+    # via fastmcp-slim
+jsonschema-rs==0.44.1
+    # via langgraph-api
+jsonschema-specifications==2025.9.1
+    # via jsonschema
+keyring==25.7.0
+    # via py-key-value-aio
+langchain==1.4.6
+    # via
+    #   deepagents
+    #   deepagents-code
+    #   langchain-quickjs
+langchain-anthropic==1.7.6
+    # via
+    #   deepagents
+    #   deepagents-code
+langchain-core==1.6.11
+    # via
+    #   deepagents
+    #   langchain
+    #   langchain-anthropic
+    #   langchain-google-genai
+    #   langchain-openai
+    #   langchain-quickjs
+    #   langgraph
+    #   langgraph-api
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+    #   langgraph-sdk
+langchain-google-genai==4.4.2
+    # via
+    #   deepagents
+    #   deepagents-code
+langchain-openai==1.7.2
+    # via
+    #   manta-code (pyproject.toml)
+    #   deepagents-code
+langchain-protocol==0.0.19
+    # via
+    #   langchain-core
+    #   langgraph-api
+    #   langgraph-sdk
+langchain-quickjs==0.3.9
+    # via deepagents-code
+langgraph==1.2.15
+    # via
+    #   langchain
+    #   langchain-quickjs
+    #   langgraph-api
+    #   langgraph-runtime-inmem
+langgraph-api==0.16.1
+    # via
+    #   langgraph-cli
+langgraph-checkpoint==4.3.0
+    # via
+    #   langgraph
+    #   langgraph-api
+    #   langgraph-checkpoint-sqlite
+    #   langgraph-prebuilt
+    #   langgraph-runtime-inmem
+langgraph-checkpoint-sqlite==3.1.2
+    # via deepagents-code
+langgraph-cli==0.4.35
+    # via
+    #   deepagents-code
+langgraph-prebuilt==1.1.1
+    # via langgraph
+langgraph-runtime-inmem==0.36.1
+    # via
+    #   deepagents-code
+    #   langgraph-api
+    #   langgraph-cli
+langgraph-sdk==0.4.7
+    # via
+    #   deepagents-code
+    #   langgraph
+    #   langgraph-api
+    #   langgraph-cli
+langsmith==0.14.11
+    # via
+    #   deepagents
+    #   deepagents-code
+    #   langchain-core
+    #   langgraph-api
+librt==0.16.0 ; platform_python_implementation != 'PyPy'
+    # via mypy
+linkify-it-py==2.2.0
+    # via markdown-it-py
+markdown-it-py==4.2.0
+    # via
+    #   mdit-py-plugins
+    #   rich
+    #   textual
+markdownify==1.2.3
+    # via deepagents-code
+mcp==2.3.0
+    # via
+    #   deepagents-code
+    #   fastmcp-slim
+mcp-types==2.3.0
+    # via
+    #   fastmcp-slim
+    #   mcp
+mdit-py-plugins==0.6.1
+    # via textual
+mdurl==0.1.2
+    # via markdown-it-py
+more-itertools==11.2.1
+    # via
+    #   jaraco-classes
+    #   jaraco-functools
+mypy==2.4.0
+    # via manta-code (pyproject.toml)
+mypy-extensions==1.1.0
+    # via mypy
+openai==3.31.0
+    # via
+    #   manta-code (pyproject.toml)
+    #   langchain-openai
+openapi-pydantic==0.6.0
+    # via fastmcp-slim
+opentelemetry-api==1.42.1
+    # via
+    #   anthropic
+    #   fastmcp-slim
+    #   langgraph-api
+    #   langsmith
+    #   mcp
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-exporter-prometheus
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+opentelemetry-exporter-otlp-proto-common==1.42.1
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-http==1.42.1
+    # via
+    #   langgraph-api
+    #   langsmith
+opentelemetry-exporter-prometheus==0.63b1
+    # via langgraph-api
+opentelemetry-proto==1.42.1
+    # via
+    #   opentelemetry-exporter-otlp-proto-common
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-sdk==1.42.1
+    # via
+    #   langgraph-api
+    #   langsmith
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-exporter-prometheus
+opentelemetry-semantic-conventions==0.63b1
+    # via opentelemetry-sdk
+orjson==3.13.0
+    # via
+    #   langgraph-api
+    #   langgraph-sdk
+    #   langsmith
+ormsgpack==1.13.0
+    # via langgraph-checkpoint
+packaging==26.3
+    # via
+    #   deepagents
+    #   deepagents-code
+    #   fastmcp-slim
+    #   langchain-core
+    #   langsmith
+    #   pytest
+pathable==0.6.0
+    # via jsonschema-path
+pathspec==1.1.1
+    # via
+    #   langgraph-cli
+    #   mypy
+pillow==12.3.0
+    # via deepagents-code
+platformdirs==4.13.3
+    # via
+    #   fastmcp-slim
+    #   textual
+pluggy==1.7.0
+    # via pytest
+prometheus-client==0.26.0
+    # via
+    #   langgraph-api
+    #   opentelemetry-exporter-prometheus
+prompt-toolkit==3.0.53
+    # via deepagents-code
+protobuf==6.33.6
+    # via
+    #   databricks-sdk
+    #   googleapis-common-protos
+    #   grpcio-health-checking
+    #   grpcio-tools
+    #   langgraph-api
+    #   opentelemetry-proto
+py-key-value-aio==0.4.6
+    # via fastmcp-slim
+pyasn1==0.6.4
+    # via pyasn1-modules
+pyasn1-modules==0.4.2
+    # via google-auth
+pycparser==3.11 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+    # via cffi
+pydantic==2.13.5
+    # via
+    #   manta-code (pyproject.toml)
+    #   agent-client-protocol
+    #   anthropic
+    #   deepagents-code
+    #   fastmcp-slim
+    #   genai-prices
+    #   google-genai
+    #   langchain
+    #   langchain-anthropic
+    #   langchain-core
+    #   langchain-google-genai
+    #   langgraph
+    #   langsmith
+    #   mcp
+    #   mcp-types
+    #   openai
+    #   openapi-pydantic
+    #   pydantic-settings
+pydantic-core==2.46.5
+    # via pydantic
+pydantic-settings==2.16.0
+    # via fastmcp-slim
+pygments==2.21.0
+    # via
+    #   pytest
+    #   rich
+    #   rich-rst
+    #   textual
+pyjwt==2.15.1
+    # via
+    #   langgraph-api
+    #   mcp
+pyperclip==1.11.0
+    # via
+    #   deepagents-code
+    #   fastmcp-slim
+pytest==9.1.1
+    # via manta-code (pyproject.toml)
+python-dateutil==2.9.0.post0
+    # via croniter
+python-dotenv==1.2.4
+    # via
+    #   deepagents-acp
+    #   deepagents-code
+    #   fastmcp-slim
+    #   langgraph-cli
+    #   pydantic-settings
+python-multipart==0.0.32
+    # via
+    #   fastmcp-slim
+    #   mcp
+pywin32==312 ; sys_platform == 'win32'
+    # via mcp
+pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
+    # via keyring
+pyyaml==6.0.3
+    # via
+    #   deepagents-code
+    #   fastmcp-slim
+    #   jsonschema-path
+    #   langchain-core
+quickjs-rs==0.2.5
+    # via langchain-quickjs
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-path
+    #   jsonschema-specifications
+regex==2026.9.29
+    # via tiktoken
+requests==2.34.2
+    # via
+    #   databricks-sdk
+    #   deepagents-code
+    #   google-auth
+    #   google-genai
+    #   langsmith
+    #   opentelemetry-exporter-otlp-proto-http
+    #   requests-toolbelt
+    #   tavily-python
+    #   tiktoken
+requests-toolbelt==1.0.0
+    # via langsmith
+rich==15.0.0
+    # via
+    #   manta-code (pyproject.toml)
+    #   cyclopts
+    #   deepagents-code
+    #   fastmcp-slim
+    #   rich-rst
+    #   textual
+    #   typer
+rich-rst==2.2.0
+    # via cyclopts
+rpds-py==2026.9.1
+    # via
+    #   jsonschema
+    #   referencing
+ruff==0.17.1
+    # via manta-code (pyproject.toml)
+secretstorage==3.5.0 ; sys_platform == 'linux'
+    # via keyring
+setuptools==84.0.0
+    # via grpcio-tools
+shellingham==1.5.4
+    # via typer
+six==1.17.0
+    # via
+    #   markdownify
+    #   python-dateutil
+sniffio==1.3.1
+    # via
+    #   anthropic
+    #   google-genai
+    #   langsmith
+    #   openai
+soupsieve==3.0.3
+    # via beautifulsoup4
+sqlite-vec==0.1.9
+    # via langgraph-checkpoint-sqlite
+sse-starlette==3.5.0
+    # via
+    #   langgraph-api
+    #   langgraph-runtime-inmem
+    #   mcp
+starlette==1.8.0
+    # via
+    #   fastmcp-slim
+    #   langgraph-api
+    #   langgraph-runtime-inmem
+    #   mcp
+    #   sse-starlette
+structlog==25.5.0
+    # via
+    #   langgraph-api
+    #   langgraph-runtime-inmem
+tavily-python==0.8.5
+    # via deepagents-code
+tenacity==9.1.4
+    # via
+    #   google-genai
+    #   langchain-core
+    #   langgraph-api
+textual==8.2.8
+    # via
+    #   deepagents-code
+    #   textual-autocomplete
+textual-autocomplete==4.0.6
+    # via deepagents-code
+textual-speedups==0.2.1
+    # via deepagents-code
+tiktoken==0.14.0
+    # via
+    #   langchain-openai
+    #   tavily-python
+tomli-w==1.2.0
+    # via
+    #   manta-code (pyproject.toml)
+    #   deepagents-code
+truststore==0.10.5
+    # via
+    #   httpcore2
+    #   httpx2
+    #   langgraph-api
+typer==0.27.3
+    # via manta-code (pyproject.toml)
+typing-extensions==4.16.0
+    # via
+    #   manta-code (pyproject.toml)
+    #   anthropic
+    #   anyio
+    #   beautifulsoup4
+    #   exceptiongroup
+    #   fastmcp-slim
+    #   google-genai
+    #   grpcio
+    #   httpx2
+    #   langchain-core
+    #   langchain-protocol
+    #   langsmith
+    #   mcp
+    #   mcp-types
+    #   mypy
+    #   openai
+    #   opentelemetry-api
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+    #   py-key-value-aio
+    #   pydantic
+    #   pydantic-core
+    #   pydantic-settings
+    #   referencing
+    #   starlette
+    #   textual
+    #   textual-autocomplete
+    #   typing-inspection
+typing-inspection==0.4.4
+    # via
+    #   mcp
+    #   pydantic
+    #   pydantic-settings
+uncalled-for==0.4.1
+    # via fastmcp-slim
+urllib3==2.8.0
+    # via
+    #   databricks-sdk
+    #   requests
+uuid-utils==0.17.1
+    # via
+    #   deepagents-code
+    #   langchain-core
+    #   langgraph-api
+    #   langsmith
+uvicorn==0.54.0
+    # via
+    #   fastmcp-slim
+    #   langgraph-api
+    #   mcp
+uvloop==0.23.0 ; sys_platform != 'win32'
+    # via langgraph-api
+wasmtime==49.0.0
+    # via quickjs-rs
+watchfiles==1.3.0
+    # via
+    #   fastmcp-slim
+    #   langgraph-api
+wcmatch==11.1
+    # via deepagents
+wcwidth==0.9.2
+    # via prompt-toolkit
+websockets==16.1.1
+    # via
+    #   fastmcp-slim
+    #   google-genai
+    #   langgraph-api
+    #   langgraph-sdk
+    #   langsmith
+xxhash==4.0.1
+    # via
+    #   langgraph
+    #   langsmith
+zstandard==0.25.0
+    # via
+    #   langgraph-api
+    #   langsmith

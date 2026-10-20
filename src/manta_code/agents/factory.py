@@ -132,6 +132,13 @@ def compile_subagent(
     middleware = _tool_policy_middleware(defn)
     if extra_middleware:
         middleware.extend(extra_middleware)
+    from ..middleware.session_policy import SessionPolicyMiddleware
+
+    # Protocol restoration may rebuild the model before an invocation. Keep
+    # accounting inside it so delegated receipts describe the model/API used.
+    economy = [mw for mw in middleware if type(mw).__name__ == "TokenEconomyMiddleware"]
+    middleware = [mw for mw in middleware if mw not in economy]
+    middleware.extend([SessionPolicyMiddleware(), *economy])
     if middleware:
         subagent["middleware"] = middleware
 

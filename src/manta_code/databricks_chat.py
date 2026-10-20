@@ -1,50 +1,47 @@
-"""A ``ChatDatabricks`` that unpacks reasoning-model content blocks.
+"""Databricks unified authentication with the official OpenAI LangChain adapter.
 
-Some Databricks serving endpoints (e.g. the Qwen "thinking" models) return the
-assistant turn as a *list* of OpenAI-style content blocks — a ``reasoning``
-block (the model's private chain-of-thought) followed by a ``text`` block (the
-visible answer)::
+Clients are initialized lazily and refresh their authentication headers through
+the Databricks SDK on each request. Endpoint names keep the legacy serving
+route; three-part service names select Unity Gateway's unified API. The shared
+target policy selects Responses from verified metadata and exact compatibility
+evidence, with explicit overrides. The OpenAI adapter owns tool/Responses
+serialization; Manta retains its legacy serialized-content and cumulative-usage
+repairs without flattening structured Responses continuation state.
 
-    [
-      {"type": "reasoning", "summary": [{"type": "summary_text", "text": "..."}]},
-      {"type": "text", "text": "Hi! How can I help you today?"}
-    ]
-
-``databricks-langchain`` does not understand that shape on the chat-completions
-path: :func:`databricks_langchain.chat_models._convert_dict_to_message` (and its
-streaming sibling) ``json.dumps`` any non-string content into a string to keep
-output parsers happy. The agent — and the ``deepagents-code`` TUI, which renders
-``message.content_blocks`` — then sees one text block whose text is the raw JSON
-array, so the user sees ``[{"type": "reasoning", ...}]`` instead of the answer.
-
-This subclass post-processes every assistant message (streamed and
-non-streamed): it parses that serialized block list, drops the private
-``reasoning`` blocks, and keeps only the visible ``text``. Tool calls, usage
-metadata, ids, and ordinary string content all pass through untouched. It is
-wired in as the Databricks provider's ``class_path`` (see
-:data:`manta_code.dcode.DATABRICKS_CLASS_PATH`) so it runs inside the LangGraph
-server subprocess where the model actually executes — fixing the agent's own
-message history, not merely the display.
-
-Importing this module also installs a small resolver shim (see
-:func:`_install_subagent_databricks_resolver`) so Manta's per-subagent
-``databricks:<endpoint>`` model pins resolve to ``MantaChatDatabricks`` too —
-deepagents resolves subagent models through langchain's ``init_chat_model``,
-which has no ``databricks`` provider, so without this they fail with
-"Unable to infer model provider". Because the server subprocess imports this
-module to build the main agent's model (the provider ``class_path``), the shim
-is in place before any subagent is resolved.
+Importing this stable provider class path also installs Manta's Deep Agents
+resolver and agent build hook in the server subprocess.
 """
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
+from functools import cache
 from typing import Any
+from urllib.parse import urlsplit
 
-from databricks_langchain import ChatDatabricks
+import httpx
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from langchain_openai import ChatOpenAI
+from pydantic import Field, PrivateAttr, model_validator
+from .providers.targets import (
+    TargetPolicy,
+    TargetResolutionError,
+    merge_request_tag_headers,
+    resolve_target_policy,
+    validate_request_tags,
+)
+from .providers.response_compat import (
+    capture_response_state,
+    preserve_async_stream,
+    preserve_sync_stream,
+    restore_responses_state,
+)
+from .providers.chat_compat import capture_chat_state, restore_chat_state
 
 #: Content-block ``type`` values this shim recognizes. A serialized list is only
 #: treated as reasoning-model content when *every* element is one of these, so
@@ -108,6 +105,11 @@ def _normalize_message(message: BaseMessage) -> BaseMessage:
     ``model_copy`` preserves tool calls, usage metadata, and ids — only
     ``content`` changes.
     """
+    message = capture_chat_state(capture_response_state(message))
+    # Parsed Responses blocks carry ids and opaque continuation state. Only
+    # repair the legacy JSON-in-a-string representation; never flatten them.
+    if not isinstance(message.content, str):
+        return message
     text = _visible_text(message.content)
     if text is None:
         return message
@@ -175,31 +177,502 @@ class _StreamUsageDeduplicator:
         )
 
 
-class MantaChatDatabricks(ChatDatabricks):
-    """``ChatDatabricks`` that strips reasoning blocks from assistant turns.
+class _LazyClient:
+    """Defer workspace authentication until the first actual model request."""
 
-    Overrides only the four generation entry points to normalize content after
-    delegating to the upstream implementation; everything else (auth, request
-    shaping, tool calling, streaming transport) is inherited unchanged.
+    def __init__(self, factory: Any) -> None:
+        self._factory = factory
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._factory(), name)
+
+
+class _WorkspaceAuth(httpx.Auth):
+    """Refresh every SDK header, including Azure auxiliary credentials."""
+
+    def __init__(self, headers: Any) -> None:
+        self._headers = headers
+
+    def sync_auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+        request.headers.update(self._headers())
+        yield request
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncIterator[httpx.Request]:
+        request.headers.update(await asyncio.to_thread(self._headers))
+        yield request
+
+
+class _BorrowedClient(httpx.Client):
+    """Apply request auth without modifying or taking ownership of a client."""
+
+    def __init__(self, client: httpx.Client, auth: httpx.Auth) -> None:
+        super().__init__(timeout=client.timeout)
+        self._borrowed = client
+        self._workspace_auth = auth
+
+    def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        return self._borrowed.build_request(*args, **kwargs)
+
+    def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        if self.is_closed:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        return self._borrowed.send(request, **{**kwargs, "auth": self._workspace_auth})
+
+
+class _BorrowedAsyncClient(httpx.AsyncClient):
+    """Async counterpart of :class:`_BorrowedClient`."""
+
+    def __init__(self, client: httpx.AsyncClient, auth: httpx.Auth) -> None:
+        super().__init__(timeout=client.timeout)
+        self._borrowed = client
+        self._workspace_auth = auth
+
+    def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        return self._borrowed.build_request(*args, **kwargs)
+
+    async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        if self.is_closed:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        return await self._borrowed.send(
+            request, **{**kwargs, "auth": self._workspace_auth}
+        )
+
+
+@cache
+def _openai_request_parameters() -> frozenset[str]:
+    """Use the installed SDK's public signatures instead of a stale allowlist."""
+    from openai.resources.chat.completions import Completions
+    from openai.resources.responses import Responses
+
+    return frozenset(
+        name
+        for create in (Completions.create, Responses.create)
+        for name in inspect.signature(create).parameters
+        if name != "self"
+    )
+
+
+@cache
+def _dialect_request_parameters(api: str) -> frozenset[str]:
+    from openai.resources.chat.completions import Completions
+    from openai.resources.responses import Responses
+
+    resource = Responses if api == "responses" else Completions
+    return frozenset(
+        name for method in (resource.create, resource.parse)
+        for name in inspect.signature(method).parameters if name != "self"
+    )
+
+
+def _merge_extra_params(kwargs: dict[str, Any], extra: dict[str, Any]) -> None:
+    """Keep the old Databricks extra_params seam with OpenAI's typed methods.
+
+    Constructor fields belong on the model, SDK request options belong in
+    model_kwargs, and Databricks extensions belong in extra_body. Explicit
+    options override the legacy defaults, including aliases such as max_tokens.
     """
+    spellings: dict[str, set[str]] = {}
+    for name, field in ChatOpenAI.model_fields.items():
+        names = {name, field.alias} if field.alias else {name}
+        for spelling in names:
+            spellings[spelling] = names
+    model_kwargs = dict(kwargs.get("model_kwargs") or {})
+    body = {}
+    for key, value in extra.items():
+        if key in spellings:
+            if not spellings[key].intersection(kwargs.keys() | model_kwargs.keys()):
+                kwargs[key] = value
+        elif key in _openai_request_parameters():
+            if key in kwargs:
+                model_kwargs[key] = kwargs.pop(key)
+            else:
+                model_kwargs.setdefault(key, value)
+        else:
+            # These vendor options were accepted by ChatDatabricks directly;
+            # OpenAI's typed create methods require them in extra_body.
+            body[key] = kwargs.pop(key, model_kwargs.pop(key, value))
+    if model_kwargs or "model_kwargs" in kwargs:
+        kwargs["model_kwargs"] = model_kwargs
+    if body:
+        kwargs["extra_body"] = {**body, **(kwargs.get("extra_body") or {})}
+
+
+def _constructor_policy_layers(options: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Identify explicit upstream call options, including the first import.
+
+    Deep Agents 0.1.86 passes merged provider defaults and runtime overrides
+    through one kwargs dict. Its pinned create_model(extra_kwargs=...) frame
+    retains the exact provenance; inspect only these immediate guarded callers.
+    This avoids treating provider defaults as explicit per-call overrides.
+    Direct callers continue to own every option they supply.
+    """
+    frame = inspect.currentframe()
+    try:
+        constructor = frame.f_back if frame else None
+        class_factory = constructor.f_back if constructor else None
+        creator = class_factory.f_back if class_factory else None
+        if (
+            class_factory is not None and creator is not None
+            and class_factory.f_globals.get("__name__") == "deepagents_code.config"
+            and class_factory.f_code.co_name == "_create_model_from_class"
+            and creator.f_globals.get("__name__") == "deepagents_code.config"
+            and creator.f_code.co_name == "create_model"
+            and "extra_kwargs" in creator.f_locals
+        ):
+            explicit_keys = set(creator.f_locals["extra_kwargs"] or {}) | {"model", "model_name", "endpoint"}
+            return ({k: v for k, v in options.items() if k in explicit_keys}, {k: v for k, v in options.items() if k not in explicit_keys})
+        return options, {}
+    finally:
+        del frame
+
+
+class MantaChatDatabricks(ChatOpenAI):
+    """OpenAI-compatible Databricks model, with refreshable SDK credentials.
+
+    Keep this class path stable: the launcher and Deep Agents resolver import
+    it in the server process to install Manta's control-plane hooks. Clients
+    stay lazy so listing models does not require working workspace credentials.
+    """
+
+    workspace_client: Any = Field(default=None, exclude=True)
+    use_ai_gateway: bool | None = None
+    use_ai_gateway_native_api: bool = False
+    _sync_root: Any = PrivateAttr(default=None)
+    _async_root: Any = PrivateAttr(default=None)
+    _target_policy: Any = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_temperature(cls, values: dict[str, Any]) -> Any:
+        # Endpoint/service names are opaque Databricks identities, even when a
+        # user names a custom endpoint gpt-5-*. Do not apply OpenAI family
+        # heuristics that silently delete an explicitly configured parameter.
+        return values
+
+    def __init__(self, **kwargs: Any) -> None:
+        if "endpoint" in kwargs:
+            kwargs.setdefault("model", kwargs.pop("endpoint"))
+        extra = kwargs.pop("extra_params", None)
+        if extra:
+            _merge_extra_params(kwargs, extra)
+        explicit, defaults = _constructor_policy_layers(kwargs)
+        policy = resolve_target_policy(kwargs.get("model", kwargs.get("model_name", "")), explicit=explicit, constructor_defaults=defaults)
+        kwargs = policy.model_kwargs()
+        if policy.api == "responses" and kwargs.get("output_version") == "v0":
+            raise TargetResolutionError("Databricks Responses requires output_version='v1' or 'responses/v1' to preserve opaque continuation state; v0 is unsupported.")
+        if policy.surface == "unified" and policy.api == "responses":
+            if kwargs.get("store") is True or kwargs.get("use_previous_response_id") or kwargs.get("previous_response_id") or (kwargs.get("model_kwargs") or {}).get("previous_response_id"):
+                raise TargetResolutionError("Unified Databricks Responses is stateless: store=True and previous_response_id are unsupported. Replay the complete conversation history instead.")
+            kwargs["store"] = False
+        # Never fall back to an unrelated OPENAI_API_KEY or OpenAI endpoint.
+        kwargs["api_key"] = "databricks-sdk-auth"
+        kwargs.setdefault("use_responses_api", False)
+        stream_usage = policy.capabilities.values.get("stream_usage", True) if policy.api == "chat" else True
+        if stream_usage is False and kwargs.get("stream_usage") is True:
+            raise TargetResolutionError(f"{policy.target.name} does not support Chat stream_options (verified Gateway behavior); remove stream_usage=True or correct the explicit capability profile.")
+        kwargs.setdefault("stream_usage", stream_usage)
+        kwargs.setdefault("include_response_headers", True)
+        kwargs.setdefault("client", _LazyClient(lambda: self._root(False).chat.completions))
+        kwargs.setdefault("async_client", _LazyClient(lambda: self._root(True).chat.completions))
+        kwargs.setdefault("root_client", _LazyClient(lambda: self._root(False)))
+        kwargs.setdefault("root_async_client", _LazyClient(lambda: self._root(True)))
+        super().__init__(**kwargs)
+        self._target_policy = policy
+        if "base_url" not in kwargs and "openai_api_base" not in kwargs:
+            # ChatOpenAI reads OPENAI_API_BASE. It does not select Databricks'
+            # workspace and must not affect this provider's destination.
+            self.openai_api_base = None
+        if self.use_ai_gateway and self.use_ai_gateway_native_api:
+            raise ValueError("Choose either unified or native AI Gateway routing, not both.")
+
+    @property
+    def endpoint(self) -> str:
+        return self.model_name
+
+    @property
+    def target_policy(self) -> TargetPolicy:
+        return self._target_policy
+
+    @property
+    def transport_surface(self) -> str:
+        return self.target_policy.surface
+
+    @property
+    def transport_api(self) -> str:
+        return self.target_policy.api
+
+    def clone_with_policy(self, *, api: str, surface: str) -> MantaChatDatabricks:
+        """Restore a checkpoint's dialect without changing target or credentials."""
+        options = dict(self.target_policy.params)
+        options.update(
+            model=self.model_name, target_kind=self.target_policy.target.kind,
+            api=api, surface=surface,
+            profile=self.target_policy.capabilities.profile,
+            request_tags=self.target_policy.request_tags,
+            databricks_profile=self.target_policy.profile,
+            workspace_client=self.workspace_client,
+        )
+        return type(self)(**options)
+
+    def _workspace(self) -> Any:
+        if self.workspace_client is None:
+            from .auth import resolve_workspace_client
+
+            self.workspace_client = (
+                resolve_workspace_client(self.target_policy.profile)
+                if self.target_policy.profile else resolve_workspace_client()
+            )
+        return self.workspace_client
+
+    def _auth_headers(self) -> dict[str, str]:
+        headers = self._workspace().config.authenticate()
+        if not any(key.lower() == "authorization" and value for key, value in headers.items()):
+            raise ValueError("Databricks SDK did not provide authorization headers.")
+        return dict(headers)
+
+    def _gateway_enabled(self) -> bool:
+        if self.use_ai_gateway is not None:
+            return self.use_ai_gateway
+        # UC model services use three-part FQNs. Preserve the exact identifier.
+        return len(self.model_name.split(".")) == 3
+
+    def _base_url(self) -> str:
+        host = self._workspace().config.host.rstrip("/")
+        if self.openai_api_base:
+            supplied = urlsplit(self.openai_api_base)
+            workspace = urlsplit(host)
+            if (supplied.scheme, supplied.netloc) != (workspace.scheme, workspace.netloc):
+                raise ValueError("Databricks base_url must use the configured workspace origin.")
+            expected_path = {
+                "legacy": "/serving-endpoints", "unified": "/ai-gateway/mlflow/v1",
+                "openai": "/ai-gateway/openai/v1",
+            }[self.transport_surface]
+            if supplied.path.rstrip("/") != expected_path or supplied.query or supplied.fragment:
+                raise TargetResolutionError(f"Databricks base_url contradicts selected surface {self.transport_surface!r}; expected workspace route {expected_path}.")
+            return self.openai_api_base
+        if self.use_ai_gateway_native_api:
+            return f"{host}/ai-gateway/openai/v1"
+        if self._gateway_enabled():
+            return f"{host}/ai-gateway/mlflow/v1"
+        return f"{host}/serving-endpoints"
+
+    def _root(self, asynchronous: bool) -> Any:
+        attr = "_async_root" if asynchronous else "_sync_root"
+        root = getattr(self, attr)
+        if root is None:
+            import openai
+
+            base_url = self._base_url()
+            auth = _WorkspaceAuth(self._auth_headers)
+            # OpenAI 3's default client uses HTTPX 2. Keep the documented SDK
+            # defaults while using HTTPX 0.28's public Auth/client contract.
+            timeout = openai.DEFAULT_TIMEOUT
+            limits = openai.DEFAULT_CONNECTION_LIMITS
+            http_options = {
+                "auth": auth,
+                "timeout": httpx.Timeout(
+                    connect=timeout.connect, read=timeout.read,
+                    write=timeout.write, pool=timeout.pool,
+                ),
+                "limits": httpx.Limits(
+                    max_connections=limits.max_connections,
+                    max_keepalive_connections=limits.max_keepalive_connections,
+                    keepalive_expiry=limits.keepalive_expiry,
+                ),
+                "follow_redirects": True,
+            }
+            if asynchronous:
+                http_client = (
+                    _BorrowedAsyncClient(self.http_async_client, auth)
+                    if self.http_async_client is not None
+                    else httpx.AsyncClient(**http_options)
+                )
+            else:
+                http_client = (
+                    _BorrowedClient(self.http_client, auth)
+                    if self.http_client is not None
+                    else httpx.Client(**http_options)
+                )
+            options: dict[str, Any] = {
+                "base_url": base_url,
+                "api_key": "databricks-sdk-auth",
+                "http_client": http_client,
+            }
+            for key, value in (
+                ("timeout", self.request_timeout),
+                ("max_retries", self.max_retries),
+                ("default_headers", self.default_headers),
+                ("default_query", self.default_query),
+            ):
+                if value is not None:
+                    options[key] = value
+            cls = openai.AsyncOpenAI if asynchronous else openai.OpenAI
+            root = cls(**options)
+            setattr(self, attr, root)
+        return root
+
+    def _get_ls_params(self, *args: Any, **kwargs: Any) -> Any:
+        return {**super()._get_ls_params(*args, **kwargs), "ls_provider": "databricks"}
+
+    @property
+    def _llm_type(self) -> str:
+        return "chat-databricks"
+
+    def _validate_forced_tool_choice(self, choice: Any) -> None:
+        unsupported = self.target_policy.capabilities.values.get("forced_tool_choice") is False
+        if self.use_responses_api and unsupported and choice not in (None, False, "auto", "none"):
+            raise TargetResolutionError(
+                f"{self.model_name} does not support forced tool choice on Responses (verified service behavior). Use tool_choice='auto' for its supported tool-calling loop."
+            )
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Any:
+        self._validate_forced_tool_choice(tool_choice)
+        return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
+
+    def _validate_known_capabilities(self, payload: dict[str, Any]) -> None:
+        values = self.target_policy.capabilities.values
+        if not self.use_responses_api and values.get("stream_usage") is False and payload.get("stream_options") is not None:
+            raise TargetResolutionError(f"{self.model_name} does not support Chat stream_options (verified Gateway behavior); remove stream_options/stream_usage or correct the explicit capability profile.")
+        if values.get("temperature") is False and payload.get("temperature") is not None:
+            raise TargetResolutionError(f"{self.model_name} has temperature disabled in its capability profile; remove temperature or correct the explicit profile override.")
+        reasoning = payload.get("reasoning") or {}
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+        effort = effort or payload.get("reasoning_effort")
+        levels = values.get("reasoning_effort_levels")
+        if effort is not None and levels is not None and effort not in levels:
+            raise TargetResolutionError(f"{self.model_name} supports reasoning effort values {levels}; requested {effort!r}. Update the option or its explicit capability profile.")
+        if payload.get("tools") and values.get("tool_calling") is False:
+            raise TargetResolutionError(f"{self.model_name} has tool calling disabled in its capability profile; select a tool-capable service or correct the profile override.")
+        cap = payload.get("max_output_tokens", payload.get("max_completion_tokens", payload.get("max_tokens")))
+        maximum = values.get("max_output_tokens")
+        if isinstance(cap, int) and isinstance(maximum, int) and cap > maximum:
+            raise TargetResolutionError(f"Requested output cap {cap} exceeds {self.model_name}'s verified/profile limit {maximum}; lower the cap or correct its profile override.")
+
+    def _get_request_payload(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        transport_options = {"model", "model_name", "endpoint", "api", "surface", "use_responses_api", "use_ai_gateway", "use_ai_gateway_native_api", "target_kind", "databricks_profile"}.intersection(kwargs)
+        if transport_options:
+            raise TargetResolutionError(
+                f"Transport options {', '.join(sorted(transport_options))} belong on the Databricks model constructor. Rebuild the model or use clone_with_policy(api=..., surface=...) before invoking it."
+            )
+        limits = {key: kwargs.pop(key) for key in ("max_tokens", "max_completion_tokens", "max_output_tokens") if key in kwargs}
+        if limits:
+            cap = next(iter(limits.values()))
+            if any(value != cap for value in limits.values()):
+                raise TargetResolutionError("Conflicting per-call max_tokens and max_output_tokens limits.")
+            # The default constructor payload uses max_completion_tokens;
+            # normalizing before merge prevents that default replacing a
+            # higher-priority max_tokens alias during Responses conversion.
+            kwargs["max_completion_tokens"] = cap
+        if self.use_responses_api and (kwargs.get("stop") or getattr(self, "stop", None)):
+            raise TargetResolutionError("The Responses API does not support stop sequences; remove stop or select a service supporting api='chat'.")
+        if self.transport_surface == "unified" and self.use_responses_api:
+            if kwargs.get("store") is True or kwargs.get("previous_response_id"):
+                raise TargetResolutionError("Unified Databricks Responses is stateless; send complete history without store=True or previous_response_id.")
+            kwargs["store"] = False
+        call_tags = kwargs.pop("request_tags", None)
+        if "extra_headers" in kwargs or call_tags is not None:
+            base_tags = json.loads(merge_request_tag_headers(self.default_headers, self.target_policy.request_tags).get("Databricks-Ai-Gateway-Request-Tags", "{}"))
+            kwargs["extra_headers"] = merge_request_tag_headers(
+                kwargs.get("extra_headers"), {**base_tags, **validate_request_tags(call_tags or {})},
+            )
+        custom_inputs = kwargs.pop("custom_inputs", None)
+        if custom_inputs is not None:
+            kwargs["extra_body"] = {
+                **(self.extra_body or {}), **(kwargs.get("extra_body") or {}),
+                "custom_inputs": custom_inputs,
+            }
+        payload = super()._get_request_payload(*args, **kwargs)
+        if "messages" in payload:
+            payload = restore_chat_state(payload, self._convert_input(args[0] if args else kwargs["input_"]).to_messages())
+        self._validate_forced_tool_choice(payload.get("tool_choice"))
+        if "input" in payload:
+            temperature = kwargs.get("temperature", self.temperature)
+            if temperature is not None:
+                payload["temperature"] = temperature
+            payload = restore_responses_state(
+                payload, self._convert_input(args[0] if args else kwargs["input_"]).to_messages(),
+            )
+            if "stop" in payload and payload["stop"]:
+                raise TargetResolutionError("The Responses API does not support stop sequences; remove stop or select a service supporting api='chat'.")
+            if "parallel_tool_calls" in payload and not isinstance(payload["parallel_tool_calls"], bool):
+                raise TargetResolutionError("parallel_tool_calls must be a boolean.")
+        if "messages" in payload and not self.use_ai_gateway_native_api:
+            # FMAPI's chat dialect retains max_tokens and does not accept the
+            # strict tool flag for non-GPT models. Keep those existing quirks.
+            if "max_completion_tokens" in payload:
+                payload["max_tokens"] = payload.pop("max_completion_tokens")
+            if "gpt" not in self.model_name.lower():
+                tools = copy.deepcopy(payload.get("tools", []))
+                if "tools" in payload:
+                    payload["tools"] = tools
+                for tool in tools:
+                    if isinstance(tool.get("function"), dict):
+                        tool["function"].pop("strict", None)
+            if "claude" in self.model_name.lower():
+                for message in payload["messages"]:
+                    if (
+                        message.get("role") == "assistant"
+                        and message.get("tool_calls")
+                        and not message.get("content")
+                    ):
+                        message["content"] = " "
+        unknown = payload.keys() - _dialect_request_parameters(self.transport_api)
+        if unknown:
+            raise TargetResolutionError(
+                f"Options {', '.join(sorted(unknown))} are unsupported by the {self.transport_api} transport. Remove them, select a compatible API, or put documented Databricks extensions in extra_body."
+            )
+        self._validate_known_capabilities(payload)
+        return payload
 
     def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:
         return _normalize_chat_result(super()._generate(*args, **kwargs))
 
+    def _create_chat_result(self, response: Any, generation_info: Any = None) -> ChatResult:
+        from .providers.chat_compat import capture_chat_result_state
+        return capture_chat_result_state(super()._create_chat_result(response, generation_info), response)
+
+    def _convert_chunk_to_generation_chunk(self, chunk: Any, default_chunk_class: Any, base_generation_info: Any = None) -> Any:
+        from .providers.chat_compat import capture_chat_chunk_state
+        return capture_chat_chunk_state(
+            super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info), chunk,
+        )
+
     async def _agenerate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        # First SDK/client construction may consult CLI or cloud credentials.
+        # Keep it off the event loop, just like per-request credential refresh.
+        await asyncio.to_thread(self._root, True)
         return _normalize_chat_result(await super()._agenerate(*args, **kwargs))
 
-    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
-        dedup = _StreamUsageDeduplicator()
-        for chunk in super()._stream(*args, **kwargs):
-            yield dedup.rewrite(_normalize_chunk(chunk))
+    def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        dedup = (
+            _StreamUsageDeduplicator()
+            if not self._gateway_enabled() and not self.use_ai_gateway_native_api
+            else None
+        )
+        for chunk in preserve_sync_stream(super()._stream(messages, stop=stop, run_manager=None, **kwargs)):
+            normalized = _normalize_chunk(chunk)
+            normalized = dedup.rewrite(normalized) if dedup is not None else normalized
+            if run_manager:
+                run_manager.on_llm_new_token(normalized.text, chunk=normalized, logprobs=(normalized.generation_info or {}).get("logprobs"))
+            yield normalized
 
     async def _astream(
-        self, *args: Any, **kwargs: Any
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
     ) -> AsyncIterator[ChatGenerationChunk]:
-        dedup = _StreamUsageDeduplicator()
-        async for chunk in super()._astream(*args, **kwargs):
-            yield dedup.rewrite(_normalize_chunk(chunk))
+        await asyncio.to_thread(self._root, True)
+        dedup = (
+            _StreamUsageDeduplicator()
+            if not self._gateway_enabled() and not self.use_ai_gateway_native_api
+            else None
+        )
+        async for chunk in preserve_async_stream(super()._astream(messages, stop=stop, run_manager=None, **kwargs)):
+            normalized = _normalize_chunk(chunk)
+            normalized = dedup.rewrite(normalized) if dedup is not None else normalized
+            if run_manager:
+                await run_manager.on_llm_new_token(normalized.text, chunk=normalized, logprobs=(normalized.generation_info or {}).get("logprobs"))
+            yield normalized
 
 
 #: Guards :func:`_install_subagent_databricks_resolver` against re-patching.
@@ -239,7 +712,7 @@ def _install_subagent_databricks_resolver() -> bool:
         return True
     try:
         from deepagents import _models
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional runtime import must not block registration
         return False
 
     from . import providers
@@ -294,5 +767,5 @@ try:  # pragma: no cover - exercised via the live server subprocess
     from .hook import install_build_hook as _install_build_hook
 
     _install_build_hook()
-except Exception:  # noqa: BLE001
+except Exception:  # noqa: BLE001, S110 - best-effort server hook, checked by doctor
     pass

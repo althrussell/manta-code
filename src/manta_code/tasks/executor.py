@@ -115,6 +115,7 @@ def submit_task(
     else:
         env.pop("MANTA_ALLOW_ASKS", None)
     if profile:
+        env["MANTA_PROFILE"] = profile
         env["DATABRICKS_CONFIG_PROFILE"] = profile
 
     argv = [sys.executable, "-m", "manta_code.tasks.runner", task_id]

@@ -191,8 +191,10 @@ def save_agent(defn: AgentDef, *, root: Path | None = None) -> Path:
     try:
         import tomli_w
     except ImportError as exc:  # pragma: no cover - depends on optional extra
+        from ..installation import runtime_install_command
+
         raise RuntimeError(
-            "tomli-w is not installed. Install with: pip install -e '.[agent]'"
+            f"tomli-w is not installed. Install with: {runtime_install_command()}"
         ) from exc
 
     directory = agent_dir(defn.name, root=root)
