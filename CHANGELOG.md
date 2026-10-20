@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.4.0] — 2026-10-21
 
 - Adds a visible agent team: `/agents` authoring, persistent enable/disable,
   typed model controls, safe reload, validation and task assignment through the
@@ -30,6 +30,11 @@
   unrelated direct-key provider rows and recommendations from this picker.
 - Adds rendered welcome and model-selection regression coverage for the
   current catalog-backed TUI, including profile changes and allowed-model policy.
+
+Measured model efficiency remains the next milestone: comparative model-quality,
+cost and latency evaluations, advanced scoped memory, and broader media/schema
+qualification are not included. See the [release notes](docs/releases/v0.4.0.md)
+for qualification and operational limits.
 
 ## [0.3.0] — 2026-10-20
 
@@ -96,6 +101,7 @@ version branding, and expanded README workflows.
 Initial pilot release of the Databricks-configured Deep Agents launcher and
 Manta agent control plane.
 
+[0.4.0]: https://github.com/althrussell/manta-code/releases/tag/v0.4.0
 [0.3.0]: https://github.com/althrussell/manta-code/releases/tag/v0.3.0
 [0.2.0]: https://github.com/althrussell/manta-code/releases/tag/v0.2.0
 [0.1.0]: https://github.com/althrussell/manta-code/releases/tag/v0.1.0

@@ -170,7 +170,7 @@ def runtime_command(ctx: typer.Context) -> None:
 @app.command("update")
 def update_command(
     check: bool = typer.Option(False, "--check", help="Check without installing."),
-    version: Optional[str] = typer.Option(None, "--version", help="Exact stable Manta tag, e.g. v0.3.0."),
+    version: Optional[str] = typer.Option(None, "--version", help=f"Exact stable Manta tag, e.g. v{__version__}."),
 ) -> None:
     """Check/install a complete Manta release with its qualified dependencies."""
     from .updates import check_release, install_method, upgrade

@@ -45,12 +45,57 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.lock
           python -m pip install 'setuptools==84.0.0' 'wheel==0.48.0'
+          python -m pip install 'uv==0.11.15'
           python -m pip install --no-deps -e '.[dev,agent]'
           python -m pip check
       - name: Build and validate release assets
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python scripts/build_release.py --output-dir dist --tag "$RELEASE_TAG"
+      - name: Qualify fresh tagged install and previous-release upgrade
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          qualification_python="$(command -v python)"
+          export UV_CACHE_DIR="$RUNNER_TEMP/manta-install-cache"
+          export UV_TOOL_DIR="$RUNNER_TEMP/manta-fresh-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/manta-fresh-bin"
+          export UV_NO_CONFIG=true UV_PYTHON_DOWNLOADS=never
+          export UV_DEFAULT_INDEX=https://pypi.org/simple
+          unset UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL PIP_INDEX_URL PIP_EXTRA_INDEX_URL
+          export MANTA_HOME="$RUNNER_TEMP/manta-install-state"
+          export DEEPAGENTS_HOME="$RUNNER_TEMP/manta-install-runtime"
+          mkdir -p "$RUNNER_TEMP/manta-install-project"
+          cd "$RUNNER_TEMP/manta-install-project"
+
+          install_tag() {
+            uv tool install --force --upgrade --python "$qualification_python" \
+              --constraints "https://raw.githubusercontent.com/althrussell/manta-code/$1/requirements-dev.lock" \
+              "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@$1"
+          }
+          verify_tag() {
+            test "$("$UV_TOOL_BIN_DIR/manta" --version)" = "${1#v}"
+            uv pip check --python "$UV_TOOL_DIR/manta-code/bin/python"
+            "$UV_TOOL_DIR/manta-code/bin/python" -I -c \
+              'import sys, manta_code; sys.exit(0 if manta_code.__version__ == sys.argv[1] and not manta_code.__file__.startswith(sys.argv[2]) else "Wrong installed version or source path")' \
+              "${1#v}" "$GITHUB_WORKSPACE/"
+          }
+
+          install_tag "$RELEASE_TAG"
+          verify_tag "$RELEASE_TAG"
+          "$UV_TOOL_BIN_DIR/manta" agents --help
+          "$UV_TOOL_BIN_DIR/manta" task --help
+          "$UV_TOOL_BIN_DIR/manta" runtime mcp --help
+
+          export UV_TOOL_DIR="$RUNNER_TEMP/manta-upgrade-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/manta-upgrade-bin"
+          install_tag v0.3.0
+          verify_tag v0.3.0
+          install_tag "$RELEASE_TAG"
+          verify_tag "$RELEASE_TAG"
+          "$UV_TOOL_DIR/manta-code/bin/python" -I -c \
+            'import sys; from manta_code.updates import install_method; sys.exit(0 if install_method() == "uv" else "Missing uv install receipt")'
       - name: Publish the verified GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

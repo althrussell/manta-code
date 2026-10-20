@@ -60,13 +60,13 @@ for each configured target in the selected workspace.
 
 ## Install
 
-The commands below install published v0.3.0. The
-[dependable-foundations](docs/19-dependable-foundations.md) and
-[visible-agent-team](docs/20-visible-agent-team.md) milestones are unreleased
-source candidates. Their new workspaces, isolated tasks, continuation and
-control features require the candidate source until a later tag is published.
+**v0.4.0 includes [dependable foundations](docs/19-dependable-foundations.md)
+and the [visible agent team](docs/20-visible-agent-team.md)**: author specialists,
+assign isolated tasks, answer durable approval requests, and review changes
+before integrating them. Measured model efficiency remains the next milestone;
+this release makes no comparative model-quality or savings claim.
 
-**v0.3.0 requires Python 3.12+** and is distributed through
+**v0.4.0 requires Python 3.12+** and is distributed through
 [GitHub Releases](https://github.com/althrussell/manta-code/releases).
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
 then install the tagged release with its qualified dependency constraints:
@@ -74,8 +74,8 @@ then install the tagged release with its qualified dependency constraints:
 ```bash
 uv python install 3.12
 uv tool install --python 3.12 \
-  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
 uv tool update-shell
 manta --version
 ```
@@ -95,12 +95,12 @@ the tool environment:
 
 ```bash
 uv tool install --force --upgrade --python 3.12 \
-  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
 ```
 
 A tag-pinned installation stays on that tag when you run `uv tool upgrade`.
-The foundation update adds `manta update --check` and
+v0.4.0 adds `manta update --check` and
 `manta update --version vMAJOR.MINOR.PATCH` to check and install a complete Manta
 release with its matching constraints. `/update` supplies the same workflow
 inside the session; editable checkouts retain deliberate Git/lockfile updates.
@@ -213,7 +213,7 @@ are archived. Legacy SQLite notes remain inspectable but are marked
 legacy/unassigned and excluded from automatic recall. See the
 [foundation guide](docs/19-dependable-foundations.md) for ownership and limits.
 
-For the candidate's complete create → assign → answer → review → integrate
+For the complete create → assign → answer → review → integrate
 workflow, CLI/SDK examples, context choices and qualification commands, see the
 [visible agent team guide](docs/20-visible-agent-team.md). Inline delegation
 shares the parent checkout; detached tasks isolate changes. Forked detached
@@ -314,7 +314,7 @@ See the [configuration reference](docs/10-config-schema.md),
 [model control qualification](docs/18-model-capability-qualification.md) records
 exact effort/context evidence; the
 [foundation tracker](docs/19-dependable-foundations.md) records implementation
-and remaining validation for this milestone.
+and qualification for this milestone.
 
 Env toggles: `MANTA_AGENT_ADDRESSING=0`, `MANTA_ADVICE=0`,
 `MANTA_SWAP_RESUME=0`, `MANTA_NOTIFY=0`, `MANTA_HOME=<dir>`.
