@@ -29,7 +29,7 @@ class EvalOutput:
     """A solver's answer plus its measured cost."""
 
     text: str
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
     tokens: int = 0
     model: str = ""
 
@@ -44,7 +44,7 @@ class TaskResult:
     category: str
     score: float
     notes: str
-    cost_usd: float
+    cost_usd: float | None
     tokens: int
     model: str
 
@@ -62,8 +62,18 @@ class SuiteResult:
         return sum(r.score for r in self.results) / len(self.results)
 
     @property
-    def total_cost(self) -> float:
-        return sum(r.cost_usd for r in self.results)
+    def total_cost(self) -> float | None:
+        if any(r.cost_usd is None for r in self.results):
+            return None
+        return sum(r.cost_usd for r in self.results if r.cost_usd is not None)
+
+    @property
+    def known_cost(self) -> float:
+        return sum(r.cost_usd for r in self.results if r.cost_usd is not None)
+
+    @property
+    def priced_tasks(self) -> int:
+        return sum(r.cost_usd is not None for r in self.results)
 
     @property
     def total_tokens(self) -> int:
@@ -107,27 +117,30 @@ class Comparison:
         return self.candidate.quality - self.baseline.quality
 
     @property
-    def cost_delta(self) -> float:
-        return self.candidate.total_cost - self.baseline.total_cost
+    def cost_delta(self) -> float | None:
+        baseline, candidate = self.baseline.total_cost, self.candidate.total_cost
+        return candidate - baseline if baseline is not None and candidate is not None else None
 
     @property
     def cost_savings_pct(self) -> float | None:
-        if self.baseline.total_cost == 0:
+        baseline, delta = self.baseline.total_cost, self.cost_delta
+        if baseline is None or baseline == 0 or delta is None:
             return None
-        return -self.cost_delta / self.baseline.total_cost * 100.0
+        return -delta / baseline * 100.0
 
     @property
     def quality_ok(self) -> bool:
         return self.quality_delta >= -QUALITY_TOLERANCE
 
     @property
-    def cheaper_or_equal(self) -> bool:
-        return self.cost_delta <= 1e-9
+    def cheaper_or_equal(self) -> bool | None:
+        delta = self.cost_delta
+        return delta <= 1e-9 if delta is not None else None
 
     @property
-    def wins(self) -> bool:
+    def wins(self) -> bool | None:
         """The candidate wins iff it holds quality *and* doesn't cost more."""
-        return self.quality_ok and self.cheaper_or_equal
+        return self.cheaper_or_equal if self.quality_ok else False
 
 
 def compare(baseline: SuiteResult, candidate: SuiteResult) -> Comparison:
@@ -137,11 +150,14 @@ def compare(baseline: SuiteResult, candidate: SuiteResult) -> Comparison:
 def render_comparison(cmp: Comparison) -> str:
     """A compact text report (used by the CLI/demo and easy to assert on)."""
     b, c = cmp.baseline, cmp.candidate
+    def cost_label(suite: SuiteResult) -> str:
+        total = suite.total_cost
+        return f"${total:.4f}" if total is not None else f"unknown (known ${suite.known_cost:.4f}; {suite.priced_tasks}/{len(suite.results)} tasks priced)"
     lines = [
         f"Eval over {len(c.results)} tasks",
-        f"  {b.config_name:<16} quality={b.quality:.2f} cost=${b.total_cost:.4f} "
+        f"  {b.config_name:<16} quality={b.quality:.2f} cost={cost_label(b)} "
         f"tokens={b.total_tokens}",
-        f"  {c.config_name:<16} quality={c.quality:.2f} cost=${c.total_cost:.4f} "
+        f"  {c.config_name:<16} quality={c.quality:.2f} cost={cost_label(c)} "
         f"tokens={c.total_tokens}",
     ]
     savings = cmp.cost_savings_pct
@@ -150,6 +166,8 @@ def render_comparison(cmp: Comparison) -> str:
             f"  -> quality {cmp.quality_delta:+.2f}, cost {savings:+.0f}% "
             f"({'WIN' if cmp.wins else 'no win'})"
         )
+    elif cmp.cost_delta is None:
+        lines.append(f"  -> quality {cmp.quality_delta:+.2f} ({'held' if cmp.quality_ok else 'regressed'}); no cost/savings verdict: pricing incomplete")
     else:
         lines.append(f"  -> {'WIN' if cmp.wins else 'no win'}")
     return "\n".join(lines)

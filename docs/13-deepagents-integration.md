@@ -1,16 +1,22 @@
 # deepagents-code Integration
 
-As of [ADR 0007](adr/0007-adopt-deepagents-code-tui.md), Manta's interactive
-surface **is** the upstream
-[`deepagents-code`](https://pypi.org/project/deepagents-code/) TUI. Manta does
-not build, fork, or wrap the agent — it provisions a Databricks model provider,
-resolves the Databricks profile, and launches the TUI. This keeps Manta tiny and
-lets it inherit `deepagents-code`'s approval/HITL, budget, sessions, skills, and
-model switcher for free.
+Manta uses the upstream
+[`deepagents-code`](https://pypi.org/project/deepagents-code/) TUI, adopted in
+[ADR 0007](adr/0007-adopt-deepagents-code-tui.md), and injects its agent,
+policy, economy, and task control plane through the runtime seam described in
+[ADR 0008](adr/0008-owned-agent-control-plane.md). Upstream provides the
+terminal UI, approval interaction, sessions, skills, and base model picker.
+Manta provides the Databricks model adapter and the enforced agent behavior.
+
+The current runtime pins `deepagents-code==0.1.86` and `deepagents==0.7.28`,
+which require Python 3.12+ together. Databricks transport uses the official
+`langchain-openai` adapter plus the Databricks SDK. The former
+`databricks-langchain`/`databricks-openai` dependency chain was removed because
+its MCP 1.x requirement conflicts with the runtime's MCP 2.x requirement.
 
 ## How it wires together
 
-Everything lives in two modules:
+The launcher, model adapter, and runtime hooks form the integration boundary.
 
 ### `src/manta_code/dcode.py` — the launcher
 
@@ -18,38 +24,171 @@ Everything lives in two modules:
   into `~/.deepagents/config.toml`:
 
   ```toml
-  [providers.databricks]
+  [models.providers.databricks]
   class_path = "manta_code.databricks_chat:MantaChatDatabricks"
-  models = [
-      "databricks-gpt-oss-120b",
-      "databricks-claude-opus-4-8",
-      "databricks-gpt-5-4",
-      "databricks-claude-sonnet-4-5",
-  ]
+  models = ["system.ai.gpt-6-luna", "existing-team-chat"]
   ```
 
-  All other user settings in that file are preserved. `deepagents-code`'s
-  `create_model("databricks:<endpoint>")` then instantiates
+  User settings in that file are preserved. Manta tracks its own inventory
+  entries in `[manta.databricks_inventory]`; workspace refresh replaces owned
+  entries while retaining user registrations. A default migrates automatically
+  only when ownership was recorded and its value is unchanged. `deepagents-code`'s
+  `create_model("databricks:<target>")` then instantiates
   `MantaChatDatabricks` directly — **no fork of its model registry**.
-- `src/manta_code/databricks_chat.py` — `MantaChatDatabricks` is a thin
-  `ChatDatabricks` subclass. Some reasoning endpoints (e.g. Qwen "thinking"
-  models) return the assistant turn as a serialized list of `reasoning` + `text`
-  content blocks; stock `ChatDatabricks` `json.dumps`-es that into the message,
-  so the TUI renders raw JSON. The subclass drops the private `reasoning` blocks
-  and keeps the visible `text` (streamed and non-streamed). It runs inside the
-  LangGraph server subprocess, so the agent's own message history is clean too.
-- `build_launch_env(profile)` sets `DATABRICKS_CONFIG_PROFILE` so the Databricks
-  SDK (and therefore `ChatDatabricks`) authenticates against the right
-  `~/.databrickscfg` profile. This is how `-p/--profile` reaches the model.
+- `build_launch_env(profile)` aligns `MANTA_PROFILE` and
+  `DATABRICKS_CONFIG_PROFILE` with the resolved profile. It also exports
+  `MANTA_DATABRICKS_POLICY`: nonsecret target settings, preserved provider
+  defaults, request tags, and discovered capability evidence. Credentials and
+  client objects stay out of that payload. This carries the same construction
+  policy to the server and background workers.
 - `build_dcode_argv(default_endpoint, passthrough)` builds
-  `python -m deepagents_code -M databricks:<endpoint> <passthrough…>` (the
-  default `-M` is only injected if the user didn't pass their own).
+  `python -m manta_code._boot -M databricks:<target> <passthrough…>` (the
+  default `-M` is injected only for a new session without an explicit model).
+  Resuming does not overwrite the saved session model.
 - `launch(...)` provisions config + env and `os.execvpe`s into the TUI so the
   terminal is handed over cleanly.
 
-The pure helpers (config merge, env build, argv build) are unit-tested in
-`tests/test_dcode.py` without launching a subprocess; only `launch()` has side
-effects.
+The config-merge, environment, and argument helpers are tested in
+`tests/test_dcode.py` without launching a subprocess. The launcher also prepares
+onboarding state and generated agent profiles.
+
+### `src/manta_code/databricks_chat.py` — SDK-authenticated OpenAI transport
+
+The stable class path `manta_code.databricks_chat:MantaChatDatabricks` now
+subclasses `langchain_openai.ChatOpenAI`. It constructs the OpenAI clients
+lazily and refreshes all Databricks SDK authentication headers on each request,
+including OAuth and auxiliary Azure headers. Model construction and listing do
+not require credentials.
+Databricks requests do not fall back to `OPENAI_API_KEY` or `OPENAI_API_BASE`;
+an explicit base URL must have the configured workspace's origin.
+
+| Target / surface | Inference base | Automatic API selection |
+| --- | --- | --- |
+| Endpoint / `legacy` | `/serving-endpoints` | Chat Completions |
+| Service / `unified` | `/ai-gateway/mlflow/v1` | Responses unless exact compatibility evidence or Chat-only metadata selects Chat |
+| Service / `openai` | `/ai-gateway/openai/v1` | Responses when supported or metadata is unknown; chat for chat-only metadata |
+
+`providers/targets.py` represents endpoint and service identity separately and
+resolves the shared policy. Three-part FQNs are services by default;
+`target_kind="endpoint"` disambiguates an actual dotted legacy endpoint.
+`model-services/<FQN>` is a management spelling of the same service, not a
+registered-model path. Exact inference identifiers are preserved.
+
+Constructor/runtime options override target settings, Manta settings, and
+preserved upstream defaults, including semantic aliases such as `api` /
+`use_responses_api`. Conflicting options in one layer fail locally. Model
+profile limits and tool/multimodal capabilities remain unknown unless supplied
+by verified evidence or explicit overrides. Supported API metadata guides the
+surface/dialect choice but does not establish those other capabilities.
+Services cannot use the legacy serving route. Native Anthropic Messages, native
+Gemini, and direct provider-service addressing remain optional extensions;
+compatible model services use the unified gateway APIs.
+
+Configured request tags are validated and sent consistently through sync/async,
+chat/Responses, constructor, and per-call paths. Explicit values retain
+precedence; unrelated per-call headers do not discard constructor tags.
+
+Direct Python construction can explicitly select Responses:
+
+```python
+from manta_code.databricks_chat import MantaChatDatabricks
+
+model = MantaChatDatabricks(
+    model="system.ai.gpt-6-1-sol",
+    use_responses_api=True,
+    max_tokens=4096,
+    timeout=60,
+    max_retries=2,
+)
+```
+
+The official adapter owns Responses serialization, tool choice, and replay.
+Parsed content blocks, IDs, and opaque continuation state remain intact.
+Manta's older reasoning-display repair is limited to a serialized JSON string
+containing the known reasoning/text block shape. Legacy streamed cumulative
+usage repair is retained only on the legacy route; gateway usage follows the
+OpenAI adapter.
+
+Exact labs-qualified Gemini services use unified Chat because the gateway's
+Responses continuation rejects even raw replay. Narrow compatibility hooks keep
+Chat `thoughtSignature` and Responses function-call opaque fields intact through
+streaming, v1 conversion, and checkpoints. Gemini omits the unsupported
+`stream_options` request field. See [qualification](15-unity-gateway-qualification.md)
+for the tested identities and limitations.
+
+The same policy applies to primary models built by Deep Agents' class path,
+registry models, explicitly pinned subagents, runtime switches, and background
+workers. The adapter preserves the pinned upstream constructor's distinction
+between provider defaults and explicit runtime overrides; model-specific Manta
+settings therefore are not overwritten by defaults passed through that factory.
+`reliability.PATCH_TARGETS` verifies those private integration seams.
+
+### Discovery and on-demand gateway inspection
+
+`providers/discovery.py` independently enumerates legacy chat endpoints and
+model services in configured schemas (default `system.ai`). SDK pagination,
+including empty intermediate pages, is retained; later failures preserve partial
+results. Configured targets outside those schemas receive direct metadata
+lookups. Metadata denied, unsupported, and unavailable outcomes are distinct
+from confirmed direct-target absence, and none verifies inference permission.
+Known embedding-only targets are excluded from the coding picker.
+
+A bounded launch deadline includes SDK initialization, listing, and direct
+lookups. In-memory caching is scoped to workspace, profile/auth context, schemas,
+and configured identities, and supports explicit refresh. No startup per-service
+FULL detail sweep is needed. `manta gateway --target <target>` fetches detailed
+routing/fallback and visible policy metadata on demand; missing visible policy
+means unknown. Profile switching refreshes inventory and exported capabilities
+before restarting the graph.
+
+`manta doctor` reports metadata and credential readiness without an inference or
+`current_user` call. `manta doctor --probe` performs at most two inference requests
+per distinct configured launch/agent target: request one harmless echo tool call,
+then replay its result and require the echoed nonce. This explicitly spends
+tokens. It preserves opaque state, uses the selected dialect, disables SDK
+retries for the probe, records returned usage, and reports failures without
+switching protocols based on error-message text.
+
+### Session protocol and opaque continuation state
+
+`middleware/session_policy.py` checkpoints the effective target's API/surface
+and profile/workspace identity through private LangGraph state. Isolated
+subagents keep their own state and cannot overwrite the parent's. On resume,
+the middleware restores the saved dialect when runtime
+options do not explicitly select a new one. Both primary and Manta delegated
+agents use this middleware. It rejects a target/provider, profile/workspace, or explicit dialect
+change when the history contains opaque reasoning, signed tool state, or item
+references that cannot safely be replayed to the new model/API. The message
+explains how to continue on the original model or start a fresh thread.
+
+The model-call wrapper order resolves Deep Agents runtime overrides, Manta
+model pins and optional routing before protocol restoration and accounting.
+Consequently the ledger identifies the target and dialect actually called,
+including a restored session protocol. A deterministic planning delegation that
+short-circuits before inference does not create a model-usage row.
+
+### Local accounting and estimates
+
+`agents/usage.py` migrates the SQLite ledger additively. Existing model names,
+tokens, and recorded amounts remain intact. New rows add requested target/service,
+observed backend when exposed, surface/API, request ID, usage completeness,
+cache/reasoning detail, and pricing source/version. An echoed service name or
+response object ID is not invented backend/request metadata.
+
+Prices prefer exact identities and explicit overrides. Arbitrary service names
+and FQNs do not inherit a vendor-family substring rate; unknown rates remain
+unknown. Historical family estimates remain limited to legacy endpoints.
+Cache rates are explicit instead of deriving Anthropic discounts for every
+vendor, and reasoning already included in output is not charged again. The
+transport normalizes streaming usage once; economy reads the merged response
+without another cumulative/delta transformation.
+
+Reports display known subtotals and completeness when any call is unpriced or
+usage is missing. Historical usage completeness remains unconfirmed. Receipts
+with incomplete accounting do not claim dollar savings. Unknown charges cannot
+count toward client USD caps; economy warns and records that limitation while
+retaining trust-first continuation. Gateway budgets and billing are separate.
+Direct qualification calls use the same `record_model_response` accounting helper.
 
 ### Registry-backed agents — two tiers from one source of truth
 
@@ -65,14 +204,21 @@ effects.
 Manta's registry (`~/.manta/agents/`, the `AgentDef` schema in
 `agents/registry.py`) is the single source of truth for **both** tiers. The
 built-in plan → build → review division of labour ships out of the box, each
-pinned to the right Databricks model for its role:
+pinned through the versioned `ROLE_TARGETS` table in
+`src/manta_code/model_defaults.py`:
 
-| Role | Agent | Model field | Notes |
-| --- | --- | --- | --- |
-| Orchestrator (main) | — | `databricks:databricks-gpt-oss-120b` | the `default_endpoint`; fast MoE, strong tool use |
-| Planning | `planning` | `databricks:databricks-claude-opus-4-8` | turns a request into an ordered `write_todos` plan; read-only |
-| Build / SWE | `swe` | `databricks:databricks-gpt-5-4` | implements changes hands-on (edit files, run tests via `execute`) |
-| Review | `review` | `databricks:databricks-claude-sonnet-4-5` | read-only review that reports findings; a different vendor catches what the author model misses |
+| Role | Registry agent | Behavior |
+| --- | --- | --- |
+| Orchestration | main / `chief` | Coordinates tools and delegation |
+| Planning | `planning` | Deliberate planning with read-only enforcement |
+| Build / SWE | `swe` | Hands-on implementation with configured approvals |
+| Review | `review` | Independent read-only review |
+
+Run `manta agents` or `manta agents show <name>` to inspect current pins.
+Default changes apply to Manta-owned built-ins and newly generated config;
+saved user agent definitions continue to override the built-in of the same name.
+Unowned upstream defaults are preserved and surfaced by doctor for deliberate
+migration. Changing the launch default alone does not rewrite agent pins.
 
 **Profile tier (`agents/profiles.py`).** `sync_agent_profiles()` projects every
 registry agent (built-ins + user-created) into a top-level
@@ -116,15 +262,15 @@ just a delegated subagent. Economy is attributed to the active profile (with its
 budget caps) instead of a separate `orchestrator` instance, so a call is never
 double-counted in the ledger.
 
-**Why a resolver shim is needed.** The main agent's `databricks:<endpoint>`
+**Why a resolver shim is needed.** The main agent's `databricks:<target>`
 model works because `deepagents-code`'s `create_model` honors the provider
 `class_path`. Subagent models take a different path: `deepagents` resolves a
 subagent's `model` string via `deepagents._models.resolve_model` → langchain's
 `init_chat_model`, which has **no `databricks` provider** — so a pinned
-`databricks:<endpoint>` would fail with *"Unable to infer model provider"*.
+`databricks:<target>` would fail with *"Unable to infer model provider"*.
 Importing `manta_code.databricks_chat` installs
 `_install_subagent_databricks_resolver()`, which wraps `resolve_model` so
-`databricks:` specs instantiate `MantaChatDatabricks(model=<endpoint>)` directly
+`databricks:` specs instantiate `MantaChatDatabricks(model=<target>)` directly
 (mirroring `_create_model_from_class`) and everything else defers to the
 original resolver. The server subprocess imports this module to build the main
 agent's `class_path` model, so the shim is in place before any subagent is
@@ -147,24 +293,26 @@ which blocks `execute` and all filesystem writes in `wrap_tool_call`. Selecting
 
 ### `src/manta_code/main.py` — argument routing
 
-`main_entry()` + `classify_args()` route Manta's own subcommands (`doctor`,
-`init`) through Typer and send bare invocations and unknown/forwarded flags
+`main_entry()` + `classify_args()` route Manta's own subcommands through Typer
+and send bare invocations and unknown/forwarded flags
 (`-r`, `--skill`, `-M …`) straight to the launcher.
 
 ## Authentication
 
-`src/manta_code/auth.py` resolves the active profile (`-p/--profile` > env >
-default) using the Databricks SDK's unified auth. Manta does not re-implement
+`src/manta_code/auth.py` resolves the active profile (`-p/--profile` >
+`MANTA_PROFILE` > `DATABRICKS_CONFIG_PROFILE` > SDK default) using unified auth.
+Manta does not re-implement
 auth; it only resolves the profile name and exports it as
 `DATABRICKS_CONFIG_PROFILE` before exec.
 
-## Scope: defer to upstream
+## Runtime ownership
 
-Per ADR 0007, Manta defers in-session orchestration to `deepagents-code`: its
-native approval/HITL and budget UX apply. Manta's earlier router / budget
-hard-caps / policy engine are removed from the active codebase; if they are ever
-needed, they would be re-introduced as `deepagents-code` runtime middleware
-rather than a parallel pipeline.
+Manta owns agent definitions, enforced tool/filesystem policy, budget and usage
+accounting, routing/advice, and background tasks. It injects these through the
+Deep Agents build hook and middleware, while upstream owns the terminal and
+agent execution runtime. The boot shim also adapts branding, authentication,
+model selection, and agent switching. These integration seams are checked by
+`reliability.PATCH_TARGETS` and `manta doctor` when upstream pins change.
 
 ## Headless / CI / SDK path (`manta run`)
 
@@ -181,13 +329,16 @@ scripts and CI can branch on it.
 ledger — steering leverage (see where spend is going across parallel agents and
 subagents) without forking the upstream TUI.
 
-## Known gaps
+## Remaining boundaries
 
-- `deepagents-code -n` (non-interactive one-shot) can hang on startup in some
-  environments. **Mitigation:** `manta run` always passes a bounded `--timeout`
-  (default 600s), so a hang fails fast with exit code 124 rather than blocking a
-  scripted/CI run indefinitely; tune via `manta run --timeout`. The interactive
-  TUI remains the primary surface.
-- `deepagents-code` pulls `protobuf` 6.x, which conflicts with
-  `databricks-vectorsearch` (not a Manta dependency). Resolve at the environment
-  level only if both are needed together.
+- Live qualification is workspace/profile dependent. Metadata visibility alone
+  does not verify `EXECUTE`, tool support, a token limit, or availability in
+  another workspace. Re-run `manta doctor --probe` for the intended auth context.
+- Native Anthropic/Gemini dialect adapters and direct provider-service addressing
+  are optional extensions; this integration supports the unified APIs and
+  native OpenAI surface. Gateway billing reconciliation is a separate opt-in
+  feature and does not require system-table access for ordinary inference.
+- Private upstream hooks remain version-sensitive. Keep the exact runtime pins,
+  dependency lock, patch-target checks, and offline wire/session contracts
+  together when upgrading. `manta run` applies its bounded process timeout
+  (default 600 seconds) to headless work.

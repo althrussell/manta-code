@@ -15,9 +15,9 @@ middleware. This package makes the provider a lookup, not an assumption:
   already knows (anthropic, openai, google_genai, …) so a Manta agent can pin
   any provider's model, not just Databricks endpoints.
 
-Everything is guarded in the codebase's house style: resolution failures
-return ``None`` rather than raising, so callers degrade to "use the session
-model" instead of breaking a call or a launch.
+Explicit Databricks selection failures raise :class:`TargetResolutionError` so
+the caller cannot silently substitute a session model with different governance.
+Optional custom-provider resolution keeps its best-effort ``None`` behavior.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from .targets import TargetResolutionError
 
 logger = logging.getLogger("manta.providers")
 
@@ -88,19 +90,19 @@ def registered_providers() -> tuple[str, ...]:
 def _databricks_factory(model: str) -> Any | None:
     """Build a Databricks chat model from a serving-endpoint name.
 
-    Lazy import keeps this package importable without the ``[agent]`` extra;
-    a missing dependency resolves to ``None`` (callers fall back) rather than
-    raising.
+    Lazy import keeps this package importable without the ``[agent]`` extra.
+    Explicit construction failures retain the requested target in a clear error.
     """
     try:
         from ..databricks_chat import MantaChatDatabricks
-    except Exception:  # noqa: BLE001 - optional extra missing
-        return None
+    except ImportError as exc:
+        raise TargetResolutionError("Databricks model support is unavailable; install Manta's agent dependencies.") from exc
     try:
         return MantaChatDatabricks(model=model)
-    except Exception:  # noqa: BLE001 - bad endpoint must not break the caller
-        logger.debug("databricks resolver failed for %s", model, exc_info=True)
-        return None
+    except Exception as exc:  # noqa: BLE001 - preserve explicit selection identity
+        if isinstance(exc, TargetResolutionError):
+            raise
+        raise TargetResolutionError(f"Cannot construct Databricks target {model!r}: {exc}") from exc
 
 
 register_resolver(DATABRICKS_PROVIDER, _databricks_factory)
@@ -127,8 +129,9 @@ def resolve_model_ref(spec: str, *, fallback: bool = True) -> Any | None:
 
     Registered providers win. When ``fallback`` is set and the provider is not
     registered, langchain's ``init_chat_model`` is tried with the full spec.
-    Returns ``None`` when the spec has no provider prefix or nothing could
-    resolve it — never raises.
+    Returns ``None`` when the spec has no provider prefix or an optional custom
+    provider cannot resolve it. Explicit Databricks policy/construction failures
+    raise :class:`TargetResolutionError`.
     """
     ref = parse_model_ref(spec)
     if ref is None:
@@ -137,7 +140,9 @@ def resolve_model_ref(spec: str, *, fallback: bool = True) -> Any | None:
     if factory is not None:
         try:
             return factory(ref.model)
-        except Exception:  # noqa: BLE001 - resolver bugs must not break calls
+        except TargetResolutionError:
+            raise
+        except Exception:  # noqa: BLE001 - optional custom providers stay best-effort
             logger.debug("resolver for %s raised", ref.provider, exc_info=True)
             return None
     if fallback:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from evals import BENCHMARK, EvalOutput, compare, run_suite
 from evals.graders import (
     Grade,
@@ -14,6 +16,13 @@ from evals.graders import (
 from evals.harness import render_comparison
 from evals.solvers import cost_aware_solver, premium_solver
 from evals.tasks import EvalTask
+
+
+@pytest.fixture
+def known_demo_prices(monkeypatch):
+    """Synthetic rates test comparison math, never service billing claims."""
+    from evals import solvers
+    monkeypatch.setattr(solvers, "_price", lambda model, tokens: .1 if model == solvers.PREMIUM_MODEL else .01)
 
 
 def test_grade_clamped():
@@ -52,7 +61,7 @@ def test_benchmark_answers_score_well():
     assert suite.quality >= 0.95
 
 
-def test_cost_aware_wins_against_premium():
+def test_cost_aware_wins_against_premium(known_demo_prices):
     baseline = run_suite(premium_solver(), config_name="premium-only")
     candidate = run_suite(cost_aware_solver(), config_name="cost-aware")
     cmp = compare(baseline, candidate)
@@ -66,7 +75,7 @@ def test_cost_aware_wins_against_premium():
     assert savings is not None and savings > 0
 
 
-def test_render_comparison_text():
+def test_render_comparison_text(known_demo_prices):
     baseline = run_suite(premium_solver(), config_name="premium-only")
     candidate = run_suite(cost_aware_solver(), config_name="cost-aware")
     text = render_comparison(compare(baseline, candidate))
@@ -75,7 +84,7 @@ def test_render_comparison_text():
     assert "WIN" in text
 
 
-def test_quality_regression_is_not_a_win():
+def test_quality_regression_is_not_a_win(known_demo_prices):
     good = run_suite(premium_solver(), config_name="good")
 
     def bad_solver(task: EvalTask) -> EvalOutput:
@@ -146,3 +155,44 @@ def test_live_mode_renders_summary(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Live eval" in out
     assert "real ledger figures" in out
+
+
+def test_unknown_model_price_is_not_zero_or_a_cost_win(monkeypatch, capsys):
+    from evals import solvers
+    from evals.__main__ import main
+    monkeypatch.setattr(solvers, "PREMIUM_MODEL", "custom.team.unpriced-premium")
+    monkeypatch.setattr(solvers, "CHEAP_MODEL", "custom.team.unpriced-cheap")
+    assert solvers._price("custom.team.unpriced-premium", 6000) is None
+    baseline = run_suite(solvers.premium_solver(), config_name="baseline")
+    candidate = run_suite(solvers.cost_aware_solver(), config_name="candidate")
+    comparison = compare(baseline, candidate)
+    assert baseline.total_cost is candidate.total_cost is None
+    assert comparison.cost_delta is comparison.cost_savings_pct is None
+    assert comparison.cheaper_or_equal is comparison.wins is None
+    assert comparison.quality_ok
+    assert "no cost/savings verdict" in render_comparison(comparison)
+    assert "WIN" not in render_comparison(comparison)
+    assert main([]) == 0  # explicitly a quality-only demo when unpriced
+    assert "pricing incomplete" in capsys.readouterr().out
+
+
+def test_partly_priced_suite_preserves_known_cost_without_claiming_total():
+    from evals.harness import SuiteResult, TaskResult
+    suite = SuiteResult("partial", [TaskResult("a", "x", 1, "", .1, 10, "known"), TaskResult("b", "x", 1, "", None, 20, "unknown")])
+    assert suite.total_cost is None
+    assert suite.known_cost == .1
+    assert suite.priced_tasks == 1
+    assert suite.total_tokens == 30
+    assert "1/2 tasks priced" in render_comparison(compare(suite, suite))
+
+
+def test_live_ledger_window_is_task_scoped_and_incomplete_cost_unknown(monkeypatch, tmp_path):
+    from evals import live
+    from manta_code.agents import usage
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    usage.record_usage(usage.UsageRecord(task="eval-one", model="wanted", input_tokens=10, cost_usd=.2, ts=100, usage_complete=True))
+    usage.record_usage(usage.UsageRecord(task="unrelated", model="other", input_tokens=9999, cost_usd=99, ts=101, usage_complete=True))
+    assert live._ledger_window(90, "eval-one") == (.2, 10, "wanted")
+    usage.record_usage(usage.UsageRecord(task="eval-one", model="unpriced", input_tokens=20, cost_usd=None, ts=102))
+    assert live._ledger_window(90, "eval-one") == (None, 30, "unpriced")
+    assert live._ledger_window(90, "missing") == (None, 0, "")

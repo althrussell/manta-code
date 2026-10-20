@@ -186,8 +186,9 @@ def prefer_databricks_models() -> bool:
     # `from ... import get_available_models` copies the reference, so re-point
     # any consumer modules already loaded at patch time.
     for module_name in (
-        "deepagents_code.widgets.model_selector",
-        "deepagents_code.widgets.auth",
+        "deepagents_code.model_catalog",
+        "deepagents_code.tui.widgets.model_selector",
+        "deepagents_code.tui.widgets.auth",
     ):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "get_available_models"):
@@ -198,8 +199,8 @@ def prefer_databricks_models() -> bool:
 def switch_databricks_workspace(app: object, profile: str) -> None:
     """Switch the live session to Databricks ``profile`` and restart the server.
 
-    Sets ``DATABRICKS_CONFIG_PROFILE`` in ``os.environ`` so the next server
-    spawn authenticates against the new workspace (``deepagents-code`` snapshots
+    Aligns both profile environment selectors so the next server spawn
+    authenticates against the new workspace (``deepagents-code`` snapshots
     ``os.environ`` in ``server._build_server_env`` at spawn time), then triggers
     a server respawn via the app's ``/restart`` handler. The conversation thread
     is preserved across the restart.
@@ -211,7 +212,11 @@ def switch_databricks_workspace(app: object, profile: str) -> None:
     import asyncio
     import os
 
+    os.environ["MANTA_PROFILE"] = profile
     os.environ["DATABRICKS_CONFIG_PROFILE"] = profile
+    from manta_code.providers.discovery import clear_discovery_cache
+
+    clear_discovery_cache()
 
     restart = getattr(app, "_restart_server_manual", None)
     notify = getattr(app, "notify", None)
@@ -243,8 +248,41 @@ def switch_databricks_workspace(app: object, profile: str) -> None:
                 markup=False,
             )
 
-    task = asyncio.create_task(restart())
+    model_spec = None
+    effective_model = getattr(app, "_effective_model_spec", None)
+    if callable(effective_model):
+        try:
+            model_spec = effective_model()
+        except Exception:  # noqa: BLE001 - configured pins still refresh
+            pass
+
+    async def refresh_and_restart() -> None:
+        await asyncio.to_thread(_refresh_workspace_inventory, profile, model_spec)
+        await restart()
+
+    task = asyncio.create_task(refresh_and_restart())
     task.add_done_callback(_done)
+
+
+def _refresh_workspace_inventory(profile: str, model_spec: str | None = None) -> None:
+    """Replace Manta's previous inventory before spawning the new workspace."""
+    from manta_code.config import load_config
+    from manta_code.dcode import _target_inventory, databricks_provider_params, ensure_dcode_config
+    from manta_code.providers.targets import export_target_policy
+
+    cfg = load_config()
+    inventory = _target_inventory(
+        profile, ["-M", model_spec] if model_spec else [], refresh=True,
+    )
+    ensure_dcode_config(inventory.names, default_endpoint=cfg.interactive.default_endpoint)
+    os.environ["MANTA_DATABRICKS_POLICY"] = export_target_policy(
+        cfg, provider_params=databricks_provider_params(), inventory=inventory,
+    )
+    # Deep Agents caches parsed TOML in process; the picker must read the new
+    # registration instead of keeping the previous workspace's models.
+    from deepagents_code.model_config import clear_caches
+
+    clear_caches()
 
 
 def rebrand_auth_screen() -> bool:
@@ -278,14 +316,17 @@ def rebrand_auth_screen() -> bool:
         from textual.widgets import OptionList, Static
         from textual.widgets.option_list import Option
 
-        from deepagents_code import theme
-        from deepagents_code.config import get_glyphs, is_ascii_mode
-        from deepagents_code.model_config import get_credential_env_var
-        from deepagents_code.widgets.auth import AuthManagerScreen, AuthPromptScreen
+        from deepagents_code.config import get_glyphs
+        from deepagents_code.tui.widgets.auth import AuthManagerScreen
 
         from manta_code import auth
     except Exception:
         return False
+
+    selected_handler = AuthManagerScreen.on_option_list_option_selected
+    original_selected = getattr(selected_handler, "__manta_original__", selected_handler)
+    mount_handler = AuthManagerScreen.on_mount
+    original_mount = getattr(mount_handler, "__manta_original__", mount_handler)
 
     class WorkspaceSwitchConfirmScreen(ModalScreen):
         """Confirmation overlay shown before restarting to switch workspace."""
@@ -402,10 +443,11 @@ def rebrand_auth_screen() -> bool:
                 f"{glyphs.bullet} Enter switch workspace / manage key "
                 f"{glyphs.bullet} Esc close",
                 classes="auth-manager-help",
+                id="auth-manager-help",
             )
 
     def _on_mount(self: object) -> None:
-        container = self.query_one(Vertical)
+        original_mount(self)
         try:
             workspace_list = self.query_one("#manta-workspace-options", OptionList)
             # The workspace list is short; size to content so the provider
@@ -414,9 +456,6 @@ def rebrand_auth_screen() -> bool:
             workspace_list.styles.max_height = 8
         except Exception:
             pass
-        if is_ascii_mode():
-            colors = theme.get_theme_colors(self)
-            container.styles.border = ("ascii", colors.success)
 
     def _focus_other_list(self: object) -> None:
         """Move keyboard focus between the workspace and provider lists.
@@ -473,13 +512,12 @@ def rebrand_auth_screen() -> bool:
             )
             return
 
-        # Provider key entry: upstream behaviour, verbatim.
-        env_var = get_credential_env_var(selected)
-        self.app.push_screen(
-            AuthPromptScreen(selected, env_var),
-            self._on_prompt_closed,
-        )
+        # Keep upstream's OAuth, install-on-select, service credentials, and
+        # provider-specific callbacks intact as that screen evolves.
+        original_selected(self, event)
 
+    _on_option_selected.__manta_original__ = original_selected
+    _on_mount.__manta_original__ = original_mount
     AuthManagerScreen.compose = _compose
     AuthManagerScreen.on_mount = _on_mount
     AuthManagerScreen.on_option_list_option_selected = _on_option_selected
@@ -494,7 +532,7 @@ def extend_recommended_models() -> bool:
     Upstream's selector opens on a hand-curated "recommended" subset
     (``Ctrl+R`` toggles all models) — and that set contains no ``databricks:``
     specs, so a Databricks-first install sees only its recent picks: the
-    "tiny subset" report. This extends the frozenset with Manta's configured
+    "tiny subset" report. This extends the recommendation mapping with Manta's configured
     endpoints and the agents' model pins (the loop-proven set), so the
     default view is the Manta-curated lineup and ``Ctrl+R`` still reveals
     everything the workspace serves.
@@ -502,7 +540,7 @@ def extend_recommended_models() -> bool:
     Returns ``True`` when the override was applied, ``False`` otherwise.
     """
     try:
-        from deepagents_code.widgets import model_selector
+        from deepagents_code.tui.widgets import model_selector
     except Exception:
         return False
 
@@ -533,7 +571,10 @@ def extend_recommended_models() -> bool:
     if not specs:
         return True  # nothing to add (e.g. Databricks not configured)
 
-    model_selector._RECOMMENDED_MODELS = frozenset(current | specs)
+    model_selector._RECOMMENDED_MODELS = {
+        **current,
+        **{spec: current.get(spec, spec.split(":", 1)[-1]) for spec in specs},
+    }
     return True
 
 
@@ -555,7 +596,7 @@ def rebrand_model_selector_footer() -> bool:
         from textual.content import Content
         from textual.widgets import Static
 
-        from deepagents_code.widgets.model_selector import ModelSelectorScreen
+        from deepagents_code.tui.widgets.model_selector import ModelSelectorScreen
     except Exception:
         return False
 
@@ -587,13 +628,14 @@ def allow_blocking_server() -> bool:
     the event loop. The Databricks SDK's ``databricks-cli`` auth is genuinely
     blocking — it resolves the ``databricks`` binary via ``os.readlink`` and
     shells out for an OAuth token — and exposes no async driver, so the first
-    ``ChatDatabricks`` request inside the server trips ``blockbuster`` with
+    synchronous Databricks-authenticated request can trip ``blockbuster`` with
     ``ValueError: ... Blocking call to os.readlink``.
 
     ``langgraph dev`` only disables that detector when invoked with
     ``--allow-blocking`` (it sets ``LANGGRAPH_ALLOW_BLOCKING`` itself, so an
     inherited env var is overwritten — the flag is the sole seam). This wraps
-    :func:`deepagents_code.server._build_server_cmd` to append the flag. The
+    :func:`deepagents_code.client.launch.server._build_server_cmd` to append
+    the flag. The
     detector is a deployment-hygiene aid for multi-tenant ASGI servers;
     disabling it is the upstream-recommended remedy (option 3) and benign for
     this single-user local dev server.
@@ -601,7 +643,7 @@ def allow_blocking_server() -> bool:
     Returns ``True`` when the override was applied, ``False`` otherwise.
     """
     try:
-        from deepagents_code import server
+        from deepagents_code.client.launch import server
     except Exception:
         return False
 
@@ -629,8 +671,8 @@ def align_agent_switch_model() -> bool:
     own primitives:
 
     - **Conversation continuity**: the previous thread is auto-resumed via
-      ``_resume_thread`` (the same machinery as the ``/threads`` picker and
-      launch-time ``-r``), so switching agents continues your session instead
+      atomic ``resume_thread_id`` transition (the same machinery as the
+      ``/threads`` picker), so switching agents continues your session instead
       of wiping the chat — the new agent picks up where the old one left off.
       ``/clear`` starts fresh when that's what you want. Only threads that
       actually produced agent output are resumed (a brand-new empty thread has
@@ -701,7 +743,7 @@ def align_agent_switch_model() -> bool:
             thread_id = getattr(self, "_lc_thread_id", None)
             if not thread_id:
                 return None
-            from deepagents_code.widgets.message_store import MessageType
+            from deepagents_code.tui.widgets.message_store import MessageType
 
             signal_types = {
                 MessageType.ASSISTANT,
@@ -715,16 +757,37 @@ def align_agent_switch_model() -> bool:
             pass
         return None
 
-    async def wrapped(self: object, agent_name: str) -> None:
+    async def wrapped(
+        self: object,
+        agent_name: str,
+        *,
+        resume_thread_id: str | None = None,
+        preloaded_payload: object = None,
+        persist_default_agent: bool = True,
+    ) -> bool:
         previous_thread = (
-            _resumable_thread(self) if _swap_resume_enabled() else None
+            _resumable_thread(self)
+            if resume_thread_id is None and preloaded_payload is None and _swap_resume_enabled()
+            else None
         )
-        await original_swap(self, agent_name)
+        result = await original_swap(
+            self,
+            agent_name,
+            resume_thread_id=resume_thread_id or previous_thread,
+            preloaded_payload=preloaded_payload,
+            persist_default_agent=persist_default_agent,
+        )
+        if result is False:
+            return False
+        if resume_thread_id is not None or preloaded_payload is not None:
+            # Upstream has already adopted the saved thread model (or retained
+            # the user's explicit launch model). A cross-agent thread resume
+            # must not replace that choice with today's role default.
+            return result
         try:
             if getattr(self, "_assistant_id", None) != agent_name:
-                return  # swap failed and rolled back; leave everything alone
+                return result  # swap failed and rolled back; leave everything alone
             if previous_thread:
-                await self._resume_thread(previous_thread)
                 notify = getattr(self, "notify", None)
                 if callable(notify):
                     notify(
@@ -740,6 +803,7 @@ def align_agent_switch_model() -> bool:
                 )
         except Exception:  # noqa: BLE001 - alignment must never break the swap
             pass
+        return result
 
     wrapped.__manta_pin_align__ = True  # type: ignore[attr-defined]
     DeepAgentsApp._restart_server_for_agent_swap = wrapped
@@ -759,7 +823,7 @@ def add_agent_mentions_to_autocomplete() -> bool:
     Returns ``True`` when the override was applied, ``False`` otherwise.
     """
     try:
-        from deepagents_code.widgets.autocomplete import FuzzyFileController
+        from deepagents_code.tui.widgets.autocomplete import FuzzyFileController
     except Exception:
         return False
 
@@ -819,19 +883,23 @@ def _session_cost_report(thread_id: str | None) -> str:
     model calls (per-call cost — the closest honest thing to "cost per
     turn"), today's total, and the daily cap when configured.
     """
-    from manta_code.agents.usage import recent_calls, thread_totals, today_total_usd
+    from manta_code.agents.usage import recent_calls, thread_totals, today_totals
 
     lines: list[str] = []
     rows = thread_totals(thread_id or "")
     if rows:
         total = sum(r.cost_usd for r in rows)
         tokens = sum(r.total_tokens for r in rows)
-        lines.append(f"Session spend: ${total:.4f}  ({tokens:,} tokens)")
+        complete = all(r.cost_known for r in rows)
+        label = "Session spend" if complete else "Session known subtotal"
+        lines.append(f"{label}: ${total:.4f}  ({tokens:,} tokens)")
         for r in rows:
             lines.append(
                 f"  {r.key:<14} {r.calls:>3} call(s)  "
                 f"{r.total_tokens:>10,} tok  ${r.cost_usd:.4f}"
             )
+            if not r.cost_known:
+                lines.append(f"    {r.completeness_label}")
         calls = recent_calls(thread_id or "", limit=5)
         if calls:
             lines.append("Recent calls (newest first):")
@@ -846,7 +914,9 @@ def _session_cost_report(thread_id: str | None) -> str:
             "No spend recorded for this session yet (the ledger writes after "
             "each model call)."
         )
-    today = today_total_usd()
+    today_row = today_totals()
+    today = today_row.cost_usd
+    today_label = "Today" if today_row.cost_known else "Today known subtotal"
     cap = None
     try:
         from manta_code.config import load_config
@@ -855,9 +925,11 @@ def _session_cost_report(thread_id: str | None) -> str:
     except Exception:  # noqa: BLE001
         pass
     if cap:
-        lines.append(f"Today: ${today:.2f} of ${cap:.2f} daily budget")
+        lines.append(f"{today_label}: ${today:.2f} of ${cap:.2f} daily budget")
     else:
-        lines.append(f"Today (all sessions): ${today:.2f}")
+        lines.append(f"{today_label} (all sessions): ${today:.2f}")
+    if not today_row.cost_known:
+        lines.append(f"  {today_row.completeness_label}; unknown charges are excluded from the USD cap.")
     lines.append("More: manta receipts • manta cost --by model • manta status")
     return "\n".join(lines)
 
@@ -875,7 +947,7 @@ def add_session_cost_command() -> bool:
     try:
         from deepagents_code import command_registry
         from deepagents_code.app import DeepAgentsApp
-        from deepagents_code.widgets.messages import AppMessage, UserMessage
+        from deepagents_code.tui.widgets.messages import AppMessage, UserMessage
     except Exception:
         return False
 
@@ -902,16 +974,24 @@ def add_session_cost_command() -> bool:
 
     # Autocomplete + busy-state classification for the new command.
     try:
-        entry = command_registry.CommandEntry(
+        entry = command_registry.SlashCommand(
             name="/cost",
             description="Session spend: per-agent totals, per-call costs, daily budget",
+            bypass_tier=command_registry.BypassTier.SIDE_EFFECT_FREE,
             hidden_keywords="tokens spend price budget receipts money usage",
-            argument_hint="",
+            aliases=("/spend",),
         )
-        if all(e.name != "/cost" for e in command_registry.SLASH_COMMANDS):
-            command_registry.SLASH_COMMANDS.append(entry)
+        if any(e.name == "/cost" for e in command_registry.COMMANDS):
+            command_registry.COMMANDS = tuple(
+                entry if e.name == "/cost" else e for e in command_registry.COMMANDS
+            )
+        else:
+            command_registry.COMMANDS = (*command_registry.COMMANDS, entry)
         command_registry.SIDE_EFFECT_FREE = frozenset(
             command_registry.SIDE_EFFECT_FREE | {"/cost", "/spend"}
+        )
+        command_registry.QUEUE_BOUND = frozenset(
+            command_registry.QUEUE_BOUND - {"/cost", "/spend"}
         )
         command_registry.ALL_CLASSIFIED = frozenset(
             command_registry.ALL_CLASSIFIED | {"/cost", "/spend"}

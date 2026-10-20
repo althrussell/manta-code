@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from .defaults import _model
+from ..model_defaults import role_model
 from .registry import AgentDef
 
 #: Keyword -> signal mappings. Order independent; first matching model wins.
@@ -42,10 +42,10 @@ def _infer_read_only(text: str) -> bool:
 
 def _infer_model(text: str) -> str:
     if any(hint in text for hint in _PLANNING_HINTS):
-        return _model("databricks-claude-opus-4-8")
+        return role_model("planning")
     if any(hint in text for hint in _READ_ONLY_HINTS):
-        return _model("databricks-claude-sonnet-4-5")
-    return _model("databricks-gpt-5-4")
+        return role_model("review")
+    return role_model("swe")
 
 
 def _infer_databricks_tools(text: str) -> list[str]:

@@ -54,6 +54,14 @@ def test_submit_accepts_at_prefixed_agent(_fake_spawn):
     assert record.agent == "review"
 
 
+def test_explicit_task_profile_overrides_inherited_manta_profile(monkeypatch, _fake_spawn):
+    monkeypatch.setenv("MANTA_PROFILE", "old")
+    monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "older")
+    executor.submit_task("review", "look at the diff", profile="selected")
+    env = _fake_spawn["kwargs"]["env"]
+    assert env["MANTA_PROFILE"] == env["DATABRICKS_CONFIG_PROFILE"] == "selected"
+
+
 def test_submit_rejects_unknown_agent(_fake_spawn):
     with pytest.raises(executor.TaskError, match="no Manta agent named 'nope'"):
         executor.submit_task("nope", "anything")

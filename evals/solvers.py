@@ -3,8 +3,9 @@
 A live solver would call a real Manta agent and read its cost from the usage
 ledger. For CI and for the bundled demo we use deterministic *replay* solvers: a
 bank of canned answers (so grading is stable) priced with Manta's own cost model.
-This lets the harness prove the comparison logic — and the routing strategy —
-without a Databricks connection or a model call.
+This lets the harness qualify comparison logic without a Databricks connection
+or a model call. When exact service prices are unknown, the demo reports quality
+and tokens without a cost verdict; comparison tests inject synthetic prices.
 
 The two demo configs encode the plan's core claim:
 
@@ -14,6 +15,8 @@ The two demo configs encode the plan's core claim:
 """
 
 from __future__ import annotations
+
+from manta_code.model_defaults import ROLE_TARGETS
 
 from .harness import EvalOutput, Solver
 from .tasks import EvalTask
@@ -48,14 +51,14 @@ ANSWER_BANK: dict[str, str] = {
     ),
 }
 
-PREMIUM_MODEL = "databricks-claude-opus-4-8"
-CHEAP_MODEL = "databricks-gpt-oss-120b"
+PREMIUM_MODEL = ROLE_TARGETS["planning"]
+CHEAP_MODEL = ROLE_TARGETS["orchestrator"]
 
 #: Rough per-task token footprint (input+output) used to price the demo.
 _TASK_TOKENS = 6000
 
 
-def _price(model: str, tokens: int) -> float:
+def _price(model: str, tokens: int) -> float | None:
     """Price ``tokens`` (split 70/30 input/output) for ``model`` via Manta's table."""
     try:
         from manta_code.agents.usage import price_for
@@ -64,7 +67,7 @@ def _price(model: str, tokens: int) -> float:
     except Exception:  # noqa: BLE001
         price = None
     if price is None:
-        return 0.0
+        return None
     inp = tokens * 0.7
     out = tokens * 0.3
     return (inp * price.input + out * price.output) / 1_000_000.0

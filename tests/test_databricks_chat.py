@@ -5,15 +5,16 @@ import json
 import pytest
 
 pytest.importorskip("langchain_core")
+pytest.importorskip("langchain_openai")
 
-from langchain_core.messages import AIMessage, AIMessageChunk  # noqa: E402
-from langchain_core.outputs import (  # noqa: E402
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import (
     ChatGeneration,
     ChatGenerationChunk,
     ChatResult,
 )
 
-from manta_code import databricks_chat as dc  # noqa: E402
+from manta_code import databricks_chat as dc
 
 REASONING_AND_TEXT = json.dumps(
     [
@@ -120,7 +121,7 @@ def test_normalize_chunk_passes_through_plain_delta():
 
 
 def test_generate_normalizes_result(monkeypatch):
-    from databricks_langchain import ChatDatabricks
+    from langchain_openai import ChatOpenAI
 
     def fake_generate(self, *_a, **_k):
         return ChatResult(
@@ -129,7 +130,7 @@ def test_generate_normalizes_result(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr(ChatDatabricks, "_generate", fake_generate, raising=True)
+    monkeypatch.setattr(ChatOpenAI, "_generate", fake_generate, raising=True)
     model = dc.MantaChatDatabricks(model="endpoint-x")
     result = model._generate([])
     assert result.generations[0].message.content == "Hello!"
@@ -138,14 +139,15 @@ def test_generate_normalizes_result(monkeypatch):
 def test_astream_normalizes_chunks(monkeypatch):
     import asyncio
 
-    from databricks_langchain import ChatDatabricks
+    from langchain_openai import ChatOpenAI
 
     async def fake_astream(self, *_a, **_k):
         yield ChatGenerationChunk(message=AIMessageChunk(content=REASONING_ONLY))
         yield ChatGenerationChunk(message=AIMessageChunk(content="Hel"))
         yield ChatGenerationChunk(message=AIMessageChunk(content="lo"))
 
-    monkeypatch.setattr(ChatDatabricks, "_astream", fake_astream, raising=True)
+    monkeypatch.setattr(ChatOpenAI, "_astream", fake_astream, raising=True)
+    monkeypatch.setattr(dc.MantaChatDatabricks, "_root", lambda *_a, **_k: None)
     model = dc.MantaChatDatabricks(model="endpoint-x")
 
     async def collect():
@@ -177,7 +179,7 @@ def test_resolver_patches_graph_module_level_binding():
     # deepagents.graph binds resolve_model at import (top-level import), which is
     # the path create_deep_agent uses for subagents. The shim must rebind it too,
     # otherwise subagent models pinned to databricks:<endpoint> fail to resolve.
-    import deepagents.graph as graph
+    from deepagents import graph
 
     # Ensure the shim's rebind reached an already-imported graph module.
     dc._install_subagent_databricks_resolver()
@@ -266,3 +268,39 @@ def test_stream_dedup_passes_chunks_without_usage():
     dedup = dc._StreamUsageDeduplicator()
     chunk = ChatGenerationChunk(message=AIMessageChunk(content="hello"))
     assert dedup.rewrite(chunk) is chunk
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_internal_stream_callbacks_see_normalized_usage_and_visible_content(monkeypatch, asynchronous):
+    import asyncio
+    from types import SimpleNamespace
+    from langchain_openai import ChatOpenAI
+
+    chunks = [
+        ChatGenerationChunk(message=AIMessageChunk(content=REASONING_ONLY, usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11})),
+        ChatGenerationChunk(message=AIMessageChunk(content="visible", usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12})),
+    ]
+    def stream(self, *args, **kwargs):
+        assert kwargs["run_manager"] is None
+        yield from chunks
+    async def astream(self, *args, **kwargs):
+        assert kwargs["run_manager"] is None
+        for chunk in chunks:
+            yield chunk
+    monkeypatch.setattr(ChatOpenAI, "_stream", stream)
+    monkeypatch.setattr(ChatOpenAI, "_astream", astream)
+    monkeypatch.setattr(dc.MantaChatDatabricks, "_root", lambda *a, **k: None)
+    seen = []
+    def token(text, *, chunk, **kwargs):
+        seen.append((text, chunk.message.usage_metadata))
+    async def atoken(text, **kwargs):
+        token(text, **kwargs)
+    manager = SimpleNamespace(on_llm_new_token=atoken if asynchronous else token)
+    model = dc.MantaChatDatabricks(model="legacy-chat")
+    async def collect():
+        return [chunk async for chunk in model._astream([], run_manager=manager)]
+    result = asyncio.run(collect()) if asynchronous else list(model._stream([], run_manager=manager))
+    assert [text for text, usage in seen] == ["", "visible"]
+    assert [usage["input_tokens"] for text, usage in seen] == [10, 0]
+    assert [usage["output_tokens"] for text, usage in seen] == [1, 1]
+    assert [chunk.message.usage_metadata for chunk in result] == [usage for text, usage in seen]

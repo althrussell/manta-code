@@ -4,7 +4,6 @@ import pytest
 
 from manta_code import providers
 
-
 # --- ModelRef parsing -----------------------------------------------------------
 
 
@@ -79,7 +78,7 @@ def test_resolve_model_ref_falls_back_to_langchain(monkeypatch):
 
 
 def test_databricks_factory_builds_manta_chat():
-    pytest.importorskip("databricks_langchain")
+    pytest.importorskip("langchain_openai")
     from manta_code.databricks_chat import MantaChatDatabricks
 
     model = providers.resolve_model_ref("databricks:databricks-gpt-5-4")
@@ -87,8 +86,8 @@ def test_databricks_factory_builds_manta_chat():
     assert model.model == "databricks-gpt-5-4"
 
 
-def test_databricks_factory_returns_none_on_construction_failure(monkeypatch):
-    pytest.importorskip("databricks_langchain")
+def test_databricks_factory_preserves_explicit_selection_failure(monkeypatch):
+    pytest.importorskip("langchain_openai")
     import manta_code.databricks_chat as dc
 
     class _Exploding:
@@ -96,7 +95,8 @@ def test_databricks_factory_returns_none_on_construction_failure(monkeypatch):
             raise RuntimeError("no workspace")
 
     monkeypatch.setattr(dc, "MantaChatDatabricks", _Exploding)
-    assert providers._databricks_factory("databricks-gpt-5-4") is None
+    with pytest.raises(providers.TargetResolutionError, match="Cannot construct Databricks target"):
+        providers._databricks_factory("databricks-gpt-5-4")
 
 
 # --- integration with the subagent resolver shim ---------------------------------
@@ -178,8 +178,8 @@ def test_gateway_surface_providers_and_governance():
 
 
 def test_gateway_discovery_empty_on_auth_failure(monkeypatch):
-    from manta_code.providers import gateway as G
     from manta_code import auth
+    from manta_code.providers import gateway as G
 
     def _boom(profile=None):
         raise RuntimeError("no sdk")

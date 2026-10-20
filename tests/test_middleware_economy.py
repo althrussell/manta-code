@@ -74,7 +74,10 @@ def test_estimate_scaffolding_counts_system_and_messages():
 
 def test_wrap_model_call_records_to_ledger(tmp_path):
     db = tmp_path / "usage.db"
-    mw = E.TokenEconomyMiddleware(agent="swe", ledger_path=db)
+    mw = E.TokenEconomyMiddleware(
+        agent="swe", ledger_path=db,
+        pricing={"databricks-gpt-oss-120b": U.Price(0.15, 0.60, cache_read=0.01)},
+    )
 
     usage_meta = {
         "input_tokens": 1000,
@@ -220,3 +223,109 @@ def test_thread_id_falls_back_to_langgraph_config(monkeypatch):
         lg_config, "get_config", lambda: {"configurable": {"thread_id": "thr-real"}}
     )
     assert E._thread_id(_Request(runtime=_Runtime(thread_id=""))) == "thr-real"
+
+
+def test_unity_call_records_requested_identity_and_observed_backend(tmp_path):
+    from types import SimpleNamespace
+
+    model = SimpleNamespace(
+        model_name="system.ai.router",
+        target_policy=SimpleNamespace(
+            target=SimpleNamespace(name="system.ai.router", kind="service"),
+            surface="unified", api="responses",
+        ),
+    )
+    mw = E.TokenEconomyMiddleware(
+        ledger_path=tmp_path / "usage.db",
+        pricing={"system.ai.router": U.Price(1, 2), "actual-backend": U.Price(9, 10)},
+    )
+    message = _ai({"input_tokens": 100, "output_tokens": 20,
+                   "output_token_details": {"reasoning": 10}})
+    message.response_metadata = {"model_name": "actual-backend", "request_id": "req-123"}
+    mw.wrap_model_call(_Request(model=model), lambda r: _Response([message]))
+    conn = U.connect(tmp_path / "usage.db")
+    row = conn.execute("SELECT * FROM usage").fetchone()
+    conn.close()
+    assert row["requested_service"] == "system.ai.router"
+    assert row["observed_backend"] == "actual-backend"
+    assert row["surface"] == "unified" and row["protocol"] == "responses"
+    assert row["request_id"] == "req-123"
+    assert row["reasoning_tokens"] == 10
+    assert row["cost_usd"] == pytest.approx(140 / 1_000_000)
+    assert row["pricing_source"].endswith("system.ai.router")
+
+
+def test_service_echo_and_response_id_do_not_invent_backend_or_request_id():
+    message = AIMessage(content="ok", id="resp-123", response_metadata={"model_name": "system.ai.router"})
+    identity = E._call_identity("databricks:system.ai.router", message)
+    assert identity["requested_service"] == "system.ai.router"
+    assert identity["observed_backend"] is None
+    assert identity["request_id"] is None
+
+
+def test_missing_usage_is_unknown_and_budget_continues_with_visible_coverage(tmp_path, caplog, monkeypatch):
+    mw = E.TokenEconomyMiddleware(
+        max_usd=1, ledger_path=tmp_path / "usage.db", pricing={"known": U.Price(1, 2)},
+    )
+    events = []
+    monkeypatch.setattr(mw, "_record_budget_event", events.append)
+    message = AIMessage(content="no usage", response_metadata={"request_id": "req-no-usage"})
+    request = _Request(model="known")
+    response = _Response([message])
+    # Trust-first: absent usage doesn't silently block inference or count as $0.
+    assert mw.wrap_model_call(request, lambda r: response) is response
+    mw.wrap_model_call(request, lambda r: response)
+    total = U.totals(path=tmp_path / "usage.db")
+    assert total.cost_known is False
+    assert total.missing_usage_calls == 2
+    assert mw._running("t-1")["usd"] == 0
+    assert mw._running("t-1")["unknown_calls"] == 2
+    assert len(events) == 1
+    assert "cannot count toward the client USD cap" in caplog.text
+    conn = U.connect(tmp_path / "usage.db")
+    row = conn.execute("SELECT * FROM usage LIMIT 1").fetchone()
+    conn.close()
+    assert row["cost_usd"] is None
+    assert row["usage_complete"] == 0
+    assert row["request_id"] == "req-no-usage"
+
+
+def test_already_merged_stream_usage_is_accounted_once(tmp_path):
+    from langchain_core.messages import AIMessageChunk
+
+    # Both delta and final-only adapter strategies converge to one final message.
+    stream = (
+        AIMessageChunk(content="a", usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11})
+        + AIMessageChunk(content="b", usage_metadata={"input_tokens": 0, "output_tokens": 2, "total_tokens": 2})
+    )
+    mw = E.TokenEconomyMiddleware(ledger_path=tmp_path / "u.db", pricing={"known": U.Price(1, 2)})
+    mw.wrap_model_call(_Request(model="known"), lambda r: _Response([stream]))
+    total = U.totals(path=tmp_path / "u.db")
+    assert total.calls == 1
+    assert total.input_tokens == 10 and total.output_tokens == 3
+    assert total.cost_usd == pytest.approx(16 / 1_000_000)
+
+
+def test_other_reported_service_is_not_a_resolved_backend():
+    message = AIMessage(content="ok", response_metadata={"model_name": "system.ai.other-service"})
+    assert E._call_identity("system.ai.router", message)["observed_backend"] is None
+    message.response_metadata = {"backend_model": "system.ai.explicit-backend"}
+    assert E._call_identity("system.ai.router", message)["observed_backend"] == "system.ai.explicit-backend"
+
+
+def test_request_id_from_gateway_headers():
+    message = AIMessage(content="ok", response_metadata={"headers": {"X-Databricks-Request-Id": "gateway-id"}})
+    assert E._call_identity("system.ai.router", message)["request_id"] == "gateway-id"
+
+
+def test_daily_budget_warns_for_preexisting_unpriced_calls(tmp_path, caplog, monkeypatch):
+    ledger = tmp_path / "usage.db"
+    U.record_usage(U.UsageRecord(model="private", input_tokens=20, output_tokens=4), path=ledger)
+    mw = E.TokenEconomyMiddleware(daily_max_usd=10, ledger_path=ledger)
+    events = []
+    monkeypatch.setattr(mw, "_record_budget_event", events.append)
+    assert mw._maybe_pause("new-thread") is None
+    assert len(events) == 1
+    assert "USD budget coverage is incomplete" in caplog.text
+    assert mw._maybe_pause("new-thread") is None
+    assert len(events) == 1

@@ -7,13 +7,13 @@ points:
 
 - **Model** — Databricks is registered as a ``deepagents-code`` *provider* in
   ``~/.deepagents/config.toml`` via a ``class_path`` that points at
-  :class:`manta_code.databricks_chat.MantaChatDatabricks` (a thin
-  ``ChatDatabricks`` subclass that unpacks reasoning-model content blocks).
-  ``deepagents-code``'s ``create_model("databricks:<endpoint>")`` then
+  :class:`manta_code.databricks_chat.MantaChatDatabricks` (the official
+  OpenAI LangChain adapter with Databricks SDK authentication).
+  ``deepagents-code``'s ``create_model("databricks:<target>")`` then
   instantiates it directly, with no fork of its model registry.
 - **Auth / profile** — the active Databricks profile is selected by exporting
-  ``DATABRICKS_CONFIG_PROFILE``; the Databricks SDK (and therefore
-  ``ChatDatabricks``) reads it for unified auth from ``~/.databrickscfg``. This
+  ``DATABRICKS_CONFIG_PROFILE``; the model's Databricks SDK client
+  reads it for unified auth from ``~/.databrickscfg``. This
   is how ``-p/--profile`` flows through to the model.
 
 The functions here are deliberately small and pure (config merge, env build,
@@ -24,11 +24,15 @@ argv build) so they can be unit-tested without launching a subprocess; only
 from __future__ import annotations
 
 import copy
+import codecs
+import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .auth import resolve_profile
 
@@ -46,14 +50,13 @@ DATABRICKS_PROVIDER = "databricks"
 DEFAULT_SUPPRESSED_WARNINGS = ("tavily",)
 
 #: ``module:ClassName`` that ``deepagents-code`` instantiates for the provider.
-#: Manta's :class:`manta_code.databricks_chat.MantaChatDatabricks` subclass
-#: (not stock ``ChatDatabricks``) so reasoning-model endpoints that return
-#: content as a serialized reasoning/text block list render their answer
-#: cleanly instead of dumping raw JSON.
+#: Manta's :class:`manta_code.databricks_chat.MantaChatDatabricks` adapter
+#: selects the serving or Unity Gateway route and refreshes SDK credentials.
+#: Importing this stable class path also installs the server's agent hooks.
 DATABRICKS_CLASS_PATH = "manta_code.databricks_chat:MantaChatDatabricks"
 
-#: Location of ``deepagents-code``'s user config (hard-coded upstream).
-DEEPAGENTS_CONFIG_DIR = Path.home() / ".deepagents"
+#: Follow the upstream profile directory, including explicitly isolated runs.
+DEEPAGENTS_CONFIG_DIR = Path(os.environ.get("DEEPAGENTS_HOME", Path.home() / ".deepagents")).expanduser()
 DEEPAGENTS_CONFIG_PATH = DEEPAGENTS_CONFIG_DIR / "config.toml"
 
 #: deepagents-code's state dir and first-run onboarding marker. Writing the
@@ -104,8 +107,9 @@ def merge_databricks_provider(
     """Merge Manta's Databricks provider into an existing config dict.
 
     Returns a new dict (the input is not mutated). All unrelated user settings
-    are preserved. Manta owns ``class_path`` and unions ``models`` with whatever
-    the user already had; user ``params`` are preserved and shallow-overridden
+    are preserved. Manta owns ``class_path`` and tracks the entries it adds;
+    the next inventory replaces those entries without removing user models.
+    User ``params`` are preserved and shallow-overridden
     by ``params`` when provided.
 
     When ``default_endpoint`` is given and the user has not already set
@@ -129,7 +133,13 @@ def merge_databricks_provider(
     previous = providers.get(DATABRICKS_PROVIDER, {})
     if not isinstance(previous, dict):
         previous = {}
-    merged_models = _dedupe([*previous.get("models", []), *endpoints])
+    ownership = result.setdefault("manta", {}).setdefault("databricks_inventory", {})
+    if not isinstance(ownership, dict):
+        raise LauncherError("Existing [manta.databricks_inventory] must be a table")
+    owned = set(ownership.get("models", [])) if ownership.get("version") == 1 else set()
+    user_models = [name for name in previous.get("models", []) if name not in owned]
+    merged_models = _dedupe([*user_models, *endpoints])
+    ownership.update(version=1, models=[name for name in endpoints if name not in user_models])
     provider: dict[str, object] = {
         **previous,
         "class_path": DATABRICKS_CLASS_PATH,
@@ -140,6 +150,19 @@ def merge_databricks_provider(
     providers[DATABRICKS_PROVIDER] = provider
     if default_endpoint and not models_tbl.get("default"):
         models_tbl["default"] = f"{DATABRICKS_PROVIDER}:{default_endpoint}"
+        ownership["default"] = models_tbl["default"]
+    elif (
+        default_endpoint
+        and ownership.get("default")
+        and models_tbl.get("default") == ownership["default"]
+    ):
+        # Only defaults whose ownership was recorded by Manta may migrate.
+        models_tbl["default"] = f"{DATABRICKS_PROVIDER}:{default_endpoint}"
+        ownership["default"] = models_tbl["default"]
+    if ownership.get("default") == models_tbl.get("default"):
+        from .model_defaults import DEFAULTS_VERSION
+
+        ownership["defaults_version"] = DEFAULTS_VERSION
 
     warnings_tbl = result.setdefault("warnings", {})
     if not isinstance(warnings_tbl, dict):
@@ -224,8 +247,10 @@ def _write_toml(path: Path, data: dict) -> None:
     try:
         import tomli_w
     except ImportError as exc:  # pragma: no cover - depends on optional extra
+        from .installation import runtime_install_command
+
         raise LauncherError(
-            "tomli-w is not installed. Install with: pip install -e '.[agent]'"
+            f"tomli-w is not installed. Install with: {runtime_install_command()}"
         ) from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as handle:
@@ -257,6 +282,14 @@ def ensure_dcode_config(
     return path
 
 
+def databricks_provider_params(config_path: Path | None = None) -> dict:
+    """Read preserved upstream provider defaults for child construction parity."""
+    config = _read_toml(config_path or DEEPAGENTS_CONFIG_PATH)
+    return dict(
+        config.get("models", {}).get("providers", {}).get("databricks", {}).get("params", {})
+    )
+
+
 def mark_onboarding_complete(*, marker_path: Path | None = None) -> Path:
     """Suppress ``deepagents-code``'s first-run onboarding wizard.
 
@@ -277,20 +310,64 @@ def build_launch_env(
     *,
     base_env: Mapping[str, str] | None = None,
     brand: bool = True,
+    provider_params: Mapping[str, object] | None = None,
+    inventory: Any = None,
 ) -> dict[str, str]:
     """Build the environment for the deepagents-code subprocess.
 
-    Sets ``DATABRICKS_CONFIG_PROFILE`` to the resolved profile so the Databricks
-    SDK authenticates against the right ``~/.databrickscfg`` entry. Existing
-    environment values are preserved; an explicit profile always wins.
+    Aligns ``MANTA_PROFILE`` and ``DATABRICKS_CONFIG_PROFILE`` so both Manta
+    and the SDK use the resolved profile. An explicit selection must also
+    override an inherited ``MANTA_PROFILE`` in the child process.
     """
     env = dict(os.environ if base_env is None else base_env)
     resolved = resolve_profile(profile)
     if resolved:
+        env["MANTA_PROFILE"] = resolved
         env["DATABRICKS_CONFIG_PROFILE"] = resolved
     if brand:
         env.setdefault(SPLASH_SUBHEADER_ENV, SPLASH_SUBHEADER)
+    from .config import load_config
+    from .providers.targets import export_target_policy
+
+    env["MANTA_DATABRICKS_POLICY"] = export_target_policy(
+        load_config(), provider_params=provider_params, inventory=inventory,
+    )
     return env
+
+
+def _target_inventory(
+    profile: str | None, passthrough: Sequence[str], *, refresh: bool = False,
+) -> Any:
+    """Bound discovery for direct/background launch paths, with exact pins."""
+    from .auth import databricks_configured
+    from .config import interactive_endpoints, load_config
+    from .providers.discovery import discover_databricks_targets
+
+    if not databricks_configured(profile):
+        return None
+    config = load_config()
+    names = interactive_endpoints(config)
+    try:
+        from .agents.defaults import merged_agents
+        from .agents.registry import list_agents
+
+        names.extend(
+            agent.model.split(":", 1)[1] for agent in merged_agents(list_agents())
+            if agent.model and agent.model.startswith("databricks:")
+        )
+    except Exception:  # noqa: BLE001 - user registry corruption cannot block discovery
+        pass
+    args = list(passthrough)
+    for index, arg in enumerate(args):
+        value = args[index + 1] if arg in {"-M", "--model"} and index + 1 < len(args) else (
+            arg.split("=", 1)[1] if arg.startswith("--model=") else arg[2:] if arg.startswith("-M") else ""
+        )
+        if value.startswith("databricks:"):
+            names.append(value.split(":", 1)[1])
+    return discover_databricks_targets(
+        profile, schemas=config.databricks.discovery_schemas,
+        configured=list(dict.fromkeys(names)), refresh=refresh,
+    )
 
 
 def _has_model_flag(args: Sequence[str]) -> bool:
@@ -355,7 +432,8 @@ def _effective_initial_agent(extras: Sequence[str]) -> str | None:
 def _has_resume_flag(args: Sequence[str]) -> bool:
     """Return ``True`` when the launch resumes an existing thread (``-r``)."""
     return any(
-        arg in ("-r", "--resume") or arg.startswith("--resume=") for arg in args
+        arg in ("-r", "--resume") or arg.startswith("--resume=") or arg.startswith("-r")
+        for arg in args
     )
 
 
@@ -463,12 +541,98 @@ def build_run_argv(
         argv += ["--max-turns", str(max_turns)]
     if timeout is not None:
         argv += ["--timeout", str(timeout)]
-    if json_output:
-        argv += ["--json-output", json_output]
+    validate_json_output(json_output)
     if shell_allow_list:
         argv += ["--shell-allow-list", shell_allow_list]
     argv += extras
     return argv
+
+
+def validate_json_output(mode: str | None) -> None:
+    """Reject unknown machine-output modes before launch provisioning."""
+    if mode not in {None, "text", "stream-json"}:
+        raise LauncherError("--json must be 'text' or 'stream-json'.")
+
+
+def _emit_json_event(event: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps({"schema_version": 1, **event}, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _run_json_output(argv: list[str], env: dict[str, str], mode: str) -> int:
+    """Own machine output independently of upstream's human CLI rendering.
+
+    Pipe readers drain concurrently so verbose stderr cannot block stdout.
+    Only the calling thread writes JSON, preserving complete JSONL records.
+    """
+    if mode == "text":
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed runtime argv
+                argv, env=env, check=False, capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            code, output, errors = completed.returncode, completed.stdout, completed.stderr
+        except OSError as exc:
+            code, output, errors = 127, "", str(exc)
+        _emit_json_event({
+            "type": "result", "success": code == 0, "exit_code": code,
+            "stdout": output, "stderr": errors,
+        })
+        return code
+
+    events: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=64)
+
+    def drain(source: str, pipe: Any) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            while chunk := pipe.read(4096):
+                text = decoder.decode(chunk)
+                if text:
+                    events.put((source, text))
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                events.put((source, tail))
+        except OSError as exc:
+            events.put(("stderr", f"Failed reading runtime {source}: {exc}"))
+        finally:
+            try:
+                pipe.close()
+            finally:
+                events.put((source, None))
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed runtime argv
+            argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        )
+    except OSError as exc:
+        _emit_json_event({"type": "stderr", "text": str(exc)})
+        _emit_json_event({"type": "result", "success": False, "exit_code": 127})
+        return 127
+    readers = [
+        threading.Thread(target=drain, args=(source, pipe), daemon=True)
+        for source, pipe in (("stdout", process.stdout), ("stderr", process.stderr))
+    ]
+    try:
+        for reader in readers:
+            reader.start()
+        remaining = len(readers)
+        while remaining:
+            source, text = events.get()
+            if text is None:
+                remaining -= 1
+            else:
+                _emit_json_event({"type": source, "text": text})
+        code = process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join(timeout=1)
+    _emit_json_event({"type": "result", "success": code == 0, "exit_code": code})
+    return code
 
 
 def sync_agent_profiles() -> None:
@@ -510,6 +674,7 @@ def run_headless(
     json_output: str | None = None,
     shell_allow_list: str | None = None,
     env_extra: Mapping[str, str] | None = None,
+    inventory: Any = None,
 ) -> int:
     """Provision config + env and run a single headless task, returning its code.
 
@@ -518,15 +683,23 @@ def run_headless(
     Databricks config/onboarding/agent profiles so Manta's control plane
     (enforced agents, token economy) applies in headless mode too.
     """
+    validate_json_output(json_output)
+    if inventory is None:
+        inventory = _target_inventory(profile, passthrough)
     ensure_dcode_config(
-        endpoints,
+        _dedupe([*endpoints, *inventory.names]) if inventory is not None else endpoints,
         config_path=config_path,
         params=params,
         default_endpoint=default_endpoint,
     )
     mark_onboarding_complete()
     sync_agent_profiles()
-    env = build_launch_env(profile)
+    env = build_launch_env(
+        profile, provider_params=databricks_provider_params(config_path), inventory=inventory,
+    )
+    env.pop("MANTA_EXPLICIT_MODEL", None)
+    if _has_model_flag(passthrough):
+        env["MANTA_EXPLICIT_MODEL"] = "1"
     # Every headless run is unattended by definition (ADR 0011): one explicit
     # marker so the ASK policy tier fails closed and the audit layer never
     # records a human approval that didn't happen — regardless of whether
@@ -545,6 +718,8 @@ def run_headless(
         json_output=json_output,
         shell_allow_list=shell_allow_list,
     )
+    if json_output:
+        return _run_json_output(argv, env, json_output)
     completed = subprocess.run(argv, env=env, check=False)  # noqa: S603
     return completed.returncode
 
@@ -558,6 +733,7 @@ def launch(
     config_path: Path | None = None,
     params: Mapping[str, object] | None = None,
     exec_replace: bool = True,
+    inventory: Any = None,
 ) -> int:
     """Provision config + env and launch the deepagents-code TUI.
 
@@ -572,15 +748,22 @@ def launch(
     never returns. When false (used by tests), the launcher runs the subprocess
     and returns its exit code.
     """
+    if inventory is None:
+        inventory = _target_inventory(profile, passthrough)
     ensure_dcode_config(
-        endpoints,
+        _dedupe([*endpoints, *inventory.names]) if inventory is not None else endpoints,
         config_path=config_path,
         params=params,
         default_endpoint=default_endpoint,
     )
     mark_onboarding_complete()
     sync_agent_profiles()
-    env = build_launch_env(profile)
+    env = build_launch_env(
+        profile, provider_params=databricks_provider_params(config_path), inventory=inventory,
+    )
+    env.pop("MANTA_EXPLICIT_MODEL", None)
+    if _has_model_flag(passthrough):
+        env["MANTA_EXPLICIT_MODEL"] = "1"
     argv = build_dcode_argv(default_endpoint, passthrough)
     if exec_replace:
         os.execvpe(argv[0], argv, env)  # noqa: S606 - fixed argv, replaces process

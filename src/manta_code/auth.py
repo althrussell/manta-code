@@ -1,7 +1,7 @@
 """Databricks authentication for Manta.
 
-Manta runs its models on Databricks-hosted endpoints via ``ChatDatabricks``,
-which authenticates through the Databricks SDK :class:`WorkspaceClient`. The SDK
+Manta runs Databricks models through ``MantaChatDatabricks``, an official
+OpenAI LangChain adapter with Databricks SDK :class:`WorkspaceClient` auth. The SDK
 already implements unified auth: it reads ``~/.databrickscfg`` profiles,
 ``DATABRICKS_*`` environment variables, and OAuth tokens minted by
 ``databricks auth login``. We therefore do not re-implement auth (unlike
@@ -117,8 +117,10 @@ def resolve_workspace_client(profile: str | None = None) -> "WorkspaceClient":
     try:
         from databricks.sdk import WorkspaceClient
     except ImportError as exc:  # pragma: no cover - depends on optional extra
+        from .installation import runtime_install_command
+
         raise AuthError(
-            "databricks-sdk is not installed. Install with: pip install -e '.[agent]'"
+            f"databricks-sdk is not installed. Install with: {runtime_install_command()}"
         ) from exc
     name = resolve_profile(profile)
     if name:
@@ -148,12 +150,13 @@ def list_serving_chat_endpoints(profile: str | None = None) -> list[str]:
         return []
 
     names: list[str] = []
-    for endpoint in endpoints:
-        name = getattr(endpoint, "name", None)
-        if not name:
-            continue
-        if getattr(endpoint, "task", None) == CHAT_ENDPOINT_TASK:
-            names.append(name)
+    try:
+        for endpoint in endpoints:
+            name = getattr(endpoint, "name", None)
+            if name and getattr(endpoint, "task", None) == CHAT_ENDPOINT_TASK:
+                names.append(name)
+    except Exception:  # noqa: BLE001 - retain partial results on a later page failure
+        pass
     return names
 
 

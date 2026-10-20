@@ -19,6 +19,7 @@ so edits and deletions stick.
 
 from __future__ import annotations
 
+from ..model_defaults import role_model
 from .registry import AgentDef
 
 DATABRICKS_PROVIDER = "databricks"
@@ -37,7 +38,7 @@ PLANNING = AgentDef(
         "plan. Routine planning can be done inline with write_todos; reach for "
         "this agent for the hard cases. Plans only; does not modify code."
     ),
-    model=_model("databricks-claude-opus-4-8"),
+    model=role_model("planning"),
     read_only=True,
     memory=True,
     system_prompt="""You are Manta's planning specialist in a Databricks-focused engineering environment.
@@ -59,7 +60,7 @@ SWE = AgentDef(
         "run tests and shell commands to verify. Delegate well-scoped "
         "engineering tasks here."
     ),
-    model=_model("databricks-gpt-5-4"),
+    model=role_model("swe"),
     read_only=False,
     memory=True,
     # Writes and shell are powerful: require approval before the agent edits or
@@ -85,7 +86,7 @@ REVIEW = AgentDef(
         "files for bugs, security issues, and style problems and reports findings "
         "(with severity and locations). Does not modify code."
     ),
-    model=_model("databricks-claude-sonnet-4-5"),
+    model=role_model("review"),
     read_only=True,
     memory=True,
     system_prompt="""You are Manta's code-review subagent in a Databricks-focused environment.
@@ -107,7 +108,7 @@ CHIEF = AgentDef(
         "swe, review, and yours), tracks background tasks, and collects their "
         "results into one report. Coordinates; does not write code itself."
     ),
-    model=_model("databricks-gpt-5-4-mini"),
+    model=role_model("chief"),
     read_only=True,
     memory=True,
     manta_tools=["tasks"],

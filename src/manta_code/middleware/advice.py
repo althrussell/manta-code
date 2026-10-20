@@ -38,7 +38,7 @@ from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware
 
-from ..agents.usage import Price, price_for
+from ..agents.usage import Price, extract_breakdown, price_for
 
 logger = logging.getLogger("manta.advice")
 
@@ -152,14 +152,12 @@ class AdviceMiddleware(AgentMiddleware):
     def _observe_model_response(self, thread: str, model: str, response: Any) -> None:
         signals = self._signals(thread)
         usage = self._usage_metadata(response)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        input_tokens = int(usage.get("input_tokens") or 0)
-        signals.spent_tokens += input_tokens + output_tokens
-        price = price_for(model, self._pricing)
-        if price is not None:
-            signals.spent_usd += (
-                input_tokens * price.input + output_tokens * price.output
-            ) / 1_000_000
+        breakdown = extract_breakdown(usage)
+        output_tokens = breakdown.output_tokens
+        signals.spent_tokens += breakdown.total_tokens
+        cost = breakdown.cost_usd(price_for(model, self._pricing))
+        if cost is not None:
+            signals.spent_usd += cost
         if model_tier(model, self._pricing) == "premium" and 0 < output_tokens < SHORT_OUTPUT_TOKENS:
             signals.premium_short_streak += 1
         else:

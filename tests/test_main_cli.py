@@ -2,14 +2,69 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import manta_code.dcode as dcode
 import manta_code.main as main_mod
 from manta_code import auth
 from manta_code.main import app
+from manta_code.model_defaults import ROLE_TARGETS
 
 runner = CliRunner()
+
+
+def test_version_exits_without_launching_or_loading_configuration(monkeypatch):
+    from manta_code import __version__
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("--version must not launch the runtime or load user configuration")
+
+    monkeypatch.setattr(main_mod, "_launch_interactive", forbidden)
+    monkeypatch.setattr(main_mod, "load_config", forbidden)
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.output == f"{__version__}\n"
+    assert main_mod.classify_args(["--version"])[0] == "delegate"
+
+
+def test_missing_runtime_recovery_works_outside_checkout(monkeypatch, tmp_path):
+    from rich.console import Console
+
+    from manta_code import __version__
+    from manta_code.installation import runtime_install_command
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr(main_mod, "console", Console(width=400, color_system=None))
+    result = runner.invoke(app, ["run", "explain this project"])
+
+    assert result.exit_code == 1
+    assert runtime_install_command() in result.output
+    assert f"manta-code.git@v{__version__}" in result.output
+    assert f"/v{__version__}/requirements-dev.lock" in result.output
+    assert "pip install -e" not in result.output
+
+
+@pytest.fixture(autouse=True)
+def _no_workspace_requests(monkeypatch):
+    """CLI unit tests never consume the developer's real workspace credentials."""
+    def unavailable(profile=None):
+        raise auth.AuthError("no workspace in CLI unit tests")
+
+    monkeypatch.setattr(auth, "resolve_workspace_client", unavailable)
+
+
+def test_profile_check_context_overrides_and_restores_both_selectors(monkeypatch):
+    monkeypatch.setenv("MANTA_PROFILE", "old")
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    with pytest.raises(RuntimeError, match="probe failed"):
+        with main_mod._databricks_profile_env("selected"):
+            assert auth.resolve_profile() == "selected"
+            assert main_mod.os.environ["DATABRICKS_CONFIG_PROFILE"] == "selected"
+            raise RuntimeError("probe failed")
+    assert auth.resolve_profile() == "old"
+    assert "DATABRICKS_CONFIG_PROFILE" not in main_mod.os.environ
 
 
 def test_no_subcommand_launches_interactive(monkeypatch):
@@ -67,7 +122,7 @@ def test_agents_show_builtin(monkeypatch, tmp_path):
 
     result = runner.invoke(app, ["agents", "show", "planning"])
     assert result.exit_code == 0
-    assert "databricks-claude-opus-4-8" in result.stdout
+    assert ROLE_TARGETS["planning"] in result.stdout
     assert "read-only" in result.stdout
 
     missing = runner.invoke(app, ["agents", "show", "nope"])
@@ -251,25 +306,26 @@ def test_launch_interactive_invokes_dcode(monkeypatch):
     assert calls["profile"] == "s2"
     assert calls["passthrough"] == ["-r"]
     assert calls["default_endpoint"]  # non-empty endpoint string
-    assert "databricks-gpt-oss-120b" in calls["endpoints"]
+    assert ROLE_TARGETS["orchestrator"] in calls["endpoints"]
 
 
 def test_resolve_endpoints_merges_discovered(monkeypatch):
     from manta_code.config import MantaConfig
+    from manta_code.providers import discovery
+    from manta_code.providers.discovery import DiscoveryResult, TargetInfo
+    from manta_code.providers.targets import parse_target
 
     monkeypatch.setattr(
-        auth,
-        "list_serving_chat_endpoints",
-        lambda profile=None: [
-            "databricks-gpt-oss-120b",  # duplicate of the configured default
-            "databricks-claude-sonnet-4-5",  # genuinely new, discovered endpoint
-        ],
+        discovery, "discover_databricks_targets",
+        lambda *args, **kwargs: DiscoveryResult(tuple(TargetInfo(parse_target(name)) for name in [
+            ROLE_TARGETS["orchestrator"], "databricks-claude-sonnet-4-5",
+        ]), ()),
     )
     out = main_mod._resolve_endpoints(MantaConfig(), "s2")
-    assert out[0] == "databricks-gpt-oss-120b"  # configured default stays first
-    assert "databricks-claude-opus-4-8" in out  # configured extra kept
+    assert out[0] == ROLE_TARGETS["orchestrator"]  # configured default stays first
+    assert ROLE_TARGETS["planning"] in out  # configured extra kept
     assert "databricks-claude-sonnet-4-5" in out  # discovered endpoint added
-    assert out.count("databricks-gpt-oss-120b") == 1  # deduped
+    assert out.count(ROLE_TARGETS["orchestrator"]) == 1  # deduped
 
 
 def test_doctor_reports_checks(monkeypatch):
@@ -281,6 +337,8 @@ def test_doctor_reports_checks(monkeypatch):
     assert result.exit_code == 0
     assert "Preflight" in result.stdout
     assert "deepagents-code" in result.stdout
+    assert "langchain-openai" in result.stdout
+    assert "databricks-langchain" not in result.stdout
 
 
 def test_launch_interactive_databricks_optional(monkeypatch):
@@ -405,10 +463,18 @@ def test_cost_advise_flag(tmp_path, monkeypatch):
 
 
 def test_agents_set_model_validates_against_workspace(tmp_path, monkeypatch):
+    from manta_code.providers import discovery
+    from manta_code.providers.discovery import DiscoveryOutcome, TargetInfo, TargetLookup
+    from manta_code.providers.targets import parse_target
+
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     monkeypatch.setattr(auth, "databricks_configured", lambda profile=None: True)
     monkeypatch.setattr(
-        auth, "list_serving_chat_endpoints", lambda profile=None: ["databricks-gpt-5-4"]
+        discovery, "lookup_databricks_target", lambda name, **kwargs: TargetLookup(
+            TargetInfo(parse_target(name)) if name == "databricks-gpt-5-4" else None,
+            DiscoveryOutcome("legacy", "success" if name == "databricks-gpt-5-4" else "absent"),
+            name == "databricks-gpt-5-4",
+        ),
     )
     result = runner.invoke(app, ["agents", "set-model", "review", "databricks:nope-model"])
     assert result.exit_code == 1
@@ -431,53 +497,6 @@ def test_agents_set_model_non_databricks_skips_verify(tmp_path, monkeypatch):
     from manta_code.agents.registry import load_agent
 
     assert load_agent("swe").model == "anthropic:claude-opus-4-8"
-
-
-def test_classify_endpoint_detects_responses_only(monkeypatch):
-    import manta_code.databricks_chat as dc
-    from manta_code.main import _classify_endpoint
-
-    class _ResponsesOnly:
-        def __init__(self, **kw): pass
-
-        def invoke(self, messages):
-            raise RuntimeError(
-                "Error code: 400 - Model x only supports the Responses API."
-            )
-
-    monkeypatch.setattr(dc, "MantaChatDatabricks", _ResponsesOnly)
-    assert _classify_endpoint("x") == "responses-only"
-
-
-def test_classify_endpoint_passes_chat_models(monkeypatch):
-    import manta_code.databricks_chat as dc
-    from manta_code.main import _classify_endpoint
-
-    class _Fine:
-        def __init__(self, **kw): pass
-
-        def invoke(self, messages):
-            class _R:
-                content = "OK"
-
-            return _R()
-
-    monkeypatch.setattr(dc, "MantaChatDatabricks", _Fine)
-    assert _classify_endpoint("x") == "chat"
-
-
-def test_classify_endpoint_other_errors(monkeypatch):
-    import manta_code.databricks_chat as dc
-    from manta_code.main import _classify_endpoint
-
-    class _Boom:
-        def __init__(self, **kw): pass
-
-        def invoke(self, messages):
-            raise RuntimeError("connection refused")
-
-    monkeypatch.setattr(dc, "MantaChatDatabricks", _Boom)
-    assert _classify_endpoint("x") == "error"
 
 
 # --- README drift guards ---------------------------------------------------------
