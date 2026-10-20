@@ -9,6 +9,27 @@ from manta_code import _boot, dcode
 from manta_code.model_defaults import role_model
 
 
+def _preserve_model_picker_hooks(monkeypatch):
+    """Restore process-wide upstream integrations after each patching test."""
+    import inspect
+
+    from deepagents_code import model_catalog, model_config
+    from deepagents_code.tui.widgets import auth, model_selector
+
+    for module in (model_config, model_catalog, model_selector, auth):
+        if hasattr(module, "get_available_models"):
+            monkeypatch.setattr(module, "get_available_models", module.get_available_models)
+    monkeypatch.setattr(
+        _boot, "_original_get_available_models", _boot._original_get_available_models,
+    )
+    screen = model_selector.ModelSelectorScreen
+    for name in (
+        "__init__", "_catalog_model_data", "_apply_subset", "_info_line_content",
+        "_help_text", "action_select", "compose", "_update_display",
+    ):
+        monkeypatch.setattr(screen, name, inspect.getattr_static(screen, name))
+
+
 # --- merge_databricks_provider -------------------------------------------------
 
 
@@ -346,9 +367,23 @@ def test_apply_branding_overrides_upstream_banner():
         config._ASCII_BANNER = original_ascii
 
 
-def test_databricks_first_models_reorders_but_keeps_all_providers(monkeypatch):
-    # Databricks-first, not Databricks-only (ADR 0010): every provider upstream
-    # discovers stays available; databricks just moves to the front.
+def test_apply_branding_degrades_on_live_widget_integration_error(monkeypatch):
+    config = pytest.importorskip("deepagents_code.config")
+    from manta_code import branding
+
+    monkeypatch.setattr(config, "_UNICODE_BANNER", config._UNICODE_BANNER)
+    monkeypatch.setattr(config, "_ASCII_BANNER", config._ASCII_BANNER)
+
+    def incompatible_widget(**_kwargs):
+        raise AttributeError("upstream widget contract changed")
+
+    monkeypatch.setattr(branding, "apply_tui_branding", incompatible_widget)
+    assert _boot.apply_branding() is False
+
+
+def test_databricks_model_discovery_excludes_direct_api_providers(monkeypatch):
+    # Workspace models use SDK authentication; installed upstream provider
+    # packages must not add unrelated API-key choices to Manta's picker.
     monkeypatch.setattr(
         _boot,
         "_original_get_available_models",
@@ -359,19 +394,19 @@ def test_databricks_first_models_reorders_but_keeps_all_providers(monkeypatch):
         },
     )
     result = _boot._databricks_first_models()
-    assert list(result) == ["databricks", "anthropic", "openai"]
-    assert result["anthropic"] == ["claude-opus"]
-    assert result["openai"] == ["gpt-5"]
+    assert result == {
+        "databricks": ["databricks-claude-sonnet", "databricks-gpt"],
+    }
 
 
-def test_databricks_first_models_passthrough_when_provider_absent(monkeypatch):
-    # Off Databricks the wrapper is a pure passthrough — nothing is hidden.
+def test_databricks_model_discovery_does_not_substitute_direct_providers(monkeypatch):
+    # Missing workspace discovery must not silently offer a direct-key model.
     monkeypatch.setattr(
         _boot,
         "_original_get_available_models",
         lambda: {"anthropic": ["claude-opus"]},
     )
-    assert _boot._databricks_first_models() == {"anthropic": ["claude-opus"]}
+    assert _boot._databricks_first_models() == {}
 
 
 def test_databricks_first_models_empty_on_upstream_failure(monkeypatch):
@@ -382,8 +417,9 @@ def test_databricks_first_models_empty_on_upstream_failure(monkeypatch):
     assert _boot._databricks_first_models() == {}
 
 
-def test_prefer_databricks_models_patches_discovery():
+def test_prefer_databricks_models_patches_discovery(monkeypatch):
     model_config = pytest.importorskip("deepagents_code.model_config")
+    _preserve_model_picker_hooks(monkeypatch)
     original = model_config.get_available_models
     saved_original = _boot._original_get_available_models
     try:
@@ -402,6 +438,7 @@ def test_prefer_databricks_models_patches_discovery():
 def test_prefer_databricks_models_updates_loaded_catalog(monkeypatch):
     model_config = pytest.importorskip("deepagents_code.model_config")
     catalog = pytest.importorskip("deepagents_code.model_catalog")
+    _preserve_model_picker_hooks(monkeypatch)
     def discover():
         return {"openai": ["gpt"], "databricks": ["team-chat"]}
 
@@ -409,7 +446,7 @@ def test_prefer_databricks_models_updates_loaded_catalog(monkeypatch):
     monkeypatch.setattr(catalog, "get_available_models", discover)
     monkeypatch.setattr(_boot, "_original_get_available_models", None)
     assert _boot.prefer_databricks_models() is True
-    assert list(catalog.get_available_models()) == ["databricks", "openai"]
+    assert catalog.get_available_models() == {"databricks": ["team-chat"]}
 
 
 def test_rebrand_auth_screen_replaces_screen_internals():
@@ -487,7 +524,7 @@ def test_rebrand_model_selector_footer_neutralizes_databricks(monkeypatch):
 
         fake = _FakeSelector()
         screen._update_footer(fake)
-        assert "Databricks AI Gateway endpoint" in fake._static.content.plain
+        assert "Databricks AI Gateway model" in fake._static.content.plain
     finally:
         screen._update_footer = original
 
@@ -579,6 +616,7 @@ def test_boot_main_announces_degraded_control_plane(monkeypatch, capsys):
 
     monkeypatch.setattr(_boot, "apply_branding", lambda: True)
     monkeypatch.setattr(_boot, "rebrand_model_selector_footer", lambda: True)
+    monkeypatch.setattr(_boot, "extend_recommended_models", lambda: True)
     monkeypatch.setattr(_boot, "prefer_databricks_models", lambda: True)
     monkeypatch.setattr(_boot, "rebrand_auth_screen", lambda: True)
     monkeypatch.setattr(_boot, "align_agent_switch_model", lambda: True)
@@ -601,6 +639,7 @@ def test_boot_main_silent_when_everything_applies(monkeypatch, capsys):
     for fn in (
         "apply_branding",
         "rebrand_model_selector_footer",
+        "extend_recommended_models",
         "prefer_databricks_models",
         "rebrand_auth_screen",
         "align_agent_switch_model",
@@ -613,6 +652,39 @@ def test_boot_main_silent_when_everything_applies(monkeypatch, capsys):
 
     _boot.main()
     assert "Manta degraded" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("failed_hook", "warning"),
+    [
+        ("apply_branding", "Manta welcome banner"),
+        ("rebrand_model_selector_footer", "Databricks model details"),
+        ("extend_recommended_models", "Databricks model recommendations"),
+        ("prefer_databricks_models", "Databricks workspace model picker"),
+    ],
+)
+def test_boot_main_announces_ui_integration_failure(monkeypatch, capsys, failed_hook, warning):
+    pytest.importorskip("deepagents_code")
+    import deepagents_code.main as upstream_main
+
+    for hook in (
+        "apply_branding",
+        "rebrand_model_selector_footer",
+        "extend_recommended_models",
+        "prefer_databricks_models",
+        "rebrand_auth_screen",
+        "align_agent_switch_model",
+        "add_agent_mentions_to_autocomplete",
+        "add_session_cost_command",
+        "allow_blocking_server",
+        "install_manta_build_hook",
+    ):
+        monkeypatch.setattr(_boot, hook, lambda: True)
+    monkeypatch.setattr(_boot, failed_hook, lambda: False)
+    monkeypatch.setattr(upstream_main, "cli_main", lambda: None)
+
+    _boot.main()
+    assert warning in capsys.readouterr().err
 
 
 def test_rebranded_auth_screen_renders_both_sections(tmp_path, monkeypatch):
@@ -1107,16 +1179,15 @@ def test_merge_never_overrides_user_default_agent():
 
 
 def test_extend_recommended_models_adds_manta_lineup(tmp_path, monkeypatch):
-    # Upstream's /model opens on a curated subset with zero databricks: specs;
-    # Manta's configured endpoints + agent pins must join it so the default
-    # view isn't just the user's recent picks (the "tiny subset" report).
+    # Recommended mode may rank workspace models, but must never reintroduce
+    # upstream API-key providers after gateway catalog scoping.
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     ms = pytest.importorskip("deepagents_code.tui.widgets.model_selector")
     original = ms._RECOMMENDED_MODELS
     try:
         assert _boot.extend_recommended_models() is True
         extended = ms._RECOMMENDED_MODELS
-        assert original.items() <= extended.items()  # upstream labels preserved
+        assert all(spec.startswith("databricks:") for spec in extended)
         assert role_model("orchestrator") in extended  # default
         assert role_model("planning") in extended  # planning pin
         assert role_model("chief") in extended  # chief pin
@@ -1131,10 +1202,12 @@ def test_extend_recommended_models_adds_manta_lineup(tmp_path, monkeypatch):
 def test_model_picker_renders_and_filters_offline_catalog(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     ms = pytest.importorskip("deepagents_code.tui.widgets.model_selector")
+    _preserve_model_picker_hooks(monkeypatch)
     import asyncio
 
     from deepagents_code.model_catalog import CatalogProvider, ModelCatalog
     from deepagents_code.model_config import ProviderAuthState
+    from types import SimpleNamespace
     from textual.app import App
     from textual.widgets import Static
 
@@ -1160,6 +1233,12 @@ def test_model_picker_renders_and_filters_offline_catalog(tmp_path, monkeypatch)
     try:
         assert _boot.extend_recommended_models() is True
         assert _boot.rebrand_model_selector_footer() is True
+        monkeypatch.setattr(
+            _boot,
+            "_gateway_picker_inventory",
+            lambda current_spec=None: SimpleNamespace(names=(default.split(":", 1)[1], "team-chat")),
+        )
+        assert _boot.prefer_databricks_models() is True
 
         async def render():
             app = Harness()
@@ -1176,12 +1255,14 @@ def test_model_picker_renders_and_filters_offline_catalog(tmp_path, monkeypatch)
                 await pilot.pause()
                 assert screen._loaded
                 assert default in dict(screen._filtered_models)
-                assert custom not in dict(screen._filtered_models)
+                assert custom in dict(screen._filtered_models)
+                assert {provider for _, provider in screen._filtered_models} == {"databricks"}
                 footer = screen.query_one("#model-detail-footer", Static)
-                assert "Databricks AI Gateway endpoint" in str(footer.content)
+                assert "Databricks AI Gateway model" in str(footer.content)
                 await pilot.press("ctrl+r")
                 await pilot.pause()
                 assert custom in dict(screen._filtered_models)
+                assert {provider for _, provider in screen._filtered_models} == {"databricks"}
                 await pilot.press("t", "e", "a", "m")
                 await pilot.pause()
                 # The upstream selector uses fuzzy matching; a service FQN

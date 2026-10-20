@@ -1,21 +1,14 @@
-"""Runtime entry that rebrands ``deepagents-code``, Databricks-first.
+"""Runtime entry that brands ``deepagents-code`` and scopes its model picker.
 
-``deepagents-code`` exposes no public hook for its startup wordmark — the big
-"DEEP AGENTS" ASCII art lives in module-level constants
-(:data:`deepagents_code.config._UNICODE_BANNER` /
-:data:`deepagents_code.config._ASCII_BANNER`) that :func:`get_banner` reads at
-render time. To present Manta branding without forking the TUI, this shim
-overrides those constants in-process before the Textual app paints, then
-delegates to ``deepagents-code``'s real CLI entry point.
+The current TUI renders a compact welcome widget independently of the legacy
+banner constants. Manta patches both rendering paths before the Textual app
+paints, then delegates to the upstream CLI entry point.
 
-It also makes model discovery **Databricks-first, not Databricks-only**
-(ADR 0010). Upstream's :func:`deepagents_code.model_config.get_available_models`
-surfaces every installed provider (anthropic, openai, google, …). Manta keeps
-all of them — "Databricks is never the place you're trapped" (VISION.md) — and
-wraps discovery only to list the ``databricks`` provider first, since it is
-the default and the launch model. The ``/auth`` screen likewise leads with the
-Databricks workspace (profile) picker and keeps upstream's provider API-key
-manager below it, so off-Databricks use is configured in the same place.
+``/model`` lists the active Databricks workspace's full chat-model inventory,
+including Unity Gateway services, without unrelated direct-key providers or a
+curated-only default. Both local and inference-host catalogs pass through this
+scope. Explicit CLI provider selections and stored provider configuration are
+preserved. ``/auth`` leads with the Databricks workspace picker.
 
 The launcher runs this via ``python -m manta_code._boot <passthrough args>``
 (see :func:`manta_code.dcode.build_dcode_argv`). CLI args are forwarded
@@ -108,7 +101,7 @@ def _versioned(art: str, version: str) -> str:
 
 
 def apply_branding() -> bool:
-    """Override ``deepagents-code``'s banner constants with Manta art.
+    """Brand both the current welcome widget and the legacy splash banner.
 
     Returns ``True`` when the override was applied, ``False`` if the upstream
     module layout changed and branding could not be applied (caller continues
@@ -118,6 +111,7 @@ def apply_branding() -> bool:
         from deepagents_code import config
 
         from manta_code import __version__ as manta_version
+        from manta_code.branding import apply_tui_branding
     except Exception:
         return False
 
@@ -126,7 +120,16 @@ def apply_branding() -> bool:
 
     config._UNICODE_BANNER = _versioned(MANTA_UNICODE_BANNER, manta_version)
     config._ASCII_BANNER = _versioned(MANTA_ASCII_BANNER, manta_version)
-    return True
+    try:
+        return apply_tui_branding(
+            unicode_banner=MANTA_UNICODE_BANNER,
+            ascii_banner=MANTA_ASCII_BANNER,
+            unicode_ray=MANTA_RAY_UNICODE,
+            ascii_ray=MANTA_RAY_ASCII,
+            version=manta_version,
+        )
+    except Exception:  # noqa: BLE001 - announce degradation without blocking launch
+        return False
 
 
 #: Original upstream ``get_available_models``, captured when the
@@ -135,14 +138,11 @@ _original_get_available_models = None
 
 
 def _databricks_first_models() -> dict[str, list[str]]:
-    """Upstream model discovery, reordered so Databricks lists first.
+    """Expose Databricks models without upstream direct-provider catalogs.
 
-    Wraps (not replaces) upstream's
-    :func:`deepagents_code.model_config.get_available_models`: every installed
-    provider stays available — Databricks-first, not Databricks-only
-    (ADR 0010) — but the ``databricks`` provider is moved to the front of the
-    mapping so ``/model`` and ``/auth`` lead with the default. Degrades to an
-    empty mapping only if upstream discovery itself fails.
+    Keep the historical helper name for callers of the boot shim. Explicit
+    provider specs still construct normally; this scopes discovery in Manta's
+    model picker, rather than changing provider configuration or credentials.
     """
     original = _original_get_available_models
     if original is None:
@@ -151,22 +151,19 @@ def _databricks_first_models() -> dict[str, list[str]]:
         available = dict(original())
     except Exception:  # noqa: BLE001 - discovery must never crash the TUI
         return {}
-    if DATABRICKS_PROVIDER not in available:
-        return available
-    ordered = {DATABRICKS_PROVIDER: available[DATABRICKS_PROVIDER]}
-    for provider, models in available.items():
-        if provider != DATABRICKS_PROVIDER:
-            ordered[provider] = models
-    return ordered
+    models = available.get(DATABRICKS_PROVIDER)
+    return {DATABRICKS_PROVIDER: models} if models is not None else {}
 
 
 def prefer_databricks_models() -> bool:
-    """Reorder model discovery so Databricks leads across ``/model`` and ``/auth``.
+    """Install gateway-only discovery and the actual upstream catalog UI hooks.
 
     Wraps ``get_available_models`` on the ``model_config`` module (the
     canonical definition) plus any widget modules that already imported the
     symbol by value, so a lazy ``from ... import get_available_models`` in the
-    selector/auth screens binds to the Databricks-first variant. Idempotent.
+    selector/auth screens binds to the gateway variant. The current upstream
+    selector also loads catalogs from its inference server, so patching this
+    function alone cannot scope ``/model``. Idempotent.
 
     Returns ``True`` when the override was applied, ``False`` if the upstream
     module layout changed (caller continues to launch regardless).
@@ -193,6 +190,200 @@ def prefer_databricks_models() -> bool:
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "get_available_models"):
             module.get_available_models = _databricks_first_models
+    return _install_gateway_model_picker()
+
+
+def _gateway_picker_pins(current_spec: str | None = None) -> tuple[str, ...]:
+    """Read explicit pins without treating old managed inventories as pins."""
+    from manta_code.dcode import DEEPAGENTS_CONFIG_PATH, _read_toml
+
+    names = []
+    if current_spec and current_spec.startswith("databricks:"):
+        names.append(current_spec.split(":", 1)[1])
+    try:
+        from manta_code.config import interactive_endpoints, load_config
+
+        names.extend(interactive_endpoints(load_config()))
+    except Exception:  # noqa: BLE001 - other explicit pins remain usable
+        pass
+    try:
+        from manta_code.agents.defaults import merged_agents
+        from manta_code.agents.registry import list_agents
+
+        names.extend(
+            agent.model.split(":", 1)[1] for agent in merged_agents(list_agents())
+            if agent.model and agent.model.startswith("databricks:")
+        )
+    except Exception:  # noqa: BLE001 - corrupt registry must not empty the picker
+        pass
+    try:
+        config = _read_toml(DEEPAGENTS_CONFIG_PATH)
+        ownership = config.get("manta", {}).get("databricks_inventory", {})
+        owned = set(ownership.get("models", ())) if ownership.get("version") == 1 else set()
+        registered = config.get("models", {}).get("providers", {}).get("databricks", {}).get("models", ())
+        for name in registered:
+            if isinstance(name, str) and name not in owned:
+                names.append(name)
+    except Exception:  # noqa: BLE001 - malformed config still has the launch pins
+        pass
+    return tuple(dict.fromkeys(names))
+
+
+def _gateway_picker_inventory(current_spec: str | None = None) -> object:
+    """Discover the active workspace, retaining intentional user pins.
+
+    Discovery is bounded and cached by auth context, workspace, profile,
+    schemas, and configured names. Never use an old server catalog as another
+    workspace's inventory, including when fresh discovery fails.
+    """
+    from manta_code.auth import resolve_profile
+    from manta_code.dcode import _target_inventory
+
+    args = [arg for name in _gateway_picker_pins(current_spec) for arg in ("-M", f"databricks:{name}")]
+    return _target_inventory(resolve_profile(), args)
+
+
+def _gateway_model_catalog(catalog: object) -> object:
+    """Scope either local or server catalogs to the active gateway inventory."""
+    from deepagents_code.model_catalog import CatalogProvider
+    from deepagents_code.model_config import ProviderAuthState
+
+    prefix = f"{DATABRICKS_PROVIDER}:"
+    try:
+        inventory = _gateway_picker_inventory(catalog.current_spec)
+    except Exception:  # noqa: BLE001 - a discovery failure must leave pins usable
+        inventory = None
+    # The SDK result is scoped to the currently selected auth context. In
+    # particular, do not union an old server catalog from another profile,
+    # even when fresh discovery is unavailable. Explicit local pins survive.
+    names = inventory.names if inventory is not None else _gateway_picker_pins(catalog.current_spec)
+    models = [f"{prefix}{name}" for name in names]
+    policy = catalog.presentation_config()
+    models = sorted({spec for spec in models if policy.is_model_allowed(spec)})
+    provider = CatalogProvider(
+        state=ProviderAuthState.MANAGED,
+        detail="Databricks workspace authentication; access follows workspace grants",
+        display_name="Databricks AI Gateway",
+        short_name="Databricks",
+    )
+    return catalog.model_copy(update={
+        "models": models,
+        "profiles": {spec: entry for spec, entry in catalog.profiles.items() if spec in models},
+        "providers": {DATABRICKS_PROVIDER: provider},
+        "current_spec": catalog.current_spec if catalog.current_spec in models else None,
+    })
+
+
+def _install_gateway_model_picker() -> bool:
+    """Adapt Deep Agents' catalog-backed selector, including remote catalogs."""
+    try:
+        from textual.content import Content
+        from textual.widgets import Input
+
+        from deepagents_code.tui.widgets.model_selector import ModelSelectorScreen
+    except Exception:
+        return False
+    if getattr(ModelSelectorScreen.__init__, "__manta_gateway_picker__", False):
+        return True
+    required = ("compose", "_catalog_model_data", "_apply_subset", "_info_line_content", "_help_text", "_update_display", "action_select")
+    if not all(callable(getattr(ModelSelectorScreen, name, None)) for name in required):
+        return False
+    original_init = ModelSelectorScreen.__init__
+    original_data = ModelSelectorScreen._catalog_model_data
+    original_select = ModelSelectorScreen.action_select
+    original_help = ModelSelectorScreen._help_text
+    original_compose = ModelSelectorScreen.compose
+    original_display = ModelSelectorScreen._update_display
+
+    def _init(self: object, *args: object, **kwargs: object) -> None:
+        original_init(self, *args, **kwargs)
+        self._recommended_only = False
+        self._show_specs = True
+        if self._title is None:
+            self._title = "Select Databricks AI Gateway Model"
+        self._recommended_models = {
+            spec: name for spec, name in self._recommended_models.items()
+            if spec.startswith(f"{DATABRICKS_PROVIDER}:")
+        }
+
+    def _compose(self: object) -> object:
+        for widget in original_compose(self):
+            if isinstance(widget, Input) and widget.id == "model-filter":
+                widget.placeholder = "Search gateway models or enter catalog.schema.service..."
+            yield widget
+
+    def _catalog_model_data(catalog: object, *, include_recent: bool, default_scope: object) -> object:
+        data = original_data(
+            _gateway_model_catalog(catalog), include_recent=include_recent,
+            default_scope=default_scope,
+        )
+        visible = {spec for spec, _provider in data.all_models}
+        return data._replace(
+            recent_specs=[spec for spec in data.recent_specs if spec in visible],
+            default_spec=data.default_spec if data.default_spec in visible else None,
+        )
+
+    def _apply_subset(self: object, all_models: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        # Every discovered workspace model is visible immediately. Upstream's
+        # Ctrl+R recommendation toggle must never hide an uncurated service.
+        return [(spec, provider) for spec, provider in all_models if provider == DATABRICKS_PROVIDER]
+
+    def _info_line_content(self: object) -> object:
+        return Content.styled(
+            "Search Databricks AI Gateway models" if self._filter_text.strip()
+            else "All Databricks AI Gateway models · workspace authentication"
+        )
+
+    async def _update_display(self: object) -> None:
+        await original_display(self)
+        if self._filtered_models or not self._loaded or self._options_container is None:
+            return
+        from textual.widgets import Static
+
+        typed = self._filter_text.strip()
+        if ":" not in typed or typed.startswith(f"{DATABRICKS_PROVIDER}:"):
+            return
+        for widget in self._options_container.children:
+            if isinstance(widget, Static):
+                widget.update(Content.styled("No matching gateway models. Direct API providers are outside this picker.", "dim"))
+
+    def _help_text(self: object) -> str:
+        # Keep upstream's navigation and correct preference scope, while
+        # removing a recommendation toggle that no longer narrows the list.
+        from deepagents_code.config import get_glyphs
+
+        separator = f" {get_glyphs().bullet} "
+        return separator.join(
+            part for part in original_help(self).split(separator)
+            if part != "Ctrl+R recommended"
+        )
+
+    def _action_select(self: object) -> None:
+        if self._filtered_models:
+            original_select(self)
+            return
+        typed = self.query_one("#model-filter", Input).value.strip()
+        if not typed:
+            return
+        if ":" in typed and not typed.startswith(f"{DATABRICKS_PROVIDER}:"):
+            self.notify("Choose a Databricks AI Gateway model; direct API providers are outside this picker.", severity="warning", markup=False)
+            return
+        spec = typed if typed.startswith(f"{DATABRICKS_PROVIDER}:") else f"{DATABRICKS_PROVIDER}:{typed}"
+        blocked = self._presentation_config().policy_error(spec, canonicalize=False)
+        if blocked is not None:
+            self.notify(str(blocked), severity="error", markup=False)
+            return
+        self._select_with_auth_check(spec, DATABRICKS_PROVIDER)
+
+    _init.__manta_gateway_picker__ = True
+    ModelSelectorScreen.__init__ = _init
+    ModelSelectorScreen.compose = _compose
+    ModelSelectorScreen._catalog_model_data = staticmethod(_catalog_model_data)
+    ModelSelectorScreen._apply_subset = _apply_subset
+    ModelSelectorScreen._info_line_content = _info_line_content
+    ModelSelectorScreen._help_text = _help_text
+    ModelSelectorScreen._update_display = _update_display
+    ModelSelectorScreen.action_select = _action_select
     return True
 
 
@@ -527,17 +718,11 @@ def rebrand_auth_screen() -> bool:
 
 
 def extend_recommended_models() -> bool:
-    """Add Manta's curated Databricks endpoints to ``/model``'s default view.
+    """Keep only Databricks recommendations for startup/catalog requests.
 
-    Upstream's selector opens on a hand-curated "recommended" subset
-    (``Ctrl+R`` toggles all models) — and that set contains no ``databricks:``
-    specs, so a Databricks-first install sees only its recent picks: the
-    "tiny subset" report. This extends the recommendation mapping with Manta's configured
-    endpoints and the agents' model pins (the loop-proven set), so the
-    default view is the Manta-curated lineup and ``Ctrl+R`` still reveals
-    everything the workspace serves.
-
-    Returns ``True`` when the override was applied, ``False`` otherwise.
+    The selector shows the complete gateway inventory. Recommendations supply
+    names and explicit configured pins, without reintroducing direct-provider
+    models from upstream's installable-provider shortlist.
     """
     try:
         from deepagents_code.tui.widgets import model_selector
@@ -568,11 +753,8 @@ def extend_recommended_models() -> bool:
         )
     except Exception:  # noqa: BLE001
         pass
-    if not specs:
-        return True  # nothing to add (e.g. Databricks not configured)
-
     model_selector._RECOMMENDED_MODELS = {
-        **current,
+        **{spec: name for spec, name in current.items() if spec.startswith(f"{DATABRICKS_PROVIDER}:")},
         **{spec: current.get(spec, spec.split(":", 1)[-1]) for spec in specs},
     }
     return True
@@ -601,6 +783,8 @@ def rebrand_model_selector_footer() -> bool:
         return False
 
     original_update_footer = ModelSelectorScreen._update_footer
+    if getattr(original_update_footer, "__manta_gateway_footer__", False):
+        return True
 
     def _update_footer(self: object) -> None:
         if self._filtered_models:
@@ -611,11 +795,12 @@ def rebrand_model_selector_footer() -> bool:
             if spec.startswith(f"{DATABRICKS_PROVIDER}:") and not profile:
                 footer = self.query_one("#model-detail-footer", Static)
                 footer.update(
-                    Content.styled("Databricks AI Gateway endpoint\n\n\n", "dim")
+                    Content.styled("Databricks AI Gateway model\nWorkspace authentication; service grants apply\n\n", "dim")
                 )
                 return
         original_update_footer(self)
 
+    _update_footer.__manta_gateway_footer__ = True
     ModelSelectorScreen._update_footer = _update_footer
     return True
 
@@ -1018,21 +1203,16 @@ def install_manta_build_hook() -> bool:
 
 
 def main() -> None:
-    """Apply branding and Databricks-first scoping, then run the upstream CLI.
-
-    Cosmetic patches (banner, model-selector footer) degrade silently;
-    substantive ones announce themselves on stderr so a fallback to vanilla is
-    never invisible (ADR 0010): the user learns *at launch* that agents,
-    budgets, or the Databricks-first surfaces are inactive, instead of
-    wondering later where they went.
-    """
-    apply_branding()
-    rebrand_model_selector_footer()
-    extend_recommended_models()
-
+    """Apply Manta branding and workspace model scope, then run upstream."""
     degraded: list[str] = []
+    if not apply_branding():
+        degraded.append("Manta welcome banner")
+    if not rebrand_model_selector_footer():
+        degraded.append("Databricks model details")
+    if not extend_recommended_models():
+        degraded.append("Databricks model recommendations")
     if not prefer_databricks_models():
-        degraded.append("Databricks-first model list")
+        degraded.append("Databricks workspace model picker")
     if not rebrand_auth_screen():
         degraded.append("workspace picker in /auth")
     if not align_agent_switch_model():

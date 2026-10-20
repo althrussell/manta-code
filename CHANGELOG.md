@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Restores the Manta ray, wordmark, product version, and title in the current
+  interactive welcome screen, including narrow and ASCII terminals.
+- Makes `/model` show the active Databricks workspace's full chat-model
+  inventory immediately, including discovered Unity Gateway services. Removes
+  unrelated direct-key provider rows and recommendations from this picker.
+- Adds rendered welcome and model-selection regression coverage for the
+  current catalog-backed TUI, including profile changes and allowed-model policy.
+
 ## [0.3.0] — 2026-10-20
 
 Unity Gateway model services now work throughout Manta: interactive sessions,
