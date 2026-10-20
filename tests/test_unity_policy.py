@@ -180,6 +180,26 @@ def test_exact_gemini_qualification_prefers_chat_and_disables_unsupported_stream
     assert resolve_target_policy("custom.ai.gemini-4-argon").api == "responses"
 
 
+def test_argon_chat_compatibility_is_exact_and_protocol_scoped():
+    from manta_code.databricks_chat import MantaChatDatabricks
+
+    for name, surface in (("system.ai.gemini-4-argon", "unified"), ("databricks-gemini-4-argon", "legacy")):
+        model = MantaChatDatabricks(model=name)
+        assert (model.transport_surface, model.transport_api) == (surface, "chat")
+        assert model.stream_usage is False
+        assert model.target_policy.capabilities.values["tool_schema_dialect"] == "gemini"
+        assert "tool_schema_dialect" not in model.profile
+        assert model.target_policy.capabilities.profile["reasoning_effort_levels"] == []
+        with pytest.raises(TargetResolutionError, match="configurable reasoning effort"):
+            model._get_request_payload("test", reasoning_effort="high")
+        responses = resolve_target_policy(name, explicit={"api": "responses"})
+        assert "tool_schema_dialect" not in responses.capabilities.values
+        assert "stream_usage" not in responses.capabilities.values
+
+    for name in ("custom.ai.gemini-4-argon", "custom-gemini-4-argon", "system.ai.databricks-gemini-4-argon"):
+        assert "tool_schema_dialect" not in resolve_target_policy(name).capabilities.values
+
+
 @pytest.mark.parametrize("dialect", ["chat", "responses"])
 def test_per_call_output_cap_is_preserved_in_both_dialects(dialect):
     from manta_code.databricks_chat import MantaChatDatabricks

@@ -42,7 +42,13 @@ from .providers.response_compat import (
     preserve_sync_stream,
     restore_responses_state,
 )
-from .providers.chat_compat import capture_chat_state, restore_chat_state
+from .providers.chat_compat import (
+    capture_chat_state,
+    prepare_chat_stream_chunk,
+    preserve_async_chat_stream,
+    preserve_sync_chat_stream,
+    restore_chat_state,
+)
 
 #: Content-block ``type`` values this shim recognizes. A serialized list is only
 #: treated as reasoning-model content when *every* element is one of these, so
@@ -671,6 +677,10 @@ class MantaChatDatabricks(ChatOpenAI):
                         and not message.get("content")
                     ):
                         message["content"] = " "
+        from .providers.tool_schema_compat import adapt_chat_tool_schemas
+
+        values = {**self.target_policy.capabilities.values, **(self.profile or {})}
+        payload = adapt_chat_tool_schemas(payload, values.get("tool_schema_dialect"))
         unknown = payload.keys() - _dialect_request_parameters(self.transport_api)
         if unknown:
             raise TargetResolutionError(
@@ -688,6 +698,7 @@ class MantaChatDatabricks(ChatOpenAI):
 
     def _convert_chunk_to_generation_chunk(self, chunk: Any, default_chunk_class: Any, base_generation_info: Any = None) -> Any:
         from .providers.chat_compat import capture_chat_chunk_state
+        chunk = prepare_chat_stream_chunk(chunk)
         return capture_chat_chunk_state(
             super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info), chunk,
         )
@@ -704,7 +715,7 @@ class MantaChatDatabricks(ChatOpenAI):
             if not self._gateway_enabled() and not self.use_ai_gateway_native_api
             else None
         )
-        for chunk in preserve_sync_stream(super()._stream(messages, stop=stop, run_manager=None, **kwargs)):
+        for chunk in preserve_sync_chat_stream(preserve_sync_stream(super()._stream(messages, stop=stop, run_manager=None, **kwargs))):
             normalized = _normalize_chunk(chunk)
             normalized = dedup.rewrite(normalized) if dedup is not None else normalized
             if run_manager:
@@ -720,7 +731,7 @@ class MantaChatDatabricks(ChatOpenAI):
             if not self._gateway_enabled() and not self.use_ai_gateway_native_api
             else None
         )
-        async for chunk in preserve_async_stream(super()._astream(messages, stop=stop, run_manager=None, **kwargs)):
+        async for chunk in preserve_async_chat_stream(preserve_async_stream(super()._astream(messages, stop=stop, run_manager=None, **kwargs))):
             normalized = _normalize_chunk(chunk)
             normalized = dedup.rewrite(normalized) if dedup is not None else normalized
             if run_manager:

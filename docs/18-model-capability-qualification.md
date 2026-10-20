@@ -1,5 +1,9 @@
 # Model controls and capability evidence
 
+The subsequent [Argon coding-harness qualification](21-gemini-argon-harness-qualification.md)
+covers its full tool schemas, actual streamed `grep` execution and separately
+qualified legacy endpoint on 21 October 2026.
+
 Reviewed and qualified on 20 October 2026. Model construction, the model picker,
 `/effort`, and context compaction now read the same exact-target capability
 evidence. The registry supplies metadata; it does not restrict discovery or
