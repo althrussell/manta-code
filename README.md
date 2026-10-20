@@ -34,14 +34,21 @@ things they treat as afterthoughts:
    per-path filesystem rules, approval gates, budgets, and durable memory —
    enforced through the compiled runtime's tool dispatch. Read-only roles deny
    known write/execute effects and tools with unknown effects; policy also
-   applies when JavaScript dispatches tools. Ask-gated tools pause interactively
-   and fail closed unattended unless explicitly pre-approved. This is an agent
+   applies when JavaScript dispatches tools. Managed tasks checkpoint human
+   decisions; other unattended runs fail closed unless explicitly pre-approved. This is an agent
    tool boundary; use a sandbox for operating-system isolation.
 3. **Work you can walk away from.** `@swe land the refactor &` returns a task
    id immediately; the work runs detached, survives your session, accepts
    mid-flight steering (`manta task send`), notifies your desktop when it
-   lands, and reports into one pane (`manta status`). The `chief` agent fans
-   work out and collects it for you.
+   lands, and reports into `/tasks`. Detached tasks use separate Git worktrees
+   or directory snapshots. Review their diff, tests, artifacts and spend before
+   explicitly integrating changes. The `chief` agent fans work out and collects it for you.
+
+Use `/agents` to author specialists and `/tasks` (or `/team`) to assign work,
+resolve input/approval requests, and review changes. Detached tasks disable
+shell execution by default; configure an agent's `task_shell_allow_list` to
+enable its test commands. See the [visible agent team guide](docs/20-visible-agent-team.md)
+for the complete workflow and isolation/recovery contract.
 
 And underneath: **reliability as a feature**. Manta enriches the upstream
 [`deepagents-code`](https://pypi.org/project/deepagents-code/) runtime through
@@ -54,9 +61,10 @@ for each configured target in the selected workspace.
 ## Install
 
 The commands below install published v0.3.0. The
-[dependable-foundations milestone](docs/19-dependable-foundations.md) is an
-unreleased source candidate; its new task continuation, update and control
-features require that candidate until a later tag is published.
+[dependable-foundations](docs/19-dependable-foundations.md) and
+[visible-agent-team](docs/20-visible-agent-team.md) milestones are unreleased
+source candidates. Their new workspaces, isolated tasks, continuation and
+control features require the candidate source until a later tag is published.
 
 **v0.3.0 requires Python 3.12+** and is distributed through
 [GitHub Releases](https://github.com/althrussell/manta-code/releases).
@@ -148,7 +156,8 @@ Everything below happens inline, without leaving the conversation.
 | Command | What it shows |
 | --- | --- |
 | `/cost` (or `/spend`) | **This session's spend**: per-agent totals, the most recent model calls with per-call cost, today's total vs your daily budget. Works even while the agent is busy. |
-| `/agents` | Switch agents — your conversation follows you, the new agent's model pin is applied truthfully, `Ctrl+S` sets your default. |
+| `/agents` | Create, clone, edit, persistently disable, inspect and test specialists. Apply reload safely, switch the primary agent or assign an isolated task. |
+| `/tasks` (or `/team`) | Inline and detached tasks, parent/child links, dependencies, logs, input/approvals, steering, cancellation, retry, results and explicit integration/discard. |
 | `/model` | Lists all discovered Unity Gateway services and legacy chat endpoints for the active workspace, plus configured targets. Search exact model names and press Enter to switch using Databricks authentication; direct-key providers are excluded. |
 | `/effort` | Selects the exact service/protocol's supported effort values. The model card shows known context/output limits, capability evidence and unknowns. |
 | `/auth` | Databricks workspace picker on top, provider API keys below; `Tab` moves between the sections. |
@@ -204,6 +213,12 @@ are archived. Legacy SQLite notes remain inspectable but are marked
 legacy/unassigned and excluded from automatic recall. See the
 [foundation guide](docs/19-dependable-foundations.md) for ownership and limits.
 
+For the candidate's complete create → assign → answer → review → integrate
+workflow, CLI/SDK examples, context choices and qualification commands, see the
+[visible agent team guide](docs/20-visible-agent-team.md). Inline delegation
+shares the parent checkout; detached tasks isolate changes. Forked detached
+tasks receive an explicit visible conversation text snapshot.
+
 ## Command reference
 
 ```bash
@@ -219,7 +234,11 @@ manta agents set-model <name> <model>      # next session or /restart; workspace
 manta agents memory <name>  # inspect an agent's durable memory
 
 manta task submit <agent> "..." [--allow-asks]   # detached background task
-manta task list|status|output|send|cancel|resume # the task lifecycle
+manta task list|status|output|send|cancel|resume|retry # the task lifecycle
+manta task review <id>                     # observed diff, tests, artifacts, spend
+manta task respond <id> --pending-id <token> --decision approve # exact displayed request
+manta task integrate <id>                  # explicitly apply the reviewed diff
+manta task discard <id>                    # remove the isolated task checkout
 manta status                # chief-of-staff pane: tasks, events, audit, spend
 
 manta cost [--by agent|model|task] [--breakdown] [--advise]   # (in-session: /cost)

@@ -1236,6 +1236,7 @@ def main() -> None:
     from manta_code.budget_runtime import install_budget_runtime
     from manta_code.model_capabilities import install_model_capability_bridge
     from manta_code.updates import install_runtime_update_adapter
+    from manta_code.tui.integration import install_visible_agent_team
 
     for name, installer in (
         ("request accounting", install_usage_collector),
@@ -1243,6 +1244,7 @@ def main() -> None:
         ("Gateway model capability catalog", install_model_capability_bridge),
         ("qualified Manta updates", install_runtime_update_adapter),
         ("agent control plane", install_manta_build_hook),
+        ("visible agent team", install_visible_agent_team),
     ):
         if not installer():
             raise RuntimeError(f"Required Manta integration unavailable: {name}. Run manta doctor.")

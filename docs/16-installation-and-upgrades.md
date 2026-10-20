@@ -15,6 +15,23 @@ release baseline; see the [foundation tracker](19-dependable-foundations.md) for
 candidate validation and release status. Installing that existing tag does not
 install unpublished source changes.
 
+The [visible agent team candidate](20-visible-agent-team.md) adds `/agents`
+authoring and `/tasks`, with isolated writable work and explicit integration.
+To test this PR from a local checkout, use its locked dependencies in a separate
+environment and run the candidate's CLI explicitly:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.lock
+uv pip install --python .venv/bin/python --no-deps -e '.[agent,dev]'
+.venv/bin/manta -p my-workspace
+```
+
+These commands use the checked-out branch; they do not select or publish a new
+release. Keep `MANTA_HOME` and `DEEPAGENTS_HOME` separate if you want disposable
+agent/session state while evaluating it. Continue using the normal Databricks
+profile for authentication.
+
 ## Recommended: isolated uv tool
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,

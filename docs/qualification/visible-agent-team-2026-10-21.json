@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "qualification": "visible_agent_team",
+  "live": true,
+  "profile": "labs",
+  "model": "databricks:system.ai.gpt-6-1-sol",
+  "passed": true,
+  "author_sync_dispatch": true,
+  "isolated_worktree": true,
+  "input_checkpoint": true,
+  "approval_checkpoint": true,
+  "source_unchanged_before_approval": true,
+  "final_state": "done",
+  "same_task_and_thread": true,
+  "source_isolated_until_integration": true,
+  "observed_test_exit_codes": [
+    0
+  ],
+  "observed_execute_events": 1,
+  "observed_tests_passed": true,
+  "artifact_attached": true,
+  "reviewed_change": true,
+  "spend_completeness_visible": true,
+  "integrated_acceptance_passed": true,
+  "caller_changes_preserved": true,
+  "persistent_disable": true
+}

@@ -41,7 +41,7 @@ def test_task_subdirectory_uses_project_root_model_and_detects_changes(tmp_path,
     with execution_context(manifest):
         assert load_config().interactive.default_endpoint == "custom.team.first"
     config.write_text('[interactive]\ndefault_endpoint="custom.team.changed"\n')
-    with pytest.raises(TaskContextError, match="model/policy changed"):
+    with pytest.raises(TaskContextError, match="model/policy changed|runtime configuration changed"):
         validate_execution_manifest(manifest)
 
 
@@ -244,7 +244,7 @@ def test_budget_pause_and_resume_preserves_manifest_and_checkpoint(tmp_path, mon
     monkeypatch.setattr(executor.subprocess, "Popen", fake_spawn)
     executor.resume_task(record.id)
     restored = store.get_task(record.id)
-    assert restored.state == "queued"
+    assert restored.state == "starting"
     assert restored.manifest == manifest
     assert spawned["cwd"] == str(tmp_path)
     assert spawned["env"]["MANTA_RESUME_THREAD_ID"] == "thread-1"

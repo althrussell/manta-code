@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -184,6 +185,20 @@ def _sync_agent_profiles(
     managed_now: list[str] = []
     for name, defn in desired.items():
         agent_dir = base / name
+        if not agent_dir.exists():
+            # Disabling removes a profile from the upstream picker by
+            # archiving it. Re-enabling restores that same learned context.
+            archive = state.parent / "manta-profile-archive"
+            candidates = sorted((path for path in archive.glob(f"{name}-*")
+                                 if re.fullmatch(re.escape(name) + r"-\d+", path.name)),
+                                key=lambda path: path.name, reverse=True)
+            for candidate in candidates:
+                if candidate.is_dir() and _is_manta_managed(candidate / "AGENTS.md"):
+                    try:
+                        candidate.rename(agent_dir)
+                    except OSError:
+                        pass
+                    break
         md_path = agent_dir / "AGENTS.md"
         if md_path.exists() and not _is_manta_managed(md_path):
             # A user-authored / non-Manta profile of the same name: never clobber.

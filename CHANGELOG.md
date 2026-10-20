@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Adds a visible agent team: `/agents` authoring, persistent enable/disable,
+  typed model controls, safe reload, validation and task assignment through the
+  same definitions as the CLI and SDK.
+- Adds `/tasks` (`/team`) for inline and detached progress, hierarchy, logs,
+  steering, exact input/approval decisions, checkpoint continuation and retry.
+  Detached work uses isolated worktrees/directories with reviewed integration,
+  artifacts, observed test results and explicit usage/cost completeness.
+- Adds durable bounded scheduling/dependencies and an explicit detached shell
+  command allow-list. Qualifies nested programmatic approvals across real
+  server restarts without repeating completed effects. See the
+  [visible agent team guide](docs/20-visible-agent-team.md).
 - Adds dependable foundations for the agent harness: atomic runtime composition,
   shared tool-policy enforcement, bound memory namespaces and preserved learned
   context, captured detached-task identity, and checkpointed budget continuation.

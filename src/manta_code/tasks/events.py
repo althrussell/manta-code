@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from collections.abc import Callable
@@ -38,6 +39,18 @@ _POLICY_BLOCK_MARKER = "Blocked by Manta tool policy"
 #: Server env flag set by upstream when HITL is bypassed (headless runs).
 _AUTO_APPROVE_ENV = "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE"
 _CONFIRMED_APPROVAL: ContextVar[frozenset[str]] = ContextVar("manta_confirmed_tool_approval", default=frozenset())
+logger = logging.getLogger("manta.tasks.events")
+
+
+def _finish_inline(task_id: str, result: Any = None, exc: BaseException | None = None) -> None:
+    from . import inline
+    try:
+        inline.finish(task_id, result=result, exc=exc)
+    except Exception:
+        # Never replace a graph interruption or replay a completed effect just
+        # because its reporting write failed. The durable running row remains
+        # recoverable through its parent conversation.
+        logger.error("Inline task result could not be persisted; inspect its parent conversation")
 
 
 @contextmanager
@@ -52,7 +65,8 @@ def confirmed_tool_approval(request: Any):
 
 
 def _current_task_id() -> str | None:
-    return os.environ.get("MANTA_TASK_ID") or None
+    from .inline import CURRENT_INLINE_TASK
+    return CURRENT_INLINE_TASK.get() or os.environ.get("MANTA_TASK_ID") or None
 
 
 #: Explicit unattended marker exported by every ``run_headless`` invocation
@@ -88,6 +102,17 @@ def _is_policy_denial(result: Any) -> bool:
     return isinstance(content, str) and _POLICY_BLOCK_MARKER in content
 
 
+def _call_result(request: Any, result: Any) -> Any:
+    """Unwrap dcode's hook-state Command without losing backend artifacts."""
+    from langgraph.types import Command
+    if isinstance(result, Command) and isinstance(result.update, dict):
+        call_id = getattr(request, "tool_call", {}).get("id")
+        matches = [message for message in result.update.get("messages", [])
+                   if getattr(message, "tool_call_id", None) == call_id]
+        return matches[0] if len(matches) == 1 else None
+    return result
+
+
 class EventLogMiddleware(AgentMiddleware):
     """Record one event per tool call for the wrapped agent."""
 
@@ -107,6 +132,7 @@ class EventLogMiddleware(AgentMiddleware):
     def _record(self, request: Any, result: Any, *, outcome: str | None = None) -> None:
         try:
             call = self._tool_call(request)
+            result = _call_result(request, result)
             tool = call.get("name", "") or "?"
             # Neither arguments/results nor exception messages belong in the
             # activity feed: each may contain credentials or private content.
@@ -119,7 +145,7 @@ class EventLogMiddleware(AgentMiddleware):
                 kind = "tool_error"
             elif str(call.get("id") or "") in _CONFIRMED_APPROVAL.get():
                 kind = "approved"
-            elif tool in self._approval and unattended_run():
+            elif tool in self._approval and unattended_run() and not _managed_human_loop():
                 kind = "auto_approved"
             else:
                 kind = "tool"
@@ -131,24 +157,84 @@ class EventLogMiddleware(AgentMiddleware):
                     task_id=_current_task_id(),
                 )
             )
+            self._command_receipt(request, result)
         except Exception:  # noqa: BLE001 - observability must never break a call
             pass
 
+    def _command_receipt(self, request: Any, result: Any) -> None:
+        """Use backend exit metadata, never stdout or an agent's pass claim."""
+        import shlex
+        from pathlib import PurePath
+        from . import store
+        call = self._tool_call(request)
+        task_id = _current_task_id()
+        artifact = getattr(result, "artifact", None)
+        metadata = getattr(getattr(request, "tool", None), "metadata", None) or {}
+        if not task_id or call.get("name") != "execute" or metadata.get("_deepagents_code_mcp_server"):
+            return
+        if not isinstance(artifact, dict) or type(artifact.get("exit_code")) is not int:
+            return
+        command = (call.get("args") or {}).get("command", "")
+        if not isinstance(command, str):
+            return
+        try:
+            lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            args = list(lexer)
+        except ValueError:
+            return
+        if "\n" in command or "`" in command or "$(" in command or any(
+            token and all(char in "();<>|&" for char in token) for token in args
+        ):
+            return  # A shell group's exit code is not the test runner's exit.
+        # A small explicit runner set labels observed test commands. Other
+        # commands remain ordinary tool events; a printed 'tests passed' is
+        # never promoted to a test receipt.
+        names = [PurePath(arg).name for arg in args]
+        if names[:2] == ["uv", "run"]:
+            names = names[2:]
+        is_test = bool(names) and (names[0] in {"pytest", "jest", "vitest"}
+            or names[:2] in (["npm", "test"], ["pnpm", "test"], ["yarn", "test"], ["cargo", "test"], ["go", "test"])
+            or (names[0].startswith("python") and len(names) > 2 and names[1] == "-m" and names[2] in {"pytest", "unittest"}))
+        if is_test:
+            store.record_test_result(task_id, command, artifact["exit_code"], str(getattr(result, "content", "")))
+
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        from . import inline
+        task_id = inline.begin(request)
+        token = inline.CURRENT_INLINE_TASK.set(task_id) if task_id else None
         try:
             result = handler(request)
         except BaseException as exc:
             self._record(request, None, outcome=_exception_outcome(exc))
+            if task_id:
+                _finish_inline(task_id, exc=exc)
             raise
+        finally:
+            if token is not None:
+                inline.CURRENT_INLINE_TASK.reset(token)
+        if task_id:
+            _finish_inline(task_id, result)
         self._record(request, result)
         return result
 
     async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        from . import inline
+        task_id = inline.begin(request)
+        token = inline.CURRENT_INLINE_TASK.set(task_id) if task_id else None
         try:
             result = await handler(request)
         except BaseException as exc:
             self._record(request, None, outcome=_exception_outcome(exc))
+            if task_id:
+                _finish_inline(task_id, exc=exc)
             raise
+        finally:
+            if token is not None:
+                inline.CURRENT_INLINE_TASK.reset(token)
+        if task_id:
+            _finish_inline(task_id, result)
         self._record(request, result)
         return result
 
@@ -159,6 +245,11 @@ def _exception_outcome(exc: BaseException) -> str:
     if type(exc).__name__ == "GraphInterrupt":
         return "interrupted"
     return "tool_error"
+
+
+def _managed_human_loop() -> bool:
+    from .approvals import managed_task
+    return managed_task()
 
 
 def agent_event_middleware(defn: Any) -> AgentMiddleware:
