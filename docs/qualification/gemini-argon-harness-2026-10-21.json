@@ -112,13 +112,34 @@
       "tool_errors": 0,
       "signature_preserved": true,
       "final_answer": true,
-      "fixture_unchanged": true
+      "fixture_unchanged": true,
+      "conversation": "ordinary_prior_text"
     },
     {
       "target": "databricks-gemini-4-argon",
       "profile": "labs",
       "passed": true,
       "surface": "legacy",
+      "api": "chat",
+      "tool_count": 34,
+      "stream_chunks": 7,
+      "tool_names": [
+        "grep"
+      ],
+      "positive_grep_limit": true,
+      "tool_results": 1,
+      "tool_errors": 0,
+      "signature_preserved": true,
+      "final_answer": true,
+      "fixture_unchanged": true,
+      "conversation": "ordinary_prior_text"
+    },
+    {
+      "target": "system.ai.gemini-4-argon",
+      "profile": "labs",
+      "passed": true,
+      "conversation": "fresh",
+      "surface": "unified",
       "api": "chat",
       "tool_count": 34,
       "stream_chunks": 7,

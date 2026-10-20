@@ -49,6 +49,8 @@ copied between calls.
   `max_count=1`, returned the fixture token and left the fixture unchanged.
 - Requests included ordinary prior conversation text, exercising the tool
   schema after a conversation already contains messages.
+- A separate fresh-conversation Unity service run also passed the full
+  asynchronous harness and real `grep` execution, matching the reported case.
 
 Tests used disposable projects and state directories, synthetic messages and
 existing SDK workspace authentication. Private user skills were disabled in
