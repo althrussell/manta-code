@@ -35,6 +35,14 @@ This ADR records the decisions taken to close those gaps, made 2026-06-11.
 
 ### Phase A — Databricks-first, not Databricks-only
 
+**2026-10-20 refinement:** the interactive `/model` picker is now scoped to the
+active Databricks workspace and shows its full chat-model inventory by default.
+Mixing direct-key providers into this workflow obscured Unity Gateway services.
+This supersedes the picker behavior in item 2 below. Explicit CLI selections
+for other configured providers and their saved configuration remain supported.
+The current welcome widget and catalog-backed picker have rendered UI tests in
+addition to the patch-target checks described in item 6.
+
 1. **Provider abstraction** (`manta_code/providers/`): a `ModelRef`
    (`provider:model`) plus a resolver registry. The existing
    `MantaChatDatabricks` resolver becomes the first registered provider; the

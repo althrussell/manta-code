@@ -100,9 +100,25 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         kind="attr",
     ),
     PatchTarget(
+        module="deepagents_code.tui.widgets.welcome",
+        attribute="WelcomeBanner._build_banner",
+        purpose="current TUI welcome rendering rebranded by manta_code.branding",
+    ),
+    PatchTarget(
+        module="deepagents_code.app",
+        attribute="DeepAgentsApp.TITLE",
+        purpose="Manta app title used by the interactive header",
+        kind="attr",
+    ),
+    PatchTarget(
+        module="deepagents_code._invocation",
+        attribute="invoked_name.cache_clear",
+        purpose="refresh terminal command identity after setting Manta invocation",
+    ),
+    PatchTarget(
         module="deepagents_code.model_config",
         attribute="get_available_models",
-        purpose="model discovery wrapped Databricks-first by manta_code._boot",
+        purpose="model discovery scoped to Databricks by manta_code._boot",
     ),
     PatchTarget(
         module="deepagents_code.model_catalog",
@@ -129,10 +145,28 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         attribute="ModelSelectorScreen._update_footer",
         purpose="/model footer wrapped for profile-less Databricks endpoints",
     ),
+    *(
+        PatchTarget(
+            module="deepagents_code.tui.widgets.model_selector",
+            attribute=f"ModelSelectorScreen.{method}",
+            purpose="workspace-only /model catalog, filtering, and selection",
+        )
+        for method in (
+            "__init__",
+            "compose",
+            "_catalog_model_data",
+            "_apply_subset",
+            "_update_display",
+            "_info_line_content",
+            "_help_text",
+            "action_select",
+            "_select_with_auth_check",
+        )
+    ),
     PatchTarget(
         module="deepagents_code.tui.widgets.model_selector",
         attribute="_RECOMMENDED_MODELS",
-        purpose="/model default view extended with Manta's curated endpoints",
+        purpose="/model optional recommendations scoped to Databricks targets",
         kind="attr",
     ),
     PatchTarget(

@@ -42,7 +42,7 @@ things they treat as afterthoughts:
 
 And underneath: **reliability as a feature**. Manta enriches the upstream
 [`deepagents-code`](https://pypi.org/project/deepagents-code/) runtime through
-a contract-tested seam (28 verified patch targets); if anything moves, Manta
+a contract-tested seam (40 verified patch targets); if anything moves, Manta
 falls back to a clean vanilla launch and *says so*. `manta doctor --probe`
 even live-tests every pinned model in the real agent loop before you bet a
 session on it.
@@ -135,7 +135,7 @@ Everything below happens inline, without leaving the conversation.
 | --- | --- |
 | `/cost` (or `/spend`) | **This session's spend**: per-agent totals, the most recent model calls with per-call cost, today's total vs your daily budget. Works even while the agent is busy. |
 | `/agents` | Switch agents — your conversation follows you, the new agent's model pin is applied truthfully, `Ctrl+S` sets your default. |
-| `/model` | Opens on Manta's role models and configured targets; `Ctrl+R` includes discovered Unity services and legacy chat endpoints for the active workspace. |
+| `/model` | Lists all discovered Unity Gateway services and legacy chat endpoints for the active workspace, plus configured targets. Search exact model names and press Enter to switch using Databricks authentication; direct-key providers are excluded. |
 | `/auth` | Databricks workspace picker on top, provider API keys below; `Tab` moves between the sections. |
 
 Plus the runtime's own: `/clear` (fresh thread), `/threads` (resume any

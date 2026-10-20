@@ -13,7 +13,7 @@ When Databricks is configured, Manta resolves your profile, provisions a model
 provider in `~/.deepagents/config.toml`, and supplies
 `-M databricks:<default_endpoint>` unless you passed a model explicitly or are
 resuming a saved thread. Agent role pins apply when an agent is selected.
-Other providers remain available when configured through upstream.
+Explicit CLI selections for other configured providers remain supported.
 
 ```bash
 manta -p my-profile
@@ -34,7 +34,10 @@ known compatibility or metadata selects Chat Completions. Legacy endpoints
 retain their legacy Chat route. See [configuration](10-config-schema.md) for
 per-target options and explicit native OpenAI routing. The `/model` inventory
 includes configured targets, agent pins, discovered Unity services, and legacy
-chat endpoints. Embedding-only services are excluded. Workspace changes refresh
+chat endpoints for the active workspace. All appear by default; no recommended
+filter or direct-provider API key is required to find Unity services. Search and
+selection stay within the Databricks inventory. Embedding-only services are
+excluded. Workspace changes refresh
 Manta-owned registrations while preserving user entries and defaults.
 
 Saved conversations retain their selected dialect. A model or API switch that
