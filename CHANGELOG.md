@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Adds a visible agent team: `/agents` authoring, persistent enable/disable,
+  typed model controls, safe reload, validation and task assignment through the
+  same definitions as the CLI and SDK.
+- Adds `/tasks` (`/team`) for inline and detached progress, hierarchy, logs,
+  steering, exact input/approval decisions, checkpoint continuation and retry.
+  Detached work uses isolated worktrees/directories with reviewed integration,
+  artifacts, observed test results and explicit usage/cost completeness.
+- Adds durable bounded scheduling/dependencies and an explicit detached shell
+  command allow-list. Qualifies nested programmatic approvals across real
+  server restarts without repeating completed effects. See the
+  [visible agent team guide](docs/20-visible-agent-team.md).
+- Adds dependable foundations for the agent harness: atomic runtime composition,
+  shared tool-policy enforcement, bound memory namespaces and preserved learned
+  context, captured detached-task identity, and checkpointed budget continuation.
+- Connects exact-service capability evidence to model cards, effort choices and
+  context/output preflight, and records main, specialist and helper requests in
+  one usage ledger while keeping unknown prices visible.
+- Gives Manta ownership of qualified tagged updates and runtime help, and adds
+  four disposable repository evaluations with executable acceptance checks.
+  See the [foundation qualification record](docs/19-dependable-foundations.md)
+  for scope, evidence and remaining product milestones.
 - Restores the Manta ray, wordmark, product version, and title in the current
   interactive welcome screen, including narrow and ASCII terminals.
 - Makes `/model` show the active Databricks workspace's full chat-model

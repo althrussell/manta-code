@@ -32,8 +32,8 @@ def test_save_load_round_trip(tmp_path):
     )
     registry.save_agent(defn, root=tmp_path)
 
-    # Prompt lives in AGENTS.md, structured data in agent.toml.
-    assert registry.agent_md_path("reviewer", root=tmp_path).read_text().startswith(
+    # Generated role and mutable learning files have independent ownership.
+    assert registry.agent_role_path("reviewer", root=tmp_path).read_text().startswith(
         "You review code."
     )
     toml_text = registry.agent_toml_path("reviewer", root=tmp_path).read_text()

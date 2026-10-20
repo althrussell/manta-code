@@ -245,8 +245,9 @@ def _gateway_picker_inventory(current_spec: str | None = None) -> object:
 
 def _gateway_model_catalog(catalog: object) -> object:
     """Scope either local or server catalogs to the active gateway inventory."""
-    from deepagents_code.model_catalog import CatalogProvider
+    from deepagents_code.model_catalog import CatalogProfile, CatalogProvider
     from deepagents_code.model_config import ProviderAuthState
+    from manta_code.model_capabilities import profile_for_target
 
     prefix = f"{DATABRICKS_PROVIDER}:"
     try:
@@ -266,9 +267,21 @@ def _gateway_model_catalog(catalog: object) -> object:
         display_name="Databricks AI Gateway",
         short_name="Databricks",
     )
+    profiles = {}
+    for spec in models:
+        previous = catalog.profiles.get(spec)
+        upstream_profile = previous.profile if previous is not None else None
+        profile = profile_for_target(spec, upstream_profile=upstream_profile)
+        if not profile and previous is None:
+            continue
+        profiles[spec] = CatalogProfile(
+            profile={key: value for key, value in profile.items()
+                     if value is None or isinstance(value, (str, int, bool))},
+            overridden_keys=previous.overridden_keys if previous is not None else [],
+        )
     return catalog.model_copy(update={
         "models": models,
-        "profiles": {spec: entry for spec, entry in catalog.profiles.items() if spec in models},
+        "profiles": profiles,
         "providers": {DATABRICKS_PROVIDER: provider},
         "current_spec": catalog.current_spec if catalog.current_spec in models else None,
     })
@@ -790,12 +803,17 @@ def rebrand_model_selector_footer() -> bool:
         if self._filtered_models:
             index = min(self._selected_index, len(self._filtered_models) - 1)
             spec, _ = self._filtered_models[index]
-            entry = self._profiles.get(spec)
-            profile = entry.get("profile") if entry else None
-            if spec.startswith(f"{DATABRICKS_PROVIDER}:") and not profile:
+            if spec.startswith(f"{DATABRICKS_PROVIDER}:"):
+                from manta_code.model_capabilities import format_capability_card
                 footer = self.query_one("#model-detail-footer", Static)
+                profile = self._profiles.get(spec)
+                values = profile.get("profile", {}) if isinstance(profile, dict) else getattr(profile, "profile", {})
+                overrides = profile.get("overridden_keys", []) if isinstance(profile, dict) else getattr(profile, "overridden_keys", [])
+                cli = getattr(self, "_cli_profile_override", None) or {}
                 footer.update(
-                    Content.styled("Databricks AI Gateway model\nWorkspace authentication; service grants apply\n\n", "dim")
+                    Content.styled(format_capability_card(spec,
+                        effective_profile={**values, **cli},
+                        overridden_keys=list(set(overrides) | cli.keys())), "dim")
                 )
                 return
         original_update_footer(self)
@@ -1094,6 +1112,16 @@ def _session_cost_report(thread_id: str | None) -> str:
                     f"  {c.agent:<14} {c.model:<34} "
                     f"{c.input_tokens:>8,}→{c.output_tokens:<7,} {cost}"
                 )
+                details = [f"kind={c.call_kind}", f"outcome={c.outcome}"]
+                if c.reasoning_tokens is not None:
+                    details.append(f"reasoning={c.reasoning_tokens:,} tokens")
+                if c.cache_available:
+                    details.append(f"cache read/write={c.cache_read:,}/{c.cache_creation:,}")
+                if c.duration_ms is not None:
+                    details.append(f"latency={c.duration_ms / 1000:.2f}s")
+                if c.request_id:
+                    details.append(f"request={c.request_id}")
+                lines.append("    " + " · ".join(details))
     else:
         lines.append(
             "No spend recorded for this session yet (the ledger writes after "
@@ -1204,6 +1232,22 @@ def install_manta_build_hook() -> bool:
 
 def main() -> None:
     """Apply Manta branding and workspace model scope, then run upstream."""
+    from manta_code.accounting import install_usage_collector
+    from manta_code.budget_runtime import install_budget_runtime
+    from manta_code.model_capabilities import install_model_capability_bridge
+    from manta_code.updates import install_runtime_update_adapter
+    from manta_code.tui.integration import install_visible_agent_team
+
+    for name, installer in (
+        ("request accounting", install_usage_collector),
+        ("budget checkpoints", install_budget_runtime),
+        ("Gateway model capability catalog", install_model_capability_bridge),
+        ("qualified Manta updates", install_runtime_update_adapter),
+        ("agent control plane", install_manta_build_hook),
+        ("visible agent team", install_visible_agent_team),
+    ):
+        if not installer():
+            raise RuntimeError(f"Required Manta integration unavailable: {name}. Run manta doctor.")
     degraded: list[str] = []
     if not apply_branding():
         degraded.append("Manta welcome banner")
@@ -1223,8 +1267,6 @@ def main() -> None:
         degraded.append("in-session /cost")
     if not allow_blocking_server():
         degraded.append("Databricks auth shim")
-    if not install_manta_build_hook():
-        degraded.append("control plane (agents, budgets, Databricks tools)")
     if degraded:
         print(
             "⚠ Manta degraded — inactive: "

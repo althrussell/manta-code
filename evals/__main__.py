@@ -58,7 +58,7 @@ def _run_live(task_ids: list[str] | None, timeout: int, max_turns: int) -> int:
         f"\nQuality {suite.quality:.2f}  •  total {total}  "
         f"•  {suite.total_tokens} tokens (real ledger figures)"
     )
-    return 0
+    return 0 if all(r.score == 1 for r in suite.results) else 1
 
 
 def main(argv: list[str] | None = None) -> int:

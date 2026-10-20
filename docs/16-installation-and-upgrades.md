@@ -9,6 +9,29 @@ CI. All commands below install the `agent` extra, which includes the interactive
 runtime and Databricks support; installing only the base package omits them.
 Examples use Bash unless marked PowerShell.
 
+The dependable-foundations source milestone adds the Manta-owned updater and
+runtime checks described below. The tagged `v0.3.0` commands remain the published
+release baseline; see the [foundation tracker](19-dependable-foundations.md) for
+candidate validation and release status. Installing that existing tag does not
+install unpublished source changes.
+
+The [visible agent team candidate](20-visible-agent-team.md) adds `/agents`
+authoring and `/tasks`, with isolated writable work and explicit integration.
+To test this PR from a local checkout, use its locked dependencies in a separate
+environment and run the candidate's CLI explicitly:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.lock
+uv pip install --python .venv/bin/python --no-deps -e '.[agent,dev]'
+.venv/bin/manta -p my-workspace
+```
+
+These commands use the checked-out branch; they do not select or publish a new
+release. Keep `MANTA_HOME` and `DEEPAGENTS_HOME` separate if you want disposable
+agent/session state while evaluating it. Continue using the normal Databricks
+profile for authentication.
+
 ## Recommended: isolated uv tool
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
@@ -29,7 +52,34 @@ for qualification; it does not install the development tools by itself.
 
 ## Upgrade an older installation
 
-Replace the existing tool with the new tag and a Python 3.12+ environment:
+On a Manta version with the foundation updater, first check stable GitHub
+releases without modifying packages:
+
+```bash
+manta update --check
+manta update --check --version v0.3.0
+```
+
+Save work and exit interactive sessions before installing the chosen release:
+
+```bash
+manta update --version vMAJOR.MINOR.PATCH
+manta --version
+manta doctor
+```
+
+Replace `vMAJOR.MINOR.PATCH` with a published stable tag. Without `--version`,
+`manta update` selects the latest stable release and installs only if newer.
+An explicit tag can reinstall/select that release. The updater detects its own
+uv tool or pip environment, installs `manta-code[agent]` from the immutable tag
+with that tag's full constraints, and preserves installer failures as failures.
+It never upgrades `deepagents-code` independently. `/update` and `--update`
+use the same Manta release contract; `/update` checks and gives the shell action
+so an active session is not replaced underneath you. Start a fresh `manta`
+process after installation; runtime restart paths also re-enter Manta.
+
+For versions without that updater, replace the existing tool explicitly with
+the new tag and a Python 3.12+ environment:
 
 ```bash
 uv tool install --force --upgrade --python 3.12 \
@@ -48,6 +98,18 @@ were replaced by `langchain-openai` plus the Databricks SDK. A new tool environm
 avoids retaining the old bridge's MCP 1 dependencies alongside the new runtime's
 MCP 2 stack. The install does not remove your Manta configuration, registry,
 usage ledger, or saved sessions.
+
+The updater refuses to replace editable source checkouts. Review and update the
+intended Git revision, synchronize that revision's `requirements-dev.lock`, then
+reinstall `.[agent]` in its development environment. Keep the source, lockfile
+and pinned runtime together. Manta disables independent automatic dcode
+installation while running, without editing your stored dcode preferences.
+Upstream extra/package installers, uninstalls and dependency-recovery refreshes
+also refuse unqualified package changes. Add optional integrations deliberately
+against the matching Manta release lock; do not run an installer that replaces
+the bundled runtime with the latest dcode independently. Manta update operations
+are serialized for an installation so concurrent processes cannot replace its
+environment at the same time.
 
 User-owned defaults and saved agent pins retain their existing values. Inspect
 those choices before moving existing agents to the new services:
@@ -144,16 +206,56 @@ visibility does not establish inference permission; a caller may also have
 inference access without metadata access. Models must be available to your
 workspace and principal.
 
+Doctor reports required adapter health and whether this process has compiled
+and validated an effective control manifest. A preflight-only process reports
+that graph validation is pending; available symbols alone do not prove the
+running graph is protected. Required control construction failures stop the
+runtime with a diagnosis. Optional UI adapters can report degraded operation.
+
 The qualified Gemini services use unified Chat because their unified Responses
 tool continuation currently fails in the gateway. See the
 [qualification report](15-unity-gateway-qualification.md) for exact targets and
 other limits. Unknown service prices remain unknown in local cost reports.
+The [model controls report](18-model-capability-qualification.md) separately
+records effort/context evidence; metadata visibility and successful basic
+inference do not qualify every advanced feature.
+
+## Configuration and memory migration
+
+Generated role instructions now live in
+`~/.deepagents/<agent>/MANTA_ROLE.md`; `AGENTS.md` holds mutable learned context
+and survives `manta agents sync`. Old combined files are retained under
+`~/.deepagents/.state/manta-profile-backups/<agent>/<content-hash>/`, with
+provenance. Deleted managed profile directories move to
+`~/.deepagents/.state/manta-profile-archive/`, preserving memory and skills.
+Unowned profiles are not adopted implicitly.
+
+Legacy SQLite notes receive a recoverable `memory.db.pre-v2.bak` beside
+`$MANTA_HOME/.state/memory.db` (default `~/.manta/.state/`). They remain
+inspectable with `manta agents memory <agent>`, tagged legacy/unassigned and
+excluded from automatic recall. Runtime note tools and recall use the same
+compiled agent namespace. These are agent namespaces, not automatic project
+scopes; use separate namespaces/agents where projects must not share notes.
+
+Budget mode defaults to `checkpoint`, including unattended runs. Inspect a
+budget-paused task before approving `manta task resume <id>`. Resume validates
+the captured project/workspace/agent context and continues the saved checkpoint.
+Choose `[budget] mode = "advisory"` only when continuation at a recorded
+threshold is intended. Known spend is estimated between requests; unknown
+prices/usage cannot enforce a hard dollar ceiling. See
+[configuration](10-config-schema.md) for exact semantics and `manta pricing`
+for effective rate provenance.
 
 ## Troubleshooting and development
 
 If the shell finds an old binary, run `command -v manta` (PowerShell:
 `Get-Command manta`), activate the intended environment, or refresh the uv tool
 PATH. `manta --version` identifies the package being executed.
+
+For runtime commands and their help, use `manta runtime --help`,
+`manta runtime mcp --help` and `manta runtime plugin --help`. The explicit
+runtime route also reaches upstream `doctor`/`agents` groups shadowed by Manta.
+Help does not synchronize profiles, discover workspace models or call inference.
 
 If resolution reports an MCP 1/MCP 2 conflict, recreate the environment using the
 v0.3.0 commands rather than adding the old Databricks bridge packages.

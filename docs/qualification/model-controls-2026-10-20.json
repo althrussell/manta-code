@@ -1,0 +1,386 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-20",
+  "databricks_profile": "labs",
+  "workspace_sha256": "ddedd4c5da027e2a48ba70a105c080c0855c07d44489e08958c648eca8697a41",
+  "method": "MantaChatDatabricks.ainvoke; harmless OK-only prompt; max output 512; no fallback or mutations",
+  "limits": "Acceptance of these exact controls only; no long-context, image, schema, quality or helper-model qualification is implied.",
+  "cases": [
+    {
+      "target": "system.ai.claude-opus-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "low",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-opus-5-5",
+      "observed_backend": null,
+      "request_id": "423f0c7a-7d81-4838-bd59-616481ffc32c",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-opus-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "medium",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-opus-5-5",
+      "observed_backend": null,
+      "request_id": "c5f9a346-fa1b-4f0b-b010-de431672008b",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-opus-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-opus-5-5",
+      "observed_backend": null,
+      "request_id": "961f789d-31d3-4742-b631-696a9079a192",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-opus-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "max",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 30,
+        "total_tokens": 48,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-opus-5-5",
+      "observed_backend": null,
+      "request_id": "81b84814-6fec-4297-a75c-8757d36398bb",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-opus-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "xhigh",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-opus-5-5",
+      "observed_backend": null,
+      "request_id": "23c4f42c-4352-4466-8575-c22f3a92dc44",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-sonnet-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "medium",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-sonnet-5-5",
+      "observed_backend": null,
+      "request_id": "992a390d-dfc7-46a7-b161-82cfbc0161dd",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-sonnet-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-sonnet-5-5",
+      "observed_backend": null,
+      "request_id": "9d596820-f991-4398-bb40-7092deee5847",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-sonnet-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "low",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-sonnet-5-5",
+      "observed_backend": null,
+      "request_id": "063d8d5f-05c5-484c-bce6-bb2e141561a0",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-sonnet-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "max",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 22,
+        "total_tokens": 40,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-sonnet-5-5",
+      "observed_backend": null,
+      "request_id": "14ea5840-3a1b-4654-90d2-357a3e98bca3",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.claude-sonnet-5-5",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "xhigh",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "requested": "system.ai.claude-sonnet-5-5",
+      "observed_backend": null,
+      "request_id": "49134869-1fa3-4da8-bbcb-458c1c30bd2f",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.gemini-4-argon",
+      "surface": "unified",
+      "protocol": "chat",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "failed",
+      "exception": "OpenAIInvalidRequestError",
+      "failure": "Gateway rejects reasoning_effort in generation_config"
+    },
+    {
+      "target": "system.ai.gpt-6-1-sol",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "low",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 5,
+        "total_tokens": 16,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 0
+        }
+      },
+      "requested": "system.ai.gpt-6-1-sol",
+      "observed_backend": "gpt-6.1-sol",
+      "request_id": "e7cd32ea-eec9-4474-91c4-ccd42b130165",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.glm-5-2",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "failed",
+      "exception": "OpenAIInvalidRequestError",
+      "failure": "Gateway rejects deprecated endpoint"
+    },
+    {
+      "target": "system.ai.glm-5-3",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 17,
+        "output_tokens": 3,
+        "total_tokens": 20,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 1
+        }
+      },
+      "requested": "system.ai.glm-5-3",
+      "observed_backend": "glm-5-3",
+      "request_id": "10155bb3-c832-41ce-b49c-33ba3f6efefd",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.glm-5-3-flash",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 17,
+        "output_tokens": 3,
+        "total_tokens": 20,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 1
+        }
+      },
+      "requested": "system.ai.glm-5-3-flash",
+      "observed_backend": "glm-5.3-flash",
+      "request_id": "6b9f226b-0ead-454d-9d4b-020df4288179",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.kimi-k3",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 94,
+        "output_tokens": 25,
+        "total_tokens": 119,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 14
+        }
+      },
+      "requested": "system.ai.kimi-k3",
+      "observed_backend": "kimi-k3",
+      "request_id": "ecd3a369-bacb-46ed-8707-51c49ca6c135",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.deepseek-v4-1-flash",
+      "surface": "unified",
+      "protocol": "responses",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 35,
+        "output_tokens": 32,
+        "total_tokens": 67,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 30
+        }
+      },
+      "requested": "system.ai.deepseek-v4-1-flash",
+      "observed_backend": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "request_id": "532f49c8-d572-49bc-b431-47fea5b875cf",
+      "usage_complete": true
+    },
+    {
+      "target": "system.ai.gemini-3-7-flash",
+      "surface": "unified",
+      "protocol": "chat",
+      "effort": "high",
+      "checked_at": "2026-10-20",
+      "status": "passed",
+      "usage": {
+        "input_tokens": 5,
+        "output_tokens": 1,
+        "total_tokens": 149,
+        "input_token_details": {},
+        "output_token_details": {}
+      },
+      "requested": "system.ai.gemini-3-7-flash",
+      "observed_backend": "gemini-3.7-flash",
+      "request_id": "db062d84-7af1-4019-9fa6-8a5c8579bdfd",
+      "usage_complete": false,
+      "usage_caveat": "Provider total does not equal reported input plus output; unexplained tokens remain unclassified."
+    }
+  ]
+}

@@ -23,6 +23,13 @@ creates the checkout's development environment, installs the lock, checks setup,
 and runs tests and lint. End users should follow the
 [installation guide](docs/16-installation-and-upgrades.md).
 
+The unreleased foundation candidate's fresh-install evidence used a qualified
+package proxy and local wheelhouse. Public-index availability of every pinned
+version has not been established; see the
+[qualification record](docs/19-dependable-foundations.md). If a pinned runtime
+is unavailable, use your approved source for that exact version rather than
+downgrading the runtime independently of Manta's lock and adapters.
+
 ## Branch naming
 
 ```text

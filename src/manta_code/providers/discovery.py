@@ -14,7 +14,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .targets import CapabilityEvidence, DatabricksTarget, TargetKind, _policy_inputs, curated_capabilities, parse_target
+from .targets import CapabilityEvidence, DatabricksTarget, TargetKind, _policy_inputs, curated_capabilities, merge_capability_evidence, parse_target
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ def _service_info(detail: Any, *, source: str = "unity") -> TargetInfo:
     target = parse_target(detail.name, kind="service")
     apis = tuple(getattr(detail, "supported_api_types", None) or ())
     curated = curated_capabilities(target)
-    evidence = CapabilityEvidence(values=curated.values, sources={**curated.sources, "supported_api_types": "Unity Catalog supported_api_types"} if apis else curated.sources, supported_api_types=apis or curated.supported_api_types)
+    evidence = merge_capability_evidence(curated, CapabilityEvidence(sources={"supported_api_types": "Unity Catalog supported_api_types"} if apis else {}, supported_api_types=apis))
     return TargetInfo(target, apis, evidence, "verified", source)
 
 

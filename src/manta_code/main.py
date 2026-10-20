@@ -40,6 +40,9 @@ KNOWN_SUBCOMMANDS = frozenset(
         "status",
         "gateway",
         "receipts",
+        "runtime",
+        "update",
+        "pricing",
     }
 )
 
@@ -72,6 +75,10 @@ def classify_args(argv: list[str]) -> tuple[str, Optional[str], list[str]]:
             profile = arg[2:]
             i += 1
             continue
+        if arg in ("-h", "--help") and passthrough:
+            passthrough.append(arg)
+            i += 1
+            continue
         if arg in ("-h", "--help", "--version"):
             return ("delegate", None, None)
         if not arg.startswith("-"):
@@ -93,11 +100,110 @@ def main_entry() -> None:
     """
     import sys
 
-    mode, profile, passthrough = classify_args(sys.argv[1:])
+    arguments = sys.argv[1:]
+    # Only interpret an alias in command position. A task prompt, runtime
+    # argument or literal after `--` may contain the same text.
+    command_index = 0
+    while command_index < len(arguments):
+        arg = arguments[command_index]
+        if arg in {"-p", "--profile"}:
+            command_index += 2
+        elif arg.startswith("--profile=") or arg.startswith("-p") and len(arg) > 2:
+            command_index += 1
+        else:
+            break
+    command = arguments[command_index] if command_index < len(arguments) else None
+    if command == "--update":
+        app(args=[*arguments[:command_index], "update", *arguments[command_index + 1:]])
+        return
+    if command == "--auto-update":
+        console.print("Manta installs complete qualified releases. Use `manta update --check` or `manta update`.")
+        return
+    mode, profile, passthrough = classify_args(arguments)
     if mode == "delegate":
         app()
         return
+    if any(arg in {"-h", "--help"} for arg in (passthrough or [])):
+        _runtime_help(profile, passthrough or [])
+        return
     _launch_interactive(profile=profile, passthrough=passthrough or [])
+
+
+def _runtime_help(profile: str | None, arguments: list[str]) -> None:
+    """Show runtime help without discovery, profile sync or inference."""
+    import subprocess
+    import sys
+
+    with _databricks_profile_env(profile):
+        result = subprocess.run([sys.executable, "-m", "manta_code._boot", *arguments],
+                                check=False, capture_output=True, text=True)
+    # Keep upstream option details and versions, but make examples executable
+    # through the Manta bootstrap, including commands shadowed by our CLI.
+    for stream, content in ((sys.stdout, result.stdout), (sys.stderr, result.stderr)):
+        stream.write(content.replace("dcode update", "manta update").replace("dcode ", "manta runtime ")
+                     .replace("Install optional extras", "Qualified integration guidance")
+                     .replace("Remove an optional extra", "Qualified integration guidance")
+                     .replace("Toggle automatic updates on or off, then exit", "Show qualified Manta update guidance"))
+    raise SystemExit(result.returncode)
+
+
+@app.command("runtime", context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []})
+def runtime_command(ctx: typer.Context) -> None:
+    """Access dcode commands/flags, including groups shadowed by Manta.
+
+    Examples: manta runtime mcp --help; manta runtime doctor; manta runtime --acp.
+    """
+    profile = (ctx.obj or {}).get("profile")
+    args = list(ctx.args)
+    if args and args[0] in {"update", "--update"}:
+        app(args=["update", *args[1:]])
+        return
+    if args and args[0] == "--auto-update":
+        console.print("Manta updates complete qualified releases. Use `manta update --check` or `manta update`.")
+        return
+    if any(arg in {"-h", "--help"} for arg in ctx.args):
+        _runtime_help(profile, list(ctx.args))
+    else:
+        _launch_interactive(profile=profile, passthrough=list(ctx.args))
+
+
+@app.command("update")
+def update_command(
+    check: bool = typer.Option(False, "--check", help="Check without installing."),
+    version: Optional[str] = typer.Option(None, "--version", help="Exact stable Manta tag, e.g. v0.3.0."),
+) -> None:
+    """Check/install a complete Manta release with its qualified dependencies."""
+    from .updates import check_release, install_method, upgrade
+
+    try:
+        release = check_release(version)
+        console.print(f"Manta {__version__}; release {release.tag}: {release.url}")
+        if not check:
+            if not version and not release.newer:
+                console.print("Already on the latest published Manta release.")
+                return
+            code = upgrade(release, install_method())
+            if code:
+                raise typer.Exit(code=code)
+            console.print("Manta release installed. Start a fresh `manta` process to load it.")
+    except (ValueError, OSError) as exc:
+        console.print(f"[red]Manta update failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("pricing")
+def pricing_command() -> None:
+    """Inspect effective token prices, source and version; unknown stays unknown."""
+    from .agents.usage import effective_pricing, pricing_for
+
+    table = Table(title="Manta price estimates (Gateway billing is authoritative)")
+    for column in ("Target", "Input / 1M", "Output / 1M", "Source", "Version/date"):
+        table.add_column(column)
+    for target, price in sorted(effective_pricing().items()):
+        match = pricing_for(target)
+        table.add_row(target, f"${price.input:g}", f"${price.output:g}", match.source, match.version)
+    console.print(table)
+    console.print("Targets absent here are unpriced. Configure exact service FQNs under [pricing].")
 
 
 def _show_version(value: bool) -> None:
@@ -231,6 +337,26 @@ def doctor(
         dcode_ok,
         "interactive runtime" if dcode_ok else escape(runtime_install_command()),
     )
+    if dcode_ok:
+        try:
+            from .accounting import install_usage_collector
+            from .budget_runtime import install_budget_runtime
+            from .model_capabilities import install_model_capability_bridge
+            from .runtime_contract import runtime_health
+            from .updates import install_runtime_update_adapter
+
+            for label, installer in (
+                ("required: request accounting", install_usage_collector),
+                ("required: budget checkpoints", install_budget_runtime),
+                ("required: model capability bridge", install_model_capability_bridge),
+                ("required: qualified updates", install_runtime_update_adapter),
+            ):
+                add(label, bool(installer()), "Manta foundation adapter")
+            for health in runtime_health():
+                label = ("required: " if health["required"] else "optional/status: ") + health["name"]
+                add(label, health["ok"] if health["required"] else True, health["detail"])
+        except Exception as exc:
+            add("required: foundation integration", False, f"{type(exc).__name__}: {exc}")
 
     try:
         import langchain_openai  # noqa: F401
@@ -423,35 +549,31 @@ def agents_main(ctx: typer.Context) -> None:
 
 
 def _agents_list() -> None:
-    from .agents.defaults import DEFAULT_AGENT_NAMES, merged_agents
-    from .agents.registry import list_agents
+    from .agents.workspace import AgentWorkspace
 
-    user = list_agents()
-    user_names = {a.name for a in user}
-    merged = merged_agents(user)
+    workspace = AgentWorkspace()
+    merged = workspace.list(include_disabled=True)
 
     table = Table(title="Manta agents")
     table.add_column("Name")
+    table.add_column("State")
     table.add_column("Model")
     table.add_column("Source")
     table.add_column("Enforcement")
     table.add_column("Description")
     for defn in merged:
-        if defn.name in user_names:
-            source = "user (override)" if defn.name in DEFAULT_AGENT_NAMES else "user"
-        else:
-            source = "built-in"
         table.add_row(
             defn.name,
+            "enabled" if defn.enabled else "disabled",
             defn.model or "[dim](inherits orchestrator)[/dim]",
-            source,
+            workspace.source(defn.name),
             _enforcement_summary(defn),
             (defn.description or "").strip(),
         )
     console.print(table)
     console.print(
         "[dim]manta agents show <name> • create <name> • edit <name> • "
-        "delete <name> • import • sync[/dim]"
+        "clone <name> <new-name> • enable/disable <name> • validate/test <name>[/dim]"
     )
     console.print(
         "[dim]These agents are also selectable in-app via the /agents picker.[/dim]"
@@ -486,26 +608,39 @@ def agents_sync() -> None:
 
 def _resolve_agent(name: str):
     """Return an AgentDef for ``name`` from the user registry or built-ins."""
-    from .agents.defaults import DEFAULT_AGENTS
-    from .agents.registry import agent_exists, load_agent
+    from .agents.workspace import AgentWorkspace
 
-    if agent_exists(name):
-        return load_agent(name), "user"
-    for default in DEFAULT_AGENTS:
-        if default.name == name:
-            return default, "built-in"
-    return None, None
+    workspace = AgentWorkspace()
+    try:
+        return workspace.resolve(name, include_disabled=True), workspace.source(name)
+    except (FileNotFoundError, ValueError):
+        return None, None
 
 
 @agents_app.command("show")
-def agents_show(name: str = typer.Argument(..., help="Agent name")) -> None:
+def agents_show(name: str = typer.Argument(..., help="Agent name"),
+                json_output: bool = typer.Option(False, "--json", help="Print the shared effective manifest as JSON.")) -> None:
     """Show an agent's full definition and enforced boundaries."""
-    defn, source = _resolve_agent(name)
-    if defn is None:
-        console.print(f"[red]No Manta agent named '{name}'.[/red]")
-        raise typer.Exit(code=1)
+    import json
+    from .agents.workspace import AgentWorkspace
+
+    workspace = AgentWorkspace()
+    try:
+        effective = workspace.effective(name)
+        defn = workspace.resolve(name, include_disabled=True)
+    except (ValueError, FileNotFoundError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        console.print(json.dumps(effective, indent=2), markup=False, soft_wrap=True)
+        return
+    source = workspace.source(name)
     console.print(f"[bold]{defn.name}[/bold] [dim]({source})[/dim]")
     console.print(f"Model:       {defn.model or '[dim](inherits orchestrator)[/dim]'}")
+    console.print(f"State:       {'enabled' if defn.enabled else 'disabled'}")
+    console.print(f"Context:     {defn.context_mode} (inline); detached tasks default to isolated")
+    console.print(f"Effort:      {defn.reasoning_effort or '(inherits model default)'}")
+    console.print(f"Output cap:  {defn.max_output_tokens or '(inherits model default)'} tokens per response")
     console.print(f"Enforcement: {_enforcement_summary(defn)}")
     if defn.budget_max_tokens or defn.budget_max_usd:
         console.print(
@@ -529,17 +664,24 @@ def agents_create(
     prompt: Optional[str] = typer.Option(None, help="System prompt (overrides drafted)."),
     read_only: bool = typer.Option(False, "--read-only", help="Enforce read-only."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing agent."),
+    context_mode: str = typer.Option("isolated", "--context", help="Inline context: isolated or fork."),
+    effort: Optional[str] = typer.Option(None, "--effort", help="Qualified reasoning effort."),
+    max_output_tokens: Optional[int] = typer.Option(None, "--max-output-tokens", help="Per-response output limit."),
 ) -> None:
     """Create a new agent, optionally drafting it from a plain-English description."""
     from .agents.authoring import draft_agent_from_description
-    from .agents.registry import AgentDef, agent_exists, is_valid_name, save_agent
+    from .agents.registry import AgentDef, agent_dir, is_valid_name
+    from .agents.workspace import AgentWorkspace
+
+    workspace = AgentWorkspace()
 
     if not is_valid_name(name):
         console.print(
             f"[red]Invalid name '{name}'.[/red] Use lowercase letters, digits, and dashes."
         )
         raise typer.Exit(code=1)
-    if agent_exists(name) and not force:
+    exists = any(value.name == name for value in workspace.list(include_disabled=True))
+    if exists and not force:
         console.print(
             f"[red]Agent '{name}' already exists.[/red] Use --force to overwrite "
             "or 'manta agents edit'."
@@ -560,7 +702,14 @@ def agents_create(
     if read_only:
         defn.read_only = True
 
-    directory = save_agent(defn)
+    try:
+        defn = AgentDef.model_validate({**defn.model_dump(), "context_mode": context_mode,
+                                       "reasoning_effort": effort, "max_output_tokens": max_output_tokens})
+        defn = workspace.update(name, defn.model_dump()) if exists else workspace.create(defn)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    directory = agent_dir(name)
     console.print(f"Created agent [bold]{name}[/bold] at [dim]{directory}[/dim]")
     console.print(f"Enforcement: {_enforcement_summary(defn)}")
     if describe:
@@ -571,33 +720,109 @@ def agents_create(
 
 
 @agents_app.command("edit")
-def agents_edit(name: str = typer.Argument(..., help="Agent name")) -> None:
-    """Open an agent's files in $EDITOR (materializing a built-in first if needed)."""
+def agents_edit(name: str = typer.Argument(..., help="Agent name"),
+                definition_file: Optional[Path] = typer.Option(None, "--file", help="Apply a JSON definition or partial settings object.")) -> None:
+    """Edit a validated definition atomically, preserving learned context."""
+    import json
+    import shlex
     import shutil
     import subprocess
+    import tempfile
 
-    from .agents.registry import agent_exists, agent_md_path, agent_toml_path, save_agent
+    from .agents.registry import definition_revision
+    from .agents.workspace import AgentWorkspace
 
-    if not agent_exists(name):
-        defn, source = _resolve_agent(name)
-        if defn is None:
-            console.print(f"[red]No Manta agent named '{name}'.[/red]")
-            raise typer.Exit(code=1)
-        # Materialize a built-in into the user registry so edits persist.
-        save_agent(defn)
-        console.print(f"[dim]Copied built-in '{name}' into your registry for editing.[/dim]")
+    workspace = AgentWorkspace()
+    try:
+        original = workspace.resolve(name, include_disabled=True)
+        revision = definition_revision(original)
+        if definition_file is not None:
+            changes = json.loads(definition_file.read_text())
+        else:
+            editor = shlex.split(os.environ.get("EDITOR") or os.environ.get("VISUAL") or "")
+            if not editor or shutil.which(editor[0]) is None:
+                console.print("Set $EDITOR, or apply a JSON settings object with `manta agents edit <name> --file settings.json`.")
+                return
+            with tempfile.TemporaryDirectory(prefix="manta-agent-edit-") as directory:
+                path = Path(directory) / f"{name}.json"
+                path.write_text(json.dumps(original.model_dump(mode="json"), indent=2) + "\n")
+                result = subprocess.run([*editor, str(path)], check=False)  # noqa: S603
+                if result.returncode:
+                    raise ValueError(f"editor exited {result.returncode}; definition was not changed")
+                changes = json.loads(path.read_text())
+        if not isinstance(changes, dict):
+            raise ValueError("definition file must contain a JSON object")
+        workspace.update(name, changes, expected_revision=revision)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Saved edits to '{name}'. Running sessions must reload /agents before using them.")
 
-    toml_path = agent_toml_path(name)
-    md_path = agent_md_path(name)
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
-    if not editor or shutil.which(editor.split()[0]) is None:
-        console.print(
-            "No usable $EDITOR set. Edit these files directly:\n"
-            f"  {toml_path}\n  {md_path}"
-        )
-        return
-    subprocess.run([*editor.split(), str(toml_path), str(md_path)], check=False)  # noqa: S603
-    console.print(f"[green]Saved edits to '{name}'.[/green]")
+
+@agents_app.command("clone")
+def agents_clone(name: str, new_name: str) -> None:
+    """Clone role and controls into a separate agent and memory namespace."""
+    from .agents.workspace import AgentWorkspace
+    try:
+        definition = AgentWorkspace().clone(name, new_name)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Cloned {name} as {definition.name}; runtime reload required in existing sessions.")
+
+
+def _agent_enabled(name: str, enabled: bool) -> None:
+    from .agents.workspace import AgentWorkspace
+    try:
+        AgentWorkspace().set_enabled(name, enabled)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"{'Enabled' if enabled else 'Disabled'} {name}. Learned context is retained; running sessions must reload /agents.")
+
+
+@agents_app.command("enable")
+def agents_enable(name: str) -> None:
+    """Enable a user agent or a disabled built-in."""
+    _agent_enabled(name, True)
+
+
+@agents_app.command("disable")
+def agents_disable(name: str) -> None:
+    """Persistently disable dispatch while retaining role and learned context."""
+    _agent_enabled(name, False)
+
+
+@agents_app.command("validate")
+def agents_validate(name: str) -> None:
+    """Compile specialist controls offline without inference or tool effects."""
+    import json
+    from .agents.workspace import AgentWorkspace
+    try:
+        result = AgentWorkspace().test(name)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(json.dumps(result, indent=2), markup=False)
+
+
+@agents_app.command("test")
+def agents_test(ctx: typer.Context, name: str,
+                 profile: Optional[str] = typer.Option(None, "-p", "--profile")) -> None:
+    """Submit a live isolated smoke task after validating the specialist."""
+    from .agents.workspace import AgentWorkspace
+    from .tasks import executor
+    try:
+        workspace = AgentWorkspace()
+        workspace.resolve(name)
+        workspace.test(name)
+        selected = executor.resolve_profile(profile, (ctx.find_root().obj or {}).get("profile"))
+        task = executor.submit_task(name, "Inspect the current directory with a read-only tool. Do not modify files or execute shell commands. Reply with MANTA_AGENT_TEST_OK and one observed filename.",
+                                    profile=selected, timeout=180, max_turns=8)
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Submitted live agent test {task.id}. Inspect it with `manta task review {task.id}`.")
 
 
 @agents_app.command("set-model")
@@ -613,13 +838,13 @@ def agents_set_model(
         help="Look up the Databricks endpoint or Unity model service; metadata denial is inconclusive.",
     ),
 ) -> None:
-    """Switch an agent's pinned model — takes effect on its next call.
+    """Switch an agent's pinned model — applies after runtime reload.
 
     The pin resolves through the provider registry, so any registered provider
     (and anything langchain resolves natively) is valid. A built-in agent is
     materialized into your registry first so the change sticks.
     """
-    from .agents.registry import agent_exists, save_agent
+    from .agents.registry import agent_exists
     from .providers import parse_model_ref
 
     profile = (ctx.obj or {}).get("profile")
@@ -660,8 +885,12 @@ def agents_set_model(
         console.print(f"[dim]Copied built-in '{name}' into your registry.[/dim]")
     # Copy before mutating: built-ins are shared module-level instances, and
     # mutating one in place would change it for the rest of this process.
-    defn = defn.model_copy(update={"model": model})
-    save_agent(defn)
+    from .agents.workspace import AgentWorkspace
+    try:
+        defn = AgentWorkspace().update(name, {"model": model})
+    except (ValueError, OSError, RuntimeError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
     try:
         from .agents.defaults import merged_agents
         from .agents.profiles import sync_agent_profiles
@@ -681,22 +910,13 @@ def agents_delete(
     name: str = typer.Argument(..., help="Agent name"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
 ) -> None:
-    """Delete a user agent from the registry."""
-    from .agents.registry import agent_exists, delete_agent
-
-    if not agent_exists(name):
-        console.print(
-            f"[yellow]No user agent '{name}' to delete.[/yellow] "
-            "(Built-ins live in code and cannot be deleted; override them instead.)"
-        )
-        raise typer.Exit(code=1)
+    """Disable an agent, preserving its definition and learned context."""
     if not yes:
-        confirmed = typer.confirm(f"Delete agent '{name}'?")
+        confirmed = typer.confirm(f"Disable agent '{name}' and retain its learned context?")
         if not confirmed:
             console.print("Aborted.")
             raise typer.Exit(code=1)
-    delete_agent(name)
-    console.print(f"Deleted agent [bold]{name}[/bold].")
+    _agent_enabled(name, False)
 
 
 @agents_app.command("memory")
@@ -728,12 +948,15 @@ def agents_memory(
         console.print(f"Cleared {removed} memory item(s) for [bold]{name}[/bold].")
         return
     if add:
-        import time
+        import uuid
 
-        mem.write_memory(store, namespace, key=f"note-{int(time.time()*1000)}", text=add)
+        mem.write_memory(store, namespace, key=f"note-{uuid.uuid4().hex}", text=add,
+                         agent=defn.name, source="cli")
         console.print(f"Added a note to [bold]{name}[/bold]'s memory (secrets redacted on write).")
     if show:
         notes = mem.read_memories(store, namespace)
+        if mem.legacy_memory_count(store, namespace):
+            console.print("[dim]Legacy/unassigned notes are retained for inspection and excluded from automatic recall. Re-add a note to assign it explicitly to this agent. The migration backup is in <MANTA_HOME>/.state/memory.db.pre-v2.bak.[/dim]")
         if not notes:
             console.print(f"[dim]No memories for '{name}' yet.[/dim]")
             return
@@ -961,6 +1184,7 @@ def run(
     from . import dcode
     from .auth import databricks_configured
 
+    profile = profile or (ctx.find_root().obj or {}).get("profile")
     cfg = load_config()
     db_configured = databricks_configured(profile)
     try:
@@ -1069,6 +1293,8 @@ _STATE_STYLES = {
     "done": "green",
     "failed": "red",
     "cancelled": "dim",
+    "starting": "cyan", "waiting_dependencies": "yellow", "waiting_input": "yellow",
+    "waiting_approval": "yellow", "paused_budget": "yellow", "blocked": "red", "interrupted": "red",
 }
 
 
@@ -1112,6 +1338,7 @@ def _task_list(state: Optional[str]) -> None:
 
 @task_app.command("submit")
 def task_submit(
+    ctx: typer.Context,
     agent: str = typer.Argument(..., help="Agent to run the task (e.g. swe)."),
     prompt: str = typer.Argument(..., help="The task, in plain English."),
     timeout: int = typer.Option(
@@ -1126,6 +1353,13 @@ def task_submit(
         "--allow-asks",
         help="Pre-approve this agent's ask-gated tools for this unattended run.",
     ),
+    dependencies: list[str] = typer.Option([], "--after", help="Task dependency ID; repeat for multiple tasks."),
+    parent_task_id: Optional[str] = typer.Option(None, "--parent", help="Parent task ID."),
+    parent_thread_id: str = typer.Option("", "--parent-thread", help="Parent conversation thread ID."),
+    isolation: str = typer.Option("auto", "--isolation", help="auto, worktree or directory; owned workspace is required."),
+    max_concurrency: int = typer.Option(3, "--concurrency", help="Maximum concurrent detached tasks (1–16)."),
+    context_mode: str = typer.Option("isolated", "--context", help="isolated or fork; fork requires --conversation-file."),
+    conversation_file: Optional[Path] = typer.Option(None, "--conversation-file", help="Explicit visible conversation snapshot for forked context."),
 ) -> None:
     """Hand a long-running task to a named agent; returns immediately with an id."""
     from .tasks import executor
@@ -1136,10 +1370,14 @@ def task_submit(
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
     try:
-        record = executor.submit_task(
-            agent, prompt, profile=profile, allow_asks=allow_asks, **kwargs
-        )
-    except executor.TaskError as exc:
+        selected = executor.resolve_profile(profile, (ctx.find_root().obj or {}).get("profile"))
+        context = conversation_file.read_text() if conversation_file else ""
+        record = executor.submit_task(agent, prompt, profile=selected, allow_asks=allow_asks,
+                                      dependencies=dependencies, parent_task_id=parent_task_id,
+                                      parent_thread_id=parent_thread_id, isolation=isolation,
+                                      max_concurrency=max_concurrency, context_mode=context_mode,
+                                      conversation_context=context, **kwargs)
+    except (executor.TaskError, OSError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     console.print(
@@ -1152,6 +1390,19 @@ def task_submit(
     )
 
 
+@task_app.command("resume")
+def task_resume(task_id: str = typer.Argument(..., help="Budget-paused task ID.")) -> None:
+    """Approve continuation of a budget-paused task from its saved checkpoint."""
+    from .tasks import executor
+
+    try:
+        record = executor.resume_task(task_id)
+    except executor.TaskError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Resumed task {record.id} from saved thread {record.thread_id}.")
+
+
 @task_app.command("list")
 def task_list_cmd(
     state: Optional[str] = typer.Option(None, "--state", help="Filter by state."),
@@ -1161,7 +1412,8 @@ def task_list_cmd(
 
 
 @task_app.command("status")
-def task_status(task_id: str = typer.Argument(..., help="Task id.")) -> None:
+def task_status(task_id: str = typer.Argument(..., help="Task id."),
+                json_output: bool = typer.Option(False, "--json", help="Print full state and pending request identities.")) -> None:
     """Show one task's state, timing, and exit code."""
     from .tasks.executor import reconcile_stale_tasks
     from .tasks.store import get_task
@@ -1171,6 +1423,11 @@ def task_status(task_id: str = typer.Argument(..., help="Task id.")) -> None:
     if record is None:
         console.print(f"[red]No task '{task_id}'.[/red]")
         raise typer.Exit(code=1)
+    if json_output:
+        import json
+        from dataclasses import asdict
+        console.print(json.dumps(asdict(record), indent=2), markup=False, soft_wrap=True)
+        return
     style = _STATE_STYLES.get(record.state, "")
     state = f"[{style}]{record.state}[/{style}]" if style else record.state
     console.print(f"Task [bold]{record.id}[/bold] — @{record.agent} — {state}")
@@ -1193,6 +1450,17 @@ def task_status(task_id: str = typer.Argument(..., help="Task id.")) -> None:
         console.print("Asks:      pre-approved at submission (--allow-asks)")
     if record.log_path:
         console.print(f"Log:       [dim]{record.log_path}[/dim]")
+    console.print(f"Kind:      {record.execution_kind}; attempt {record.attempt}; changes {record.integration_state}")
+    if record.parent_task_id:
+        console.print(f"Parent:    {record.parent_task_id}")
+    if record.dependencies:
+        console.print(f"After:     {', '.join(record.dependencies)}")
+    if record.pending_reason:
+        console.print(f"Pending:   {record.pending_reason}", markup=False)
+    if record.checkpoint.get("pending_id"):
+        import json
+        console.print("Pending ID: " + record.checkpoint["pending_id"], markup=False)
+        console.print(json.dumps(record.checkpoint.get("interrupts", {}), indent=2), markup=False)
 
 
 @task_app.command("output")
@@ -1242,6 +1510,102 @@ def task_cancel(task_id: str = typer.Argument(..., help="Task id.")) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     console.print(f"Cancelled task [bold]{record.id}[/bold] (@{record.agent}).")
+
+
+@task_app.command("review")
+def task_review(task_id: str, json_output: bool = typer.Option(False, "--json")) -> None:
+    """Inspect observed changes, tests, artifacts and spend before integration."""
+    import json
+    from .tasks import executor
+    try:
+        result = executor.review_task(task_id)
+    except executor.TaskError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        console.print(json.dumps(result, indent=2), markup=False, soft_wrap=True)
+        return
+    console.print(json.dumps({key: value for key, value in result.items() if key != "diff"}, indent=2), markup=False)
+    console.print(result.get("diff") or "(no observed diff)", markup=False)
+
+
+@task_app.command("integrate")
+def task_integrate(task_id: str, expected_patch_sha256: str | None = typer.Option(
+    None, "--expected-patch", help="SHA-256 from the exact task review you inspected.",
+)) -> None:
+    """Apply a reviewed stopped task diff while preserving unrelated changes."""
+    from .tasks import executor
+    try:
+        record = executor.integrate_task(task_id, expected_patch_sha256=expected_patch_sha256)
+    except executor.TaskError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Integrated task {record.id}.")
+
+
+@task_app.command("discard")
+def task_discard(task_id: str) -> None:
+    """Remove a stopped task's owned checkout, retaining diff and receipts."""
+    from .tasks import executor
+    try:
+        record = executor.discard_task(task_id)
+    except executor.TaskError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Discarded checkout for task {record.id}; its review receipts are retained.")
+
+
+@task_app.command("retry")
+def task_retry(task_id: str) -> None:
+    """Retry a stopped failed attempt; checkpointed work requires resume."""
+    from .tasks import executor
+    try:
+        record = executor.retry_task(task_id)
+    except executor.TaskError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Retried task {record.id}; attempt {record.attempt} is {record.state}.")
+
+
+@task_app.command("respond")
+def task_respond(task_id: str,
+                  pending_id: str = typer.Option(..., "--pending-id", help="Exact pending ID from task status."),
+                  decision: str = typer.Option(..., "--decision", help="approve, reject, answer or cancel."),
+                  value: str = typer.Option("", "--value", help="Input text, or exact interrupt-ID JSON object for mixed groups.")) -> None:
+    """Resolve the exact approval/input group inspected with task status."""
+    from .tasks.approvals import respond_task
+    from .tasks.executor import TaskError
+    try:
+        record = respond_task(task_id, pending_id=pending_id, decision=decision, value=value)
+    except TaskError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Recorded {decision} for task {record.id}; state {record.state}.")
+
+
+@task_app.command("dependencies")
+def task_dependencies(task_id: str, after: list[str] = typer.Option([], "--after", help="Required task ID; repeat for multiple prerequisites.")) -> None:
+    """Set a queued task's prerequisites, rejecting missing tasks and cycles."""
+    from .tasks import executor, store
+    try:
+        store.set_dependencies(task_id, after)
+        executor.schedule_tasks()
+    except (ValueError, executor.TaskError) as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Updated dependencies for {task_id}.")
+
+
+@task_app.command("schedule")
+def task_schedule(concurrency: int = typer.Option(3, "--concurrency", min=1, max=16)) -> None:
+    """Pump the durable ready queue after a restart or dependency update."""
+    from .tasks import executor
+    try:
+        started = executor.schedule_tasks(concurrency_limit=concurrency)
+    except executor.TaskError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from exc
+    console.print(f"Started {len(started)} ready task(s).")
 
 
 @app.command()

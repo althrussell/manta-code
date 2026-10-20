@@ -17,6 +17,13 @@ its MCP 1.x requirement conflicts with the runtime's MCP 2.x requirement.
 ## How it wires together
 
 The launcher, model adapter, and runtime hooks form the integration boundary.
+Manta's owned server graph entry point installs required control adapters before
+upstream graph construction, independent of the selected model provider. Required
+construction is atomic: an integration failure stops the graph rather than
+silently starting an unenforced agent. Presentation-only adapters may warn and
+degrade. Doctor distinguishes available adapter seams from a compiled graph's
+effective control manifest; a preflight that has not built a graph reports the
+manifest as pending.
 
 ### `src/manta_code/dcode.py` — the launcher
 
@@ -40,7 +47,9 @@ The launcher, model adapter, and runtime hooks form the integration boundary.
   `MANTA_DATABRICKS_POLICY`: nonsecret target settings, preserved provider
   defaults, request tags, and discovered capability evidence. Credentials and
   client objects stay out of that payload. This carries the same construction
-  policy to the server and background workers.
+  policy to the server and background workers. Original cwd/project-root hints
+  are carried separately so local config and detached execution use the intended
+  project rather than the runtime server's directory.
 - `build_dcode_argv(default_endpoint, passthrough)` builds
   `python -m manta_code._boot -M databricks:<target> <passthrough…>` (the
   default `-M` is injected only for a new session without an explicit model).
@@ -169,10 +178,17 @@ short-circuits before inference does not create a model-usage row.
 
 ### Local accounting and estimates
 
+`accounting.py` installs a process-wide public LangChain callback collector for
+main, specialist, classifier, summarizer, grader and other helper calls. The
+economy middleware supplies agent/thread context; callback metadata supplies
+invocation identity and latency. SQLite writes run in a worker, with a flush
+barrier before budget checks. The middleware's fallback accounting and callback
+observations deduplicate by invocation/request identity.
+
 `agents/usage.py` migrates the SQLite ledger additively. Existing model names,
 tokens, and recorded amounts remain intact. New rows add requested target/service,
 observed backend when exposed, surface/API, request ID, usage completeness,
-cache/reasoning detail, and pricing source/version. An echoed service name or
+cache/reasoning detail, call purpose, latency, and pricing source/version. An echoed service name or
 response object ID is not invented backend/request metadata.
 
 Prices prefer exact identities and explicit overrides. Arbitrary service names
@@ -186,15 +202,19 @@ without another cumulative/delta transformation.
 Reports display known subtotals and completeness when any call is unpriced or
 usage is missing. Historical usage completeness remains unconfirmed. Receipts
 with incomplete accounting do not claim dollar savings. Unknown charges cannot
-count toward client USD caps; economy warns and records that limitation while
-retaining trust-first continuation. Gateway budgets and billing are separate.
+count toward client USD caps; economy warns and records that limitation.
+`manta pricing` exposes rates and provenance. Budget mode defaults to
+`checkpoint`: threshold checks interrupt before another agent request, including
+unattended runs. Explicit `advisory` mode logs and continues. Requests already in
+flight can exceed thresholds; these local observed-spend checks are separate
+from Gateway budgets and billing.
 Direct qualification calls use the same `record_model_response` accounting helper.
 
 ### Registry-backed agents — two tiers from one source of truth
 
 `deepagents-code` exposes agents in **two** tiers:
 
-1. **Profiles** — a directory `~/.deepagents/<name>/AGENTS.md`. These are the
+1. **Profiles** — a directory `~/.deepagents/<name>/`. These are the
    entries the in-app `/agents` picker lists; selecting one restarts the session
    with that agent as the *primary* loop.
 2. **Subagents** — delegation targets the orchestrator dispatches to via the
@@ -222,19 +242,25 @@ migration. Changing the launch default alone does not rewrite agent pins.
 
 **Profile tier (`agents/profiles.py`).** `sync_agent_profiles()` projects every
 registry agent (built-ins + user-created) into a top-level
-`~/.deepagents/<name>/AGENTS.md` so it appears in the picker. Profiles are
-**generated artifacts**: refreshed from the registry on each `launch()` /
-`run_headless()` (you edit agents with `manta agents edit`, not by hand). A
-`<!-- managed-by: manta-agents … -->` sentinel marks Manta-generated files, so a
-refresh never clobbers a user-authored profile of the same name, never touches
-the base `agent` profile, and prunes profiles for agents you've deleted. The
-legacy prompt-only markdown subagents this replaced are removed once, on first
-launch, by `clean_legacy_subagents()` (only when unmodified). Run
+`~/.deepagents/<name>/` so it appears in the picker. The registry owns generated
+`MANTA_ROLE.md`; edit the role with `manta agents edit`. Mutable learned context
+lives in `AGENTS.md` and survives refresh on `launch()` / `run_headless()`.
+Managed sentinels protect unowned profiles of the same name and the base
+`agent` profile. Deleted managed profiles are archived in full rather than
+erased. Old mixed role/memory files receive a content-addressed backup and
+provenance before migration; the launcher reports a one-time notice. The
+legacy prompt-only markdown subagents this replaced are archived once, on first
+launch, by `clean_legacy_subagents()`. Full managed directories, including
+appended learned context, are retained under `manta-legacy-subagent-archive`. Run
 `manta agents sync` to regenerate on demand.
 
 **Subagent tier (build hook).** `enrich_kwargs()` compiles each registry agent
 into an *enforced* `deepagents` `SubAgent` dict (tool policy, filesystem rules,
-memory, budget) and injects them so the orchestrator can delegate to them.
+memory, budget) and injects them so the orchestrator can delegate to them. The
+specialists reuse dcode's prepared general-purpose runtime middleware, preserving
+shell/filesystem restrictions, approvals, retry/hooks, memory guards and MCP
+timeouts. Effective manifests inspect the actual compiled primary and child
+ToolNodes rather than treating declared capabilities as proof of installation.
 
 **Plan requests are auto-delegated (deterministically).** deepagents gives the
 orchestrator its own `write_todos` planning tool and its default prompt prefers
@@ -286,16 +312,46 @@ importers in `middleware.subagents`/`summarization`/`rubric` and any
 later-imported module) and rebinds the name on every already-imported
 `deepagents` module that still points at the original (`_rebind_imported_resolvers`).
 
-`review`'s read-only contract is **really enforced**, not prompt-only: the build
-hook compiles it as a Python `SubAgent` with Manta's `ToolPolicyMiddleware`,
-which blocks `execute` and all filesystem writes in `wrap_tool_call`. Selecting
-`review` as the top-level profile applies the same policy to the primary loop.
+Read-only policy rejects known write/execute effects and conservatively rejects
+unknown tool effects. Selecting `review` as the primary profile applies the same
+policy as delegation. JavaScript tool proxies re-enter the real ToolNode
+middleware, and `@agent ... &` submits through the normal task tool path, so
+policy, ASK and audit apply there too. This controls agent tool dispatch;
+operating-system isolation still requires an appropriate sandbox.
+
+### Memory ownership and detached context
+
+SQLite notes are bound at compilation to each agent's effective namespace;
+read and write paths share that binding. A configured shared namespace is
+deliberate. `memory=false` and launch `--no-memory` suppress runtime recall and
+note tools. Existing unscoped SQLite notes are backed up, tagged
+`legacy-unassigned`, retained for CLI inspection and excluded from automatic
+recall. New notes carry namespace/agent/source/time provenance and pass through
+the redacting store. Redaction is pattern-based, not a guarantee that arbitrary
+sensitive text will be recognized.
+
+Registry memory, profile `AGENTS.md`, skills and session checkpoints remain
+distinct stores. Agent namespaces are not automatic project isolation; scoped
+search, recall budgets and project-aware memory are later work.
+
+Detached tasks store original cwd, project-root/checkout identity, profile and
+workspace, effective model and agent/policy digests without serializing
+credentials or arbitrary environment variables. Workers restore that context
+and reject drift. Budget pauses persist as `paused_budget`; explicit
+`manta task resume <id>` resumes the same saved graph checkpoint after validating
+context. This milestone does not add worktree isolation, task dependencies or a
+unified approval/task board.
 
 ### `src/manta_code/main.py` — argument routing
 
 `main_entry()` + `classify_args()` route Manta's own subcommands through Typer
 and send bare invocations and unknown/forwarded flags
 (`-r`, `--skill`, `-M …`) straight to the launcher.
+Unknown runtime subgroup help follows the same route without discovery,
+profile sync or inference. `manta runtime <command>` explicitly reaches runtime
+groups, including `agents` and `doctor` that Manta otherwise shadows. Use
+`manta runtime --help`, `manta runtime mcp --help` or
+`manta runtime plugin --help` to inspect the installed runtime.
 
 ## Authentication
 
@@ -313,6 +369,15 @@ Deep Agents build hook and middleware, while upstream owns the terminal and
 agent execution runtime. The boot shim also adapts branding, authentication,
 model selection, and agent switching. These integration seams are checked by
 `reliability.PATCH_TARGETS` and `manta doctor` when upstream pins change.
+Manta also owns release checks, update installation and restart. `/update`
+checks stable Manta GitHub releases; `manta update` installs the selected tag and
+its full dependency constraints. Independent automatic dcode replacement is
+disabled without rewriting saved dcode preferences. Restart re-enters Manta.
+Editable checkouts require deliberate Git/lockfile synchronization. See
+[installation and upgrades](16-installation-and-upgrades.md).
+Runtime package/extra install, uninstall and dependency-recovery paths refuse
+unqualified mutations; optional integrations must be added deliberately against
+the matching Manta lock. Complete release updates are serialized per installation.
 
 ## Headless / CI / SDK path (`manta run`)
 

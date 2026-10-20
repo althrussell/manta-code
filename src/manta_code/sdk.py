@@ -35,6 +35,14 @@ __all__ = [
     "RunResult",
     "TaskHandle",
     "agents",
+    "agent_workspace",
+    "agent",
+    "agent_details",
+    "create_agent",
+    "clone_agent",
+    "edit_agent",
+    "enable_agent",
+    "validate_agent",
     "cost",
     "run",
     "submit",
@@ -147,6 +155,37 @@ class TaskHandle:
     def cancel(self) -> store.TaskRecord:
         return executor.cancel_task(self.id)
 
+    def review(self) -> dict:
+        """Observed diff, files, final answer, tests, artifacts and spend coverage."""
+        return executor.review_task(self.id)
+
+    def integrate(self, *, expected_patch_sha256: str | None = None) -> store.TaskRecord:
+        """Apply a previously reviewed stopped result; rejects stale diffs."""
+        return executor.integrate_task(self.id, expected_patch_sha256=expected_patch_sha256)
+
+    def discard(self) -> store.TaskRecord:
+        """Discard the owned task checkout and retain its review receipts."""
+        return executor.discard_task(self.id)
+
+    def retry(self) -> store.TaskRecord:
+        """Retry a stopped failed attempt in its existing isolated workspace."""
+        return executor.retry_task(self.id)
+
+    def resume(self) -> store.TaskRecord:
+        """Explicitly approve a saved budget continuation."""
+        return executor.resume_task(self.id)
+
+    def respond(self, *, pending_id: str, decision: str, value: str = "") -> store.TaskRecord:
+        """Decide only the exact pending group previously inspected by the user."""
+        from .tasks.approvals import respond_task
+        return respond_task(self.id, pending_id=pending_id, decision=decision, value=value)
+
+    def dependencies(self, task_ids: list[str]) -> store.TaskRecord:
+        """Set dependencies while queued; cycle and missing-task checks apply."""
+        store.set_dependencies(self.id, task_ids)
+        executor.schedule_tasks()
+        return self.status()
+
     def wait(
         self, *, poll_seconds: float = 5.0, timeout: float | None = None
     ) -> store.TaskRecord:
@@ -174,11 +213,20 @@ def submit(
     max_turns: int = executor.DEFAULT_TASK_MAX_TURNS,
     profile: str | None = None,
     allow_asks: bool = False,
+    parent_task_id: str | None = None,
+    parent_thread_id: str = "",
+    dependencies: list[str] | None = None,
+    isolation: str = "auto",
+    max_concurrency: int = 3,
+    context_mode: str = "isolated",
+    conversation_context: str = "",
 ) -> TaskHandle:
     """Hand a long-running task to a named agent; returns immediately.
 
     ``allow_asks=True`` pre-approves the agent's ask-gated tools for this
-    unattended run (audited as ``auto_approved``); the default fails closed.
+    managed run; explicit approval rules still pause for a human. Writable
+    work gets its own checkout. Forked task context needs an explicit visible
+    ``conversation_context`` snapshot, separate from inline agent context.
     """
     record = executor.submit_task(
         agent,
@@ -187,6 +235,9 @@ def submit(
         max_turns=max_turns,
         profile=profile,
         allow_asks=allow_asks,
+        parent_task_id=parent_task_id, parent_thread_id=parent_thread_id,
+        dependencies=dependencies, isolation=isolation, max_concurrency=max_concurrency,
+        context_mode=context_mode, conversation_context=conversation_context,
     )
     return TaskHandle(record.id)
 
@@ -200,12 +251,46 @@ def tasks(state: str | None = None, *, limit: int = 50) -> list[store.TaskRecord
     return store.list_tasks(state=state, limit=limit)
 
 
-def agents() -> list:
-    """All addressable Manta agents (built-ins + user registry), as AgentDefs."""
-    from .agents.defaults import merged_agents
-    from .agents.registry import list_agents
+def agent_workspace():
+    """Shared authoring/resolution service used by CLI, TUI and runtime."""
+    from .agents.workspace import AgentWorkspace
+    return AgentWorkspace()
 
-    return merged_agents(list_agents())
+
+def agents(*, include_disabled: bool = False) -> list:
+    """All addressable Manta agents (built-ins + user registry), as AgentDefs."""
+    return agent_workspace().list(include_disabled=include_disabled)
+
+
+def agent(name: str, *, include_disabled: bool = False):
+    return agent_workspace().resolve(name, include_disabled=include_disabled)
+
+
+def agent_details(name: str, *, inherited_model: str | None = None,
+                  inherited_tools: list[str] | None = None) -> dict:
+    return agent_workspace().effective(name, inherited_model=inherited_model, inherited_tools=inherited_tools)
+
+
+def create_agent(definition):
+    from .agents.registry import AgentDef
+    return agent_workspace().create(AgentDef.model_validate(definition))
+
+
+def clone_agent(name: str, new_name: str):
+    return agent_workspace().clone(name, new_name)
+
+
+def edit_agent(name: str, changes: dict, *, expected_revision: str | None = None):
+    return agent_workspace().update(name, changes, expected_revision=expected_revision)
+
+
+def enable_agent(name: str, enabled: bool = True):
+    return agent_workspace().set_enabled(name, enabled)
+
+
+def validate_agent(name: str) -> dict:
+    """Offline policy compilation; does not verify live Gateway inference."""
+    return agent_workspace().test(name)
 
 
 def cost(by: str = "agent", *, since_days: int | None = None) -> list[AggRow]:

@@ -130,9 +130,13 @@ class AgentAddressMiddleware(AgentMiddleware):
             return None  # not an agent — could be a handle in prose; don't hijack
 
         if background:
-            receipt = self._submit(agent, task_text)
-            # No tool calls: this ends the turn immediately with the receipt.
-            return AIMessage(content=receipt)
+            if not any(_tool_name(t) == "manta_task_submit" for t in getattr(request, "tools", ())):
+                return AIMessage(content="Background task submission is unavailable for this agent.")
+            return AIMessage(
+                content=f"Submitting the task to `{agent}` in the background.",
+                tool_calls=[{"name": "manta_task_submit", "args": {"agent": agent, "prompt": task_text},
+                             "id": f"manta_addr_{uuid.uuid4().hex[:8]}", "type": "tool_call"}],
+            )
 
         if not _has_task_tool(request):
             return None  # inline delegation needs the task tool; let the model handle it

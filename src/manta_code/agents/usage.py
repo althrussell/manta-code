@@ -28,6 +28,7 @@ import json
 import math
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,8 @@ class Price:
     output: float
     cache_read: float | None = None
     cache_creation: float | None = None
+    source: str = ""
+    as_of: str = ""
 
     def __post_init__(self) -> None:
         for value in (self.input, self.output, self.cache_read, self.cache_creation):
@@ -89,8 +92,16 @@ DEFAULT_PRICING: dict[str, Price] = {
 #: Add a rate here only with a verified service-specific published price.
 DEFAULT_SERVICE_PRICING: dict[str, Price] = {}
 PRICING_VERSION = "legacy-estimates-2026-10-20"
-_effective_pricing_cache: dict[str, Price] | None = None
-_config_pricing_keys: set[str] = set()
+class PricingTable(dict[str, Price]):
+    """A request snapshot retaining the origin of configured rates."""
+
+    def __init__(self, values: dict[str, Price], configured: set[str] | frozenset[str] = frozenset()):
+        super().__init__(values)
+        self.configured = frozenset(configured)
+
+
+_effective_pricing_cache: tuple[tuple, PricingTable] | None = None
+_pricing_lock = threading.RLock()
 
 
 def _pricing_identity(model: str) -> str:
@@ -106,31 +117,41 @@ def _is_service(model: str) -> bool:
 
 def effective_pricing() -> dict[str, Price]:
     """Merge exact service/config rates and historical endpoint estimates."""
-    global _effective_pricing_cache, _config_pricing_keys  # noqa: PLW0603
-    if _effective_pricing_cache is not None:
-        return _effective_pricing_cache
-    table = {**DEFAULT_PRICING, **DEFAULT_SERVICE_PRICING}
-    _config_pricing_keys = set()
-    try:
-        from ..config import load_config
+    global _effective_pricing_cache  # noqa: PLW0603
+    from ..config import load_config, project_manta_dir
 
-        for key, fields in (load_config().pricing or {}).items():
-            try:
-                identity = _pricing_identity(key)
-                table[identity] = Price(**fields)
-                _config_pricing_keys.add(identity)
-            except Exception:  # noqa: BLE001 - malformed pricing cannot stop inference
-                continue
-    except Exception:  # noqa: BLE001
-        pass
-    _effective_pricing_cache = table
-    return table
+    signatures = []
+    for path in (user_manta_dir() / "config.toml", project_manta_dir() / "config.toml"):
+        try:
+            stat = path.stat()
+            signatures.append((str(path.resolve()), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signatures.append((str(path.resolve()), None, None))
+    cache_key = tuple(signatures)
+    with _pricing_lock:
+        if _effective_pricing_cache is not None and _effective_pricing_cache[0] == cache_key:
+            return _effective_pricing_cache[1]
+        table = {**DEFAULT_PRICING, **DEFAULT_SERVICE_PRICING}
+        configured = set()
+        try:
+            for key, fields in (load_config().pricing or {}).items():
+                try:
+                    identity = _pricing_identity(key)
+                    table[identity] = Price(**fields)
+                    configured.add(identity)
+                except Exception:  # noqa: BLE001 - malformed pricing cannot stop inference
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+        snapshot = PricingTable(table, configured)
+        _effective_pricing_cache = (cache_key, snapshot)
+        return snapshot
 
 
 def clear_pricing_cache() -> None:
-    global _effective_pricing_cache, _config_pricing_keys  # noqa: PLW0603
-    _effective_pricing_cache = None
-    _config_pricing_keys = set()
+    global _effective_pricing_cache  # noqa: PLW0603
+    with _pricing_lock:
+        _effective_pricing_cache = None
 
 
 @dataclass(frozen=True)
@@ -155,7 +176,7 @@ def pricing_for(
     """
     if not model:
         return PricingMatch()
-    explicit = pricing is not None
+    explicit = pricing is not None and not isinstance(pricing, PricingTable)
     raw_table = effective_pricing() if pricing is None else pricing
     table = {_pricing_identity(key): value for key, value in raw_table.items()}
     name = _pricing_identity(model)
@@ -168,15 +189,20 @@ def pricing_for(
     if not key:
         return PricingMatch()
     price = table[key]
-    configured = explicit or key in _config_pricing_keys
+    configured = explicit or key in getattr(raw_table, "configured", ())
     method = "exact" if exact else "legacy-substring"
     source = f"{'override' if explicit else 'config' if configured else 'builtin'}:{method}:{key}"
     if configured:
         payload = {"key": key, "input": price.input, "output": price.output,
-                   "cache_read": price.cache_read, "cache_creation": price.cache_creation}
+                   "cache_read": price.cache_read, "cache_creation": price.cache_creation,
+                   "source": price.source, "as_of": price.as_of}
         version = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
     else:
         version = PRICING_VERSION
+    if price.source:
+        source += f"; {price.source}"
+    if price.as_of:
+        version += f"; as_of={price.as_of}"
     return PricingMatch(price, source, version, key)
 
 
@@ -266,6 +292,13 @@ def extract_breakdown(usage_metadata: Any) -> TokenBreakdown:
         complete = False
     if outputs is not None and reasoning is not None and reasoning > outputs:
         complete = False
+    # Some providers report a total including unclassified reasoning while
+    # omitting it from output_tokens. Preserve the reported buckets, but do not
+    # price an incomplete breakdown or present it as authoritative usage.
+    if "total_tokens" in usage_metadata:
+        total = _token_count(usage_metadata["total_tokens"])
+        if total is None or inputs is None or outputs is None or total != inputs + outputs:
+            complete = False
     return TokenBreakdown(
         input_tokens=inputs or 0,
         output_tokens=outputs or 0,
@@ -309,6 +342,10 @@ class UsageRecord:
     reasoning_tokens: int | None = None
     pricing_source: str = ""
     pricing_version: str = ""
+    invocation_id: str = ""
+    call_kind: str = "agent"
+    duration_ms: float | None = None
+    outcome: str = "completed"
 
     @property
     def total_tokens(self) -> int:
@@ -362,6 +399,10 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
         "reasoning_tokens": "INTEGER",
         "pricing_source": "TEXT NOT NULL DEFAULT ''",
         "pricing_version": "TEXT NOT NULL DEFAULT ''",
+        "invocation_id": "TEXT NOT NULL DEFAULT ''",
+        "call_kind": "TEXT NOT NULL DEFAULT 'agent'",
+        "duration_ms": "REAL",
+        "outcome": "TEXT NOT NULL DEFAULT 'completed'",
     }
     for name, definition in additions.items():
         if name not in columns:
@@ -372,6 +413,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
                 if name not in {row["name"] for row in conn.execute("PRAGMA table_info(usage)")}:
                     conn.close()
                     raise
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_invocation ON usage(invocation_id) WHERE invocation_id != ''")
     conn.commit()
     return conn
 
@@ -391,7 +433,7 @@ def _utc_day_start(now: float | None = None) -> tuple[str, float]:
     return moment.strftime("%Y-%m-%d"), day_start.timestamp()
 
 
-def today_total_usd(*, path: Path | None = None) -> float:
+def today_total_usd(*, path: Path | None = None, strict: bool = False) -> float:
     """Total USD recorded in the ledger for the current UTC day.
 
     This is only the known subtotal: unknown charges cannot count toward a
@@ -406,6 +448,7 @@ def today_total_usd(*, path: Path | None = None) -> float:
     now = time.monotonic()
     if (
         _day_total_cache is not None
+        and not strict
         and _day_total_cache_path == cache_path
         and _day_total_cache[0] == day
         and now - _day_total_cache[2] < _DAY_TOTAL_TTL_SECONDS
@@ -414,6 +457,8 @@ def today_total_usd(*, path: Path | None = None) -> float:
     try:
         conn = connect(path)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return _day_total_cache[1] if _day_total_cache and _day_total_cache_path == cache_path else 0.0
     try:
         row = conn.execute(
@@ -421,6 +466,8 @@ def today_total_usd(*, path: Path | None = None) -> float:
         ).fetchone()
         total = float(row[0] or 0.0)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         total = _day_total_cache[1] if _day_total_cache and _day_total_cache_path == cache_path else 0.0
     finally:
         conn.close()
@@ -442,22 +489,28 @@ def _bump_today_total(record: UsageRecord, path: Path | None) -> None:
         _day_total_cache = (day, _day_total_cache[1] + record.cost_usd, _day_total_cache[2])
 
 
-def record_usage(record: UsageRecord, *, path: Path | None = None) -> None:
+def record_usage(record: UsageRecord, *, path: Path | None = None, strict: bool = False) -> bool:
     """Append one usage row. Best-effort: never raises into the model loop."""
     try:
         conn = connect(path)
-    except Exception:  # noqa: BLE001 - accounting must not break a run
-        return
+    except Exception:  # noqa: BLE001 - optional accounting can degrade visibly
+        if strict:
+            raise
+        return False
     try:
         columns = tuple(UsageRecord.__dataclass_fields__)
-        conn.execute(
-            f"INSERT INTO usage ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+        cursor = conn.execute(
+            f"INSERT OR IGNORE INTO usage ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
             tuple(getattr(record, name) for name in columns),
         )
         conn.commit()
-        _bump_today_total(record, path)
+        if cursor.rowcount:
+            _bump_today_total(record, path)
+        return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
+        return False
     finally:
         conn.close()
 
@@ -534,6 +587,7 @@ def record_model_response(
     pricing: dict[str, Price] | None = None,
     scaffold_tokens: int = 0,
     net_new_tokens: int = 0,
+    strict: bool = False,
 ) -> UsageRecord:
     """Account an actual response, including direct qualification model calls.
 
@@ -544,6 +598,12 @@ def record_model_response(
     identity = model_call_identity(model, message)
     breakdown = extract_breakdown(getattr(message, "usage_metadata", None))
     match = pricing_for(model_name(model), pricing, observed_backend=identity["observed_backend"])
+    metadata = getattr(message, "response_metadata", None) or {}
+    invocation_id = metadata.get("manta_invocation_id", "")
+    if not invocation_id and identity["request_id"]:
+        invocation_id = "request:" + hashlib.sha256(json.dumps([
+            identity["requested_target"], identity["surface"], identity["protocol"], identity["request_id"],
+        ]).encode()).hexdigest()
     record = UsageRecord(
         agent=agent, model=model_name(model), task=task, thread_id=thread_id,
         input_tokens=breakdown.input_tokens, output_tokens=breakdown.output_tokens,
@@ -551,9 +611,11 @@ def record_model_response(
         cost_usd=breakdown.cost_usd(match.price), usage_complete=breakdown.usage_complete,
         cache_available=breakdown.cache_available, reasoning_tokens=breakdown.reasoning_tokens,
         pricing_source=match.source, pricing_version=match.version,
-        scaffold_tokens=scaffold_tokens, net_new_tokens=net_new_tokens, **identity,
+        scaffold_tokens=scaffold_tokens, net_new_tokens=net_new_tokens,
+        invocation_id=invocation_id, call_kind=metadata.get("manta_call_kind", "agent"),
+        duration_ms=metadata.get("manta_duration_ms"), outcome=metadata.get("manta_outcome", "completed"), **identity,
     )
-    record_usage(record, path=path)
+    record_usage(record, path=path, strict=strict)
     return record
 
 
@@ -610,6 +672,7 @@ def aggregate(
     since: float | None = None,
     agent: str | None = None,
     path: Path | None = None,
+    strict: bool = False,
 ) -> list[AggRow]:
     """Return usage grouped by ``by`` (``agent`` / ``model`` / ``task``).
 
@@ -622,6 +685,8 @@ def aggregate(
     try:
         conn = connect(path)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
     try:
         where: list[str] = []
@@ -644,6 +709,8 @@ def aggregate(
         )
         rows = conn.execute(sql, params).fetchall()
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
     finally:
         conn.close()
@@ -717,9 +784,9 @@ def scaffold_breakdown(
     return ScaffoldBreakdown(int(row["s"] or 0), int(row["n"] or 0))
 
 
-def totals(*, since: float | None = None, path: Path | None = None) -> AggRow:
+def totals(*, since: float | None = None, path: Path | None = None, strict: bool = False) -> AggRow:
     """Return a single grand-total row across all agents (for ``manta budget``)."""
-    rows = aggregate(by="agent", since=since, path=path)
+    rows = aggregate(by="agent", since=since, path=path, strict=strict)
     agg = AggRow("total", 0, 0, 0, 0, 0, 0.0, True)
     for r in rows:
         agg.calls += r.calls
@@ -735,9 +802,9 @@ def totals(*, since: float | None = None, path: Path | None = None) -> AggRow:
     return agg
 
 
-def today_totals(*, path: Path | None = None) -> AggRow:
+def today_totals(*, path: Path | None = None, strict: bool = False) -> AggRow:
     """Today's known subtotal and coverage; unknown charges are not zero spend."""
-    return totals(since=_utc_day_start()[1], path=path)
+    return totals(since=_utc_day_start()[1], path=path, strict=strict)
 
 
 # --- advice ledger (ADR 0010, Phase C) --------------------------------------
@@ -981,15 +1048,25 @@ class CallRow:
     input_tokens: int
     output_tokens: int
     cost_usd: float | None
+    call_kind: str = "agent"
+    reasoning_tokens: int | None = None
+    cache_available: bool | None = None
+    cache_read: int = 0
+    cache_creation: int = 0
+    duration_ms: float | None = None
+    request_id: str | None = None
+    outcome: str = "completed"
 
 
-def thread_totals(thread_id: str, *, path: Path | None = None) -> list[AggRow]:
+def thread_totals(thread_id: str, *, path: Path | None = None, strict: bool = False) -> list[AggRow]:
     """Per-agent spend for one conversation thread (the current session)."""
     if not thread_id:
         return []
     try:
         conn = connect(path)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
     try:
         rows = conn.execute(
@@ -1018,6 +1095,8 @@ def thread_totals(thread_id: str, *, path: Path | None = None) -> list[AggRow]:
             for r in rows
         ]
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
     finally:
         conn.close()
@@ -1035,7 +1114,8 @@ def recent_calls(
         return []
     try:
         rows = conn.execute(
-            "SELECT ts, agent, model, input_tokens, output_tokens, cost_usd "
+            "SELECT ts, agent, model, input_tokens, output_tokens, cost_usd, "
+            "call_kind, reasoning_tokens, cache_available, cache_read, cache_creation, duration_ms, request_id, outcome "
             "FROM usage WHERE thread_id = ? ORDER BY ts DESC LIMIT ?",
             (thread_id, limit),
         ).fetchall()
@@ -1047,6 +1127,11 @@ def recent_calls(
                 input_tokens=r["input_tokens"],
                 output_tokens=r["output_tokens"],
                 cost_usd=r["cost_usd"],
+                call_kind=r["call_kind"], reasoning_tokens=r["reasoning_tokens"],
+                cache_available=r["cache_available"], cache_read=r["cache_read"],
+                cache_creation=r["cache_creation"], duration_ms=r["duration_ms"],
+                request_id=r["request_id"],
+                outcome=r["outcome"],
             )
             for r in rows
         ]

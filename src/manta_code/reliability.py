@@ -15,15 +15,16 @@ Pinning the upstream versions (see ``pyproject.toml``) is the first line of
 defence; this module is the second. :func:`verify_patch_targets` is called by
 ``manta doctor`` (so users see breakage before launch) and by
 ``tests/test_reliability.py`` (so an upstream bump that moves a symbol fails CI
-rather than a user's launch). The build hook itself degrades gracefully — see
-:func:`manta_code.hook.install_build_hook` — so a missing target never blocks
-``manta`` from starting; it only loses the Manta control-plane enrichment.
+rather than a user's launch). Required build-hook and dispatch targets fail closed at launch. Optional
+branding and advice adapters can degrade with a visible health diagnosis.
 """
 
 from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
+
+from .updates import UPDATE_ADAPTER_TARGETS
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,46 @@ class PatchTarget:
 #: gap where ``_boot``'s targets were unverified). Keep this list in sync with
 #: the modules referenced in each ``purpose``.
 PATCH_TARGETS: tuple[PatchTarget, ...] = (
+    PatchTarget(
+        module="deepagents_code.agent",
+        attribute="_resolve_retry_owned_model",
+        purpose="Manta specialist pins preserve dcode retry ownership",
+    ),
+    PatchTarget(
+        module="deepagents_code.agent",
+        attribute="_has_resolvable_model_provider",
+        purpose="Manta specialist model policy resolves known providers consistently",
+    ),
+    PatchTarget("deepagents_code.agent", "_aresolve_approval_mode", "programmatic calls use async live approval state"),
+    PatchTarget("deepagents_code.agent", "_resolve_approval_mode", "synchronous programmatic calls preserve approval fallback"),
+    PatchTarget("deepagents_code.agent", "_RoutingDecision", "trusted process-local async approval routing"),
+    PatchTarget("deepagents_code.agent", "_ASYNC_APPROVAL_ROUTING_KEY", "transient approval routing state key", "attr"),
+    PatchTarget("deepagents_code.agent", "_interrupt_predicate", "native mutation gates preserve dcode live modes"),
+    PatchTarget(
+        module="langchain_quickjs.middleware",
+        attribute="CodeInterpreterMiddleware._prepare_for_call",
+        purpose="guarded programmatic tools resolve through the live graph toolset",
+    ),
+    PatchTarget(
+        module="deepagents_code.client.launch.server",
+        attribute="generate_langgraph_json",
+        purpose="owned server bootstrap installs required Manta controls for every provider",
+    ),
+    PatchTarget(
+        module="langgraph.prebuilt.tool_node",
+        attribute="ToolNode._execute_tool_async",
+        purpose="guarded programmatic dispatch preserves actual compiled tool middleware",
+    ),
+    PatchTarget(
+        module="langgraph.prebuilt.tool_node",
+        attribute="ToolNode._execute_tool_sync",
+        purpose="guarded synchronous programmatic dispatch",
+    ),
+    PatchTarget(
+        module="langchain.agents.middleware.human_in_the_loop",
+        attribute="HumanInTheLoopMiddleware._resolve_per_call",
+        purpose="programmatic tool calls require the same per-call approval semantics",
+    ),
     PatchTarget(
         module="langchain_openai.chat_models.base",
         attribute="BaseChatOpenAI._create_chat_result",
@@ -227,6 +268,13 @@ PATCH_TARGETS: tuple[PatchTarget, ...] = (
         attribute="FuzzyFileController.on_text_changed",
         purpose="@ completion position check for agent addressing",
     ),
+    PatchTarget("deepagents_code.client.non_interactive", "_stream_agent", "checkpoint continuation"),
+    PatchTarget("deepagents_code.client.remote_client", "RemoteAgent.aensure_thread", "register durable task threads after server restart"),
+    PatchTarget("deepagents_code.client.remote_client", "RemoteAgent.aget_state", "validate exact pending task checkpoint before continuation"),
+    PatchTarget("deepagents_code.client.non_interactive", "_process_hitl_interrupts", "budget pause before auto approval"),
+    PatchTarget("deepagents_code.client.non_interactive", "generate_thread_id", "durable task thread identity"),
+    *(PatchTarget(module, attribute, "qualified Manta release and dependency mutation ownership", kind)
+      for module, attribute, kind in UPDATE_ADAPTER_TARGETS),
 )
 
 

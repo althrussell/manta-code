@@ -82,12 +82,13 @@ def test_inline_address_synthesizes_task_call():
 def test_background_address_submits_and_short_circuits():
     submitted: dict = {}
     mw = _mw(submitted)
-    req = _Request(messages=[HumanMessage(content="@review audit the auth module &")])
+    req = _Request(messages=[HumanMessage(content="@review audit the auth module &")], tools=[{"name": "manta_task_submit"}])
     result = mw.wrap_model_call(req, lambda r: "MODEL_CALLED")
     assert isinstance(result, AIMessage)
-    assert not result.tool_calls  # receipt only: the turn ends immediately
-    assert "abc12345" in result.content
-    assert submitted == {"agent": "review", "prompt": "audit the auth module"}
+    (call,) = result.tool_calls
+    assert call["name"] == "manta_task_submit"
+    assert call["args"] == {"agent": "review", "prompt": "audit the auth module"}
+    assert submitted == {}  # ToolNode owns execution, policy, ASK and audit.
 
 
 def test_unknown_agent_falls_through_to_model():
@@ -114,13 +115,14 @@ def test_inline_without_task_tool_falls_through():
     assert mw.wrap_model_call(req, lambda r: "MODEL_CALLED") == "MODEL_CALLED"
 
 
-def test_background_without_task_tool_still_submits():
+def test_background_without_task_tool_does_not_submit():
     submitted: dict = {}
     mw = _mw(submitted)
     req = _Request(messages=[HumanMessage(content="@swe do it &")], tools=[])
     result = mw.wrap_model_call(req, lambda r: "MODEL_CALLED")
     assert isinstance(result, AIMessage)
-    assert submitted["agent"] == "swe"
+    assert submitted == {}
+    assert "unavailable" in result.content
 
 
 def test_errors_fall_back_to_model():

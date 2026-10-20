@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "results": [
+    {
+      "task_id": "python-bug",
+      "passed": true,
+      "agent_exit_code": 0,
+      "acceptance_exit_code": 0,
+      "acceptance_output": "",
+      "changed_files": [
+        "totals.py"
+      ],
+      "diff": "--- a/totals.py\n+++ b/totals.py\n@@ -1,2 +1,6 @@\n+from decimal import Decimal, ROUND_HALF_UP\n+\n+\n def total(prices):\n-    return str(round(sum(float(p) for p in prices), 2))\n+    amount = sum((Decimal(str(p)) for p in prices), Decimal(\"0\"))\n+    return str(amount.quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP))\n",
+      "seconds": 30.070364208950195,
+      "cost_usd": null,
+      "tokens": 92000,
+      "model": "system.ai.gpt-6-1-sol"
+    },
+    {
+      "task_id": "python-refactor",
+      "passed": true,
+      "agent_exit_code": 0,
+      "acceptance_exit_code": 0,
+      "acceptance_output": "",
+      "changed_files": [
+        "records.py"
+      ],
+      "diff": "--- a/records.py\n+++ b/records.py\n@@ -1,3 +1,5 @@\n def group_by(records, key):\n-    keys = {r[key] for r in records}\n-    return {k: [r for r in records if r[key] == k] for k in keys}\n+    groups = {}\n+    for record in records:\n+        groups.setdefault(record[key], []).append(record)\n+    return groups\n",
+      "seconds": 35.582454167015385,
+      "cost_usd": null,
+      "tokens": 129566,
+      "model": "system.ai.gpt-6-1-sol"
+    },
+    {
+      "task_id": "frontend-render",
+      "passed": true,
+      "agent_exit_code": 0,
+      "acceptance_exit_code": 0,
+      "acceptance_output": "",
+      "changed_files": [
+        "list.cjs"
+      ],
+      "diff": "--- a/list.cjs\n+++ b/list.cjs\n@@ -1 +1 @@\n-exports.render = items => '<ul>' + items.map(x => '<li>'+x+'</li>').join('') + '</ul>';\n+exports.render = items => '<ul>' + items.map(x => '<li>' + String(x).replace(/[&<>\"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[char]) + '</li>').join('') + '</ul>';\n",
+      "seconds": 30.636584124993533,
+      "cost_usd": null,
+      "tokens": 110987,
+      "model": "system.ai.gpt-6-1-sol"
+    },
+    {
+      "task_id": "databricks-bundle",
+      "passed": true,
+      "agent_exit_code": 0,
+      "acceptance_exit_code": 0,
+      "acceptance_output": "",
+      "changed_files": [
+        "databricks.yml"
+      ],
+      "diff": "--- a/databricks.yml\n+++ b/databricks.yml\n@@ -1 +1,26 @@\n-{\"bundle\":{\"name\":\"fixture\"},\"resources\":{\"jobs\":{\"nightly\":{\"name\":\"nightly\",\"tasks\":[]}}}}\n+{\n+  \"bundle\": {\n+    \"name\": \"fixture\"\n+  },\n+  \"resources\": {\n+    \"jobs\": {\n+      \"nightly\": {\n+        \"name\": \"nightly\",\n+        \"tasks\": [\n+          {\n+            \"task_key\": \"nightly\",\n+            \"notebook_task\": {\n+              \"notebook_path\": \"./src/job.py\"\n+            }\n+          }\n+        ]\n+      }\n+    }\n+  },\n+  \"targets\": {\n+    \"dev\": {\n+      \"default\": true\n+    },\n+    \"prod\": {}\n+  }\n+}\n",
+      "seconds": 35.35591804102296,
+      "cost_usd": null,
+      "tokens": 134966,
+      "model": "system.ai.gpt-6-1-sol"
+    }
+  ],
+  "qualified_on": "2026-10-20",
+  "profile": "labs",
+  "runtime": {
+    "deepagents_code": "0.1.86",
+    "deepagents": "0.7.28"
+  },
+  "source_branch": "codex/dependable-foundations",
+  "limitations": [
+    "Four small fixtures establish a baseline, not comparative model quality.",
+    "Acceptance ran outside the agent repository; agent assertions are not used as a pass signal.",
+    "Cost remains unknown because exact-service prices were not configured."
+  ]
+}

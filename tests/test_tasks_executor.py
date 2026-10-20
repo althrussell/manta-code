@@ -8,6 +8,23 @@ from manta_code.tasks import executor, store
 @pytest.fixture(autouse=True)
 def _manta_home(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    config = tmp_path / "databricks.ini"
+    config.write_text(
+        "[DEFAULT]\nhost=https://workspace.example.com\n[selected]\nhost=https://selected.example.com\n"
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(config))
+    for key in (
+        "DATABRICKS_HOST",
+        "MANTA_PROFILE",
+        "DATABRICKS_CONFIG_PROFILE",
+        "DEEPAGENTS_CODE_SERVER_CWD",
+        "DEEPAGENTS_CODE_SERVER_PROJECT_ROOT",
+        "MANTA_ORIGINAL_CWD",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 class _FakeProcess:
@@ -30,7 +47,7 @@ def _fake_spawn(monkeypatch):
 
 def test_submit_creates_task_and_spawns_detached_runner(_fake_spawn):
     record = executor.submit_task("swe", "fix the flaky test")
-    assert record.state == "queued"
+    assert record.state == "starting"
     assert record.pid == 9999
 
     argv = _fake_spawn["argv"]
@@ -47,6 +64,7 @@ def test_submit_creates_task_and_spawns_detached_runner(_fake_spawn):
     # Submission is audited as an event.
     kinds = {e.kind for e in store.recent_events(task_id=record.id)}
     assert "task_submitted" in kinds
+    assert all(not event.detail for event in store.recent_events(task_id=record.id))
 
 
 def test_submit_accepts_at_prefixed_agent(_fake_spawn):
@@ -77,9 +95,7 @@ def test_cancel_running_task_signals_group(monkeypatch, _fake_spawn):
     store.update_task(record.id, state="running")
 
     killed = {}
-    monkeypatch.setattr(
-        executor.os, "killpg", lambda pid, sig: killed.update(pid=pid, sig=sig)
-    )
+    monkeypatch.setattr(executor.os, "killpg", lambda pid, sig: killed.update(pid=pid, sig=sig))
     cancelled = executor.cancel_task(record.id)
     assert cancelled.state == "cancelled"
     assert killed["pid"] == 9999
@@ -116,14 +132,14 @@ def test_task_output_prefers_result_then_log(tmp_path, _fake_spawn):
     assert executor.task_output(record.id) == "the final answer"
 
 
-def test_reconcile_marks_dead_runner_failed(monkeypatch, _fake_spawn):
+def test_reconcile_marks_dead_runner_interrupted(monkeypatch, _fake_spawn):
     record = executor.submit_task("swe", "long thing")
     store.update_task(record.id, state="running", pid=999999)
     monkeypatch.setattr(executor, "RECONCILE_GRACE_SECONDS", 0.0)
     monkeypatch.setattr(executor, "_pid_alive", lambda pid: False)
     (repaired,) = executor.reconcile_stale_tasks()
     assert repaired.id == record.id
-    assert repaired.state == "failed"
+    assert repaired.state == "interrupted"
     assert "runner process died" in repaired.result
 
 
@@ -148,7 +164,7 @@ def test_submit_refuses_runaway_nesting(monkeypatch, _fake_spawn):
     monkeypatch.setenv(executor.TASK_DEPTH_ENV, "1")
     record = executor.submit_task("swe", "nested once is fine")
     assert _fake_spawn["kwargs"]["env"][executor.TASK_DEPTH_ENV] == "2"
-    assert record.state == "queued"
+    assert record.state == "starting"
     monkeypatch.setenv(executor.TASK_DEPTH_ENV, "2")
     with pytest.raises(executor.TaskError, match="nesting limit"):
         executor.submit_task("swe", "too deep")
@@ -164,3 +180,27 @@ def test_submit_spawn_failure_marks_task_failed(monkeypatch):
     (task,) = store.list_tasks(limit=1)
     assert task.state == "failed"  # never stranded in queued
     assert "failed to spawn" in task.result
+
+
+def test_resume_spawn_failure_preserves_pending_checkpoint_and_can_resume_again(monkeypatch, _fake_spawn):
+    task = executor.submit_task("swe", "Resume after a transient process limit")
+    checkpoint = {"pending_id": "reviewed", "interrupts": {"request": {
+        "action_requests": [{"name": "write_file", "args": {"file_path": "fixture.py"}}],
+    }}}
+    store.update_task(task.id, state="waiting_approval", pid=None, thread_id="same-thread",
+                      pending_reason="Review this file write", checkpoint=checkpoint)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("temporary process limit")
+
+    monkeypatch.setattr(executor.subprocess, "Popen", unavailable)
+    decision = {"request": {"decisions": [{"type": "approve"}]}}
+    with pytest.raises(executor.TaskError, match="could not start the task runner"):
+        executor.resume_task(task.id, resume_value=decision, expected_pending_id="reviewed")
+    current = store.get_task(task.id)
+    assert current.state == "waiting_approval" and current.pid is None
+    assert current.thread_id == "same-thread" and current.checkpoint == checkpoint
+    assert current.pending_reason == "Review this file write"
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: _FakeProcess())
+    resumed = executor.resume_task(task.id, resume_value=decision, expected_pending_id="reviewed")
+    assert resumed.state == "starting" and resumed.id == task.id

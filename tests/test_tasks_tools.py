@@ -27,7 +27,7 @@ def test_submit_tool_returns_receipt(monkeypatch):
     from manta_code.tasks import executor
 
     record = store.TaskRecord(id="abcd1234", agent="swe", prompt="x")
-    monkeypatch.setattr(executor, "submit_task", lambda a, p: record)
+    monkeypatch.setattr(executor, "submit_task", lambda a, p, **kw: record)
     out = tools.manta_task_submit("swe", "x")
     assert "abcd1234" in out
     assert "@swe" in out
@@ -74,4 +74,7 @@ def test_build_task_tools_compiles_structured_tools():
         "manta_task_list",
         "manta_task_send",
         "manta_task_cancel",
+        "manta_task_review",
+        "manta_task_artifact",
+        "manta_request_input",
     }

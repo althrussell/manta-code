@@ -27,7 +27,7 @@ def _age(ts: float | None) -> str:
     return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
-def manta_task_submit(agent: str, prompt: str) -> str:
+def manta_task_submit(agent: str, prompt: str, dependencies: list[str] | None = None) -> str:
     """Hand a long-running task to a named Manta agent in the background.
 
     The task runs detached (it survives this session) with the agent's
@@ -36,7 +36,9 @@ def manta_task_submit(agent: str, prompt: str) -> str:
     from .executor import TaskError, submit_task
 
     try:
-        record = submit_task(agent, prompt)
+        from .events import _current_task_id
+        record = submit_task(agent, prompt, dependencies=dependencies,
+                             parent_task_id=_current_task_id())
     except TaskError as exc:
         return f"Could not submit task: {exc}"
     return (
@@ -160,4 +162,38 @@ def build_task_tools() -> list[Any]:
         manta_task_send,
         manta_task_cancel,
     )
-    return [StructuredTool.from_function(fn) for fn in functions]
+    from .approvals import manta_request_input
+    return [StructuredTool.from_function(fn) for fn in (*functions, manta_task_review, manta_task_artifact, manta_request_input)]
+
+
+def manta_task_review(task_id: str) -> str:
+    """Read a task's diff, observed test results, artifacts and integration state.
+
+    Integration and human approval decisions belong to the user's task board.
+    """
+    import json
+    from .executor import TaskError, review_task
+    try:
+        return json.dumps(review_task(task_id.strip()), ensure_ascii=False)
+    except TaskError as exc:
+        return str(exc)
+
+
+def manta_task_artifact(path: str, label: str = "") -> str:
+    """Attach an existing file inside this task's checkout to its result."""
+    from pathlib import Path
+    from .events import _current_task_id
+    from .store import get_task, record_artifact
+    task_id = _current_task_id()
+    record = get_task(task_id) if task_id else None
+    if record is None:
+        return "Artifacts can be attached only while executing a tracked task."
+    root = Path(record.manifest.get("project_root") or record.manifest.get("shared_checkout") or Path.cwd()).resolve()
+    try:
+        target = (root / path).resolve(strict=True)
+        if not target.is_file() or not target.is_relative_to(root):
+            return "Artifact must be an existing file inside this task's checkout."
+        record_artifact(task_id, str(target.relative_to(root)), label)
+    except (OSError, ValueError):
+        return "Artifact must be an existing file inside this task's checkout."
+    return f"Attached artifact: {target.relative_to(root)}"

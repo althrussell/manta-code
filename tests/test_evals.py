@@ -151,7 +151,8 @@ def test_live_mode_renders_summary(monkeypatch, capsys):
     monkeypatch.setattr(L, "_ledger_window", lambda since, tag: (0.01, 100, "m"))
     from evals.__main__ import main
 
-    assert main(["--live", "--task", "readonly-sql"]) == 0
+    # An executable but incomplete answer must not pass live qualification.
+    assert main(["--live", "--task", "readonly-sql"]) == 1
     out = capsys.readouterr().out
     assert "Live eval" in out
     assert "real ledger figures" in out

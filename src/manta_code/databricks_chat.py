@@ -28,6 +28,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 from pydantic import Field, PrivateAttr, model_validator
+from .model_capabilities import install_model_capability_bridge as _install_capability_bridge
 from .providers.targets import (
     TargetPolicy,
     TargetResolutionError,
@@ -342,6 +343,7 @@ class MantaChatDatabricks(ChatOpenAI):
     _sync_root: Any = PrivateAttr(default=None)
     _async_root: Any = PrivateAttr(default=None)
     _target_policy: Any = PrivateAttr(default=None)
+    _last_context_preflight: Any = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -406,10 +408,16 @@ class MantaChatDatabricks(ChatOpenAI):
     def clone_with_policy(self, *, api: str, surface: str) -> MantaChatDatabricks:
         """Restore a checkpoint's dialect without changing target or credentials."""
         options = dict(self.target_policy.params)
+        # Carry explicit overrides, not facts qualified for the previous API.
+        # Re-resolve scoped facts for the restored protocol and workspace.
+        overrides = {key: value for key, value in self.target_policy.capabilities.values.items()
+                     if self.target_policy.capabilities.states.get(key) == "override"}
+        overrides.update({key: value for key, value in (self.profile or {}).items()
+                          if self.target_policy.capabilities.profile.get(key) != value})
         options.update(
             model=self.model_name, target_kind=self.target_policy.target.kind,
             api=api, surface=surface,
-            profile=self.target_policy.capabilities.profile,
+            profile=overrides,
             request_tags=self.target_policy.request_tags,
             databricks_profile=self.target_policy.profile,
             workspace_client=self.workspace_client,
@@ -514,14 +522,17 @@ class MantaChatDatabricks(ChatOpenAI):
         return root
 
     def _get_ls_params(self, *args: Any, **kwargs: Any) -> Any:
-        return {**super()._get_ls_params(*args, **kwargs), "ls_provider": "databricks"}
+        return {**super()._get_ls_params(*args, **kwargs), "ls_provider": "databricks",
+                "manta_target": self.target_policy.target.public_ref,
+                "manta_surface": self.target_policy.surface, "manta_protocol": self.target_policy.api}
 
     @property
     def _llm_type(self) -> str:
         return "chat-databricks"
 
     def _validate_forced_tool_choice(self, choice: Any) -> None:
-        unsupported = self.target_policy.capabilities.values.get("forced_tool_choice") is False
+        values = self.target_policy.capabilities.values
+        unsupported = (self.profile or {}).get("tool_choice", values.get("forced_tool_choice")) is False
         if self.use_responses_api and unsupported and choice not in (None, False, "auto", "none"):
             raise TargetResolutionError(
                 f"{self.model_name} does not support forced tool choice on Responses (verified service behavior). Use tool_choice='auto' for its supported tool-calling loop."
@@ -532,7 +543,9 @@ class MantaChatDatabricks(ChatOpenAI):
         return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
 
     def _validate_known_capabilities(self, payload: dict[str, Any]) -> None:
-        values = self.target_policy.capabilities.values
+        # Upstream applies CLI profile overrides after construction. Use the
+        # same effective profile as compaction and runtime effort controls.
+        values = {**self.target_policy.capabilities.values, **(self.profile or {})}
         if not self.use_responses_api and values.get("stream_usage") is False and payload.get("stream_options") is not None:
             raise TargetResolutionError(f"{self.model_name} does not support Chat stream_options (verified Gateway behavior); remove stream_options/stream_usage or correct the explicit capability profile.")
         if values.get("temperature") is False and payload.get("temperature") is not None:
@@ -541,14 +554,33 @@ class MantaChatDatabricks(ChatOpenAI):
         effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
         effort = effort or payload.get("reasoning_effort")
         levels = values.get("reasoning_effort_levels")
+        if effort is not None and levels == []:
+            raise TargetResolutionError(f"{self.model_name} does not support configurable reasoning effort on {self.transport_surface}:{self.transport_api} (qualified Gateway behavior); remove the effort option or correct its explicit capability profile.")
         if effort is not None and levels is not None and effort not in levels:
             raise TargetResolutionError(f"{self.model_name} supports reasoning effort values {levels}; requested {effort!r}. Update the option or its explicit capability profile.")
         if payload.get("tools") and values.get("tool_calling") is False:
             raise TargetResolutionError(f"{self.model_name} has tool calling disabled in its capability profile; select a tool-capable service or correct the profile override.")
         cap = payload.get("max_output_tokens", payload.get("max_completion_tokens", payload.get("max_tokens")))
-        maximum = values.get("max_output_tokens")
+        from .providers.context import context_preflight
+
+        budget = context_preflight(payload, values)
+        self._last_context_preflight = budget
+        maximum = budget.max_output_tokens
+        if cap is not None and (not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0):
+            raise TargetResolutionError("The requested output cap must be a positive integer.")
         if isinstance(cap, int) and isinstance(maximum, int) and cap > maximum:
             raise TargetResolutionError(f"Requested output cap {cap} exceeds {self.model_name}'s verified/profile limit {maximum}; lower the cap or correct its profile override.")
+        total = budget.total_tokens_estimate
+        if budget.context_window is not None and (budget.input_tokens_estimate > budget.context_window or total is not None and total > budget.context_window):
+            reserve = f"{budget.reserved_output_tokens:,}" if budget.reserved_output_tokens is not None else "unknown"
+            raise TargetResolutionError(
+                f"Context preflight for {self.model_name}: estimated text input {budget.input_tokens_estimate:,} + reserved output {reserve} exceeds its {budget.context_window:,}-token context window. Compact or clear history, reduce the output cap, or correct the explicit profile override. Counts are approximate; media and opaque state may add tokens."
+            )
+
+    @property
+    def last_context_preflight(self) -> dict[str, Any] | None:
+        """Nonsecret budget diagnostics for the most recent request payload."""
+        return self._last_context_preflight.as_dict() if self._last_context_preflight else None
 
     def _get_request_payload(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         transport_options = {"model", "model_name", "endpoint", "api", "surface", "use_responses_api", "use_ai_gateway", "use_ai_gateway_native_api", "target_kind", "databricks_profile"}.intersection(kwargs)
@@ -588,6 +620,27 @@ class MantaChatDatabricks(ChatOpenAI):
             payload = restore_chat_state(payload, self._convert_input(args[0] if args else kwargs["input_"]).to_messages())
         self._validate_forced_tool_choice(payload.get("tool_choice"))
         if "input" in payload:
+            # ChatOpenAI leaves flat reasoning_effort beside `reasoning` when
+            # that dictionary already contains a summary setting. Responses
+            # accepts only the nested form. Preserve siblings and honor the
+            # explicit per-call setting before constructor defaults.
+            reasoning = dict(payload.get("reasoning") or {})
+            call_reasoning = kwargs.get("reasoning")
+            if isinstance(call_reasoning, dict) and "effort" in call_reasoning:
+                effort = call_reasoning["effort"]
+            elif "reasoning_effort" in kwargs:
+                effort = kwargs["reasoning_effort"]
+            elif "effort" in reasoning:
+                effort = reasoning["effort"]
+            else:
+                effort = payload.get("reasoning_effort")
+            if effort is not None:
+                reasoning["effort"] = effort
+            elif "reasoning_effort" in kwargs:
+                reasoning.pop("effort", None)
+            payload.pop("reasoning_effort", None)
+            if reasoning:
+                payload["reasoning"] = reasoning
             temperature = kwargs.get("temperature", self.temperature)
             if temperature is not None:
                 payload["temperature"] = temperature
@@ -755,6 +808,8 @@ def _rebind_imported_resolvers(original: Any, replacement: Any) -> None:
 
 
 _install_subagent_databricks_resolver()
+
+_install_capability_bridge()
 
 # Install Manta's build hook here too: this module is imported by
 # ``create_model`` (via the provider ``class_path``) in the langgraph server

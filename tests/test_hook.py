@@ -73,6 +73,7 @@ def test_enrich_pins_model_for_active_profile(monkeypatch, tmp_path):
     mw_names = {type(m).__name__ for m in (kwargs.get("middleware") or [])}
     # planning pins databricks-claude-opus-4-8 -> the primary loop is pinned.
     assert "ModelPinMiddleware" in mw_names
+    assert "ModelRoutingMiddleware" not in mw_names
 
 
 def test_explicit_launch_model_outranks_managed_role_pin_and_routing(monkeypatch, tmp_path):
@@ -97,10 +98,11 @@ def test_model_selection_and_continuity_precede_accounting(monkeypatch):
     pin = ModelPinMiddleware(endpoint="test", resolve_model=lambda n: n)
     monkeypatch.setattr(hook, "build_orchestrator_middleware", lambda: [economy, pin])
     monkeypatch.setattr(hook, "build_manta_subagents", lambda: [])
+    monkeypatch.setattr(hook, "build_databricks_tools", lambda: [])
     kwargs = {"middleware": [configurable]}
     hook.enrich_kwargs(kwargs)
     names = [type(m).__name__ for m in kwargs["middleware"]]
-    assert names == ["ConfigurableModelMiddleware", "ModelPinMiddleware", "SessionPolicyMiddleware", "TokenEconomyMiddleware"]
+    assert names == ["ConfigurableModelMiddleware", "RuntimeDispatchMiddleware", "ModelPinMiddleware", "SessionPolicyMiddleware", "TokenEconomyMiddleware"]
 
 
 def test_enrich_base_agent_no_top_level_policy(monkeypatch, tmp_path):
@@ -168,7 +170,7 @@ def test_install_is_idempotent_and_wraps(monkeypatch):
         dc_agent.create_deep_agent = original
 
 
-def test_wrapped_falls_back_when_enrichment_raises(monkeypatch):
+def test_wrapped_fails_closed_when_enrichment_raises(monkeypatch):
     import deepagents_code.agent as dc_agent
 
     calls = {"n": 0}
@@ -187,10 +189,10 @@ def test_wrapped_falls_back_when_enrichment_raises(monkeypatch):
     monkeypatch.setattr(hook, "enrich_kwargs", boom)
     try:
         assert hook.install_build_hook() is True
-        # Even though enrichment raises, the original still runs and returns.
-        result = dc_agent.create_deep_agent(model="m")
-        assert result == "AGENT"
-        assert calls["n"] == 1
+        from manta_code.runtime import RuntimeBuildError
+        with pytest.raises(RuntimeBuildError, match="registry exploded"):
+            dc_agent.create_deep_agent(model="m")
+        assert calls["n"] == 0
     finally:
         dc_agent.create_deep_agent = original
 

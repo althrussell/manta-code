@@ -94,6 +94,6 @@ def live_solver(
         if completed.returncode != 0 and not text:
             text = f"(run failed: exit {completed.returncode})\n{completed.stderr[-2000:]}"
         cost, tokens, model = _ledger_window(start, run_tag)
-        return EvalOutput(text=text, cost_usd=cost, tokens=tokens, model=model)
+        return EvalOutput(text=text, cost_usd=cost, tokens=tokens, model=model, exit_code=completed.returncode)
 
     return solve

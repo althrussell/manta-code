@@ -138,11 +138,13 @@ class ModelPinMiddleware(AgentMiddleware):
         *,
         endpoint: str,
         resolve_model: Callable[[str], Any],
+        agent: str | None = None,
     ) -> None:
         super().__init__()
         self._endpoint = endpoint
         self._resolve_model = resolve_model
         self._model: Any = None
+        self._agent = agent
 
     @property
     def name(self) -> str:
@@ -156,6 +158,9 @@ class ModelPinMiddleware(AgentMiddleware):
         try:
             if self._model is None:
                 self._model = self._resolve_model(self._endpoint)
+                if self._agent:
+                    from ..runtime import model_for_agent
+                    self._model = model_for_agent(self._model, self._agent)
             if self._model is None:
                 raise ValueError("the model resolver returned no model")
         except Exception as exc:
@@ -190,6 +195,23 @@ def agent_model_pin_middleware(defn: Any) -> AgentMiddleware | None:
     model = getattr(defn, "model", None)
     if not model:
         return None
+    from ..runtime import current_launch_policy
+    launch = current_launch_policy()
+    if launch and launch.get("enforce_model_policy", True):
+        from deepagents_code.agent import _has_resolvable_model_provider, _resolve_retry_owned_model
+        from deepagents_code.model_config import ModelConfig
+        spec = model if ":" in model else f"databricks:{model}"
+        ModelConfig.load().require_model_allowed(spec)
+        if _has_resolvable_model_provider(spec):
+            # Capture the explicit CLI flag during construction: invocation
+            # runs after the launch ContextVar has been reset. dcode disables
+            # provider SDK retries and tags its single middleware retry owner.
+            retries = launch.get("cli_max_retries")
+            return ModelPinMiddleware(
+                endpoint=spec,
+                resolve_model=lambda target: _resolve_retry_owned_model(target, retries),
+                agent=getattr(defn, "name", None),
+            )
     try:
         from .. import providers
     except Exception:  # noqa: BLE001
@@ -199,18 +221,19 @@ def agent_model_pin_middleware(defn: Any) -> AgentMiddleware | None:
     if ref is not None:
         resolver = providers.resolver_for(ref.provider)
         if resolver is not None:
-            return ModelPinMiddleware(endpoint=ref.model, resolve_model=resolver)
+            return ModelPinMiddleware(endpoint=ref.model, resolve_model=resolver, agent=getattr(defn, "name", None))
         # Unregistered provider: let langchain resolve the full spec lazily.
         return ModelPinMiddleware(
             endpoint=model,
             resolve_model=lambda spec: providers.resolve_model_ref(spec),
+            agent=getattr(defn, "name", None),
         )
     # Bare endpoint name with no provider prefix: treat as Databricks (the
     # historical default) so existing agent definitions keep working.
     resolver = databricks_model_resolver()
     if resolver is None:
         return None
-    return ModelPinMiddleware(endpoint=_strip_provider(model), resolve_model=resolver)
+    return ModelPinMiddleware(endpoint=_strip_provider(model), resolve_model=resolver, agent=getattr(defn, "name", None))
 
 
 def databricks_model_resolver() -> Callable[[str], Any] | None:

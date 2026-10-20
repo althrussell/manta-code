@@ -149,3 +149,41 @@ def test_agent_model_pin_middleware_strips_provider(monkeypatch):
 
 def test_agent_model_pin_middleware_none_without_model():
     assert R.agent_model_pin_middleware(_Defn(model=None)) is None
+
+
+def test_launch_pin_uses_dcode_retry_owner_and_role_copy(monkeypatch):
+    from types import SimpleNamespace
+    import deepagents_code.agent as upstream
+    from deepagents_code.model_config import ModelConfig
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from manta_code import runtime
+
+    calls = []
+    original = FakeListChatModel(responses=["ok"], metadata={"fixture": True})
+    baseline = dict(original.metadata)
+    monkeypatch.setattr(runtime, "current_launch_policy", lambda: {"enforce_model_policy": True, "cli_max_retries": 3})
+    monkeypatch.setattr(ModelConfig, "load", lambda: SimpleNamespace(require_model_allowed=lambda target: calls.append(("allowed", target))))
+    monkeypatch.setattr(upstream, "_has_resolvable_model_provider", lambda target: True)
+    def resolve(target, retries):
+        calls.append(("resolve", target, retries))
+        return original
+    monkeypatch.setattr(upstream, "_resolve_retry_owned_model", resolve)
+    mw = R.agent_model_pin_middleware(SimpleNamespace(name="review", model="databricks:system.ai.fixture"))
+    request = _Request()
+    mw.wrap_model_call(request, lambda request: "ok")
+    assert calls == [("allowed", "databricks:system.ai.fixture"), ("resolve", "databricks:system.ai.fixture", 3)]
+    assert request._overridden["model"].metadata == {**baseline, "manta_agent": "review"}
+    assert original.metadata == baseline
+
+
+def test_launch_pin_policy_rejects_before_model_construction(monkeypatch):
+    from types import SimpleNamespace
+    from deepagents_code.model_config import ModelConfig
+    from manta_code import runtime
+
+    monkeypatch.setattr(runtime, "current_launch_policy", lambda: {"enforce_model_policy": True})
+    def denied(target):
+        raise ValueError("fixture model policy denied")
+    monkeypatch.setattr(ModelConfig, "load", lambda: SimpleNamespace(require_model_allowed=denied))
+    with pytest.raises(ValueError, match="model policy denied"):
+        R.agent_model_pin_middleware(SimpleNamespace(name="review", model="databricks:system.ai.fixture"))

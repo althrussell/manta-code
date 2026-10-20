@@ -131,7 +131,7 @@ DEFAULT_AGENTS: tuple[AgentDef, ...] = (PLANNING, SWE, REVIEW, CHIEF)
 DEFAULT_AGENT_NAMES: frozenset[str] = frozenset(a.name for a in DEFAULT_AGENTS)
 
 
-def merged_agents(user_agents: list[AgentDef]) -> list[AgentDef]:
+def merged_agents(user_agents: list[AgentDef], *, include_disabled: bool = False) -> list[AgentDef]:
     """Merge built-in defaults with user agents; user agents win by name.
 
     A user can override a built-in (e.g. relax ``review`` to allow a tool) or
@@ -140,4 +140,5 @@ def merged_agents(user_agents: list[AgentDef]) -> list[AgentDef]:
     """
     overridden = {a.name for a in user_agents}
     kept_defaults = [a for a in DEFAULT_AGENTS if a.name not in overridden]
-    return [*kept_defaults, *user_agents]
+    merged = [*kept_defaults, *user_agents]
+    return merged if include_disabled else [agent for agent in merged if agent.enabled]

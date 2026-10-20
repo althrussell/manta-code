@@ -320,6 +320,9 @@ def build_launch_env(
     override an inherited ``MANTA_PROFILE`` in the child process.
     """
     env = dict(os.environ if base_env is None else base_env)
+    env.setdefault("MANTA_ORIGINAL_CWD", str(Path.cwd().resolve()))
+    from .config import project_manta_dir
+    env.setdefault("MANTA_PROJECT_ROOT", str(project_manta_dir().parent.resolve()))
     resolved = resolve_profile(profile)
     if resolved:
         env["MANTA_PROFILE"] = resolved
@@ -653,7 +656,15 @@ def sync_agent_profiles() -> None:
         from .agents.registry import list_agents
 
         clean_legacy_subagents()
-        _sync(merged_agents(list_agents()))
+        result = _sync(merged_agents(list_agents()))
+        if getattr(result, "migrated", []):
+            print(
+                "Manta memory migration: preserved legacy profile notes in backups for "
+                + ", ".join(result.migrated)
+                + ". Role instructions now live separately from learned notes; "
+                "legacy notes remain unassigned for inspection.",
+                file=sys.stderr,
+            )
     except Exception:  # noqa: BLE001 - reliability: launch regardless
         pass
 

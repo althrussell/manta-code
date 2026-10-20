@@ -14,8 +14,13 @@ from manta_code.tasks import executor, store
 @pytest.fixture(autouse=True)
 def _manta_home(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
     for var in ("MANTA_TASK_ID", "MANTA_UNATTENDED", "MANTA_ALLOW_ASKS",
-                "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE"):
+                "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE", "MANTA_TASK_CONFIG_ROOT", "MANTA_PROJECT_ROOT",
+                "MANTA_ORIGINAL_CWD", "DEEPAGENTS_CODE_SERVER_CWD", "DEEPAGENTS_CODE_SERVER_PROJECT_ROOT",
+                "MANTA_TASK_DB_PATH", "MANTA_TASK_DEPTH"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -73,6 +78,8 @@ class _FakeProcess:
 @pytest.fixture()
 def _fake_spawn(monkeypatch):
     spawned = {}
+    from manta_code.tasks import context
+    monkeypatch.setattr(context, "_workspace", lambda profile, config_file: (profile, "https://fixture.databricks.com"))
 
     def fake_popen(argv, **kwargs):
         spawned["argv"] = argv
@@ -315,12 +322,12 @@ def test_budget_reject_ends_turn_gracefully(tmp_path, monkeypatch):
     assert "Stopped at the budget cap" in again.content
 
 
-def test_budget_unattended_logs_event_and_continues(tmp_path, monkeypatch):
+def test_budget_unattended_advisory_logs_event_and_continues(tmp_path, monkeypatch):
     from manta_code.middleware import economy as E
 
     monkeypatch.setenv("MANTA_UNATTENDED", "1")
     mw = E.TokenEconomyMiddleware(
-        agent="swe", max_tokens=10, ledger_path=tmp_path / "u.db"
+        agent="swe", max_tokens=10, ledger_path=tmp_path / "u.db", budget_mode="advisory"
     )
     req = _Request()
 
