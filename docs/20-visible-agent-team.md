@@ -2,9 +2,9 @@
 
 This milestone implements packages **6–8** of the
 [harness review](17-coding-agent-harness-review.md), stacked on the
-[dependable foundations](19-dependable-foundations.md). It is an **unreleased
-source candidate**. Published v0.3.0 does not include these changes; follow the
-[candidate installation instructions](16-installation-and-upgrades.md).
+[dependable foundations](19-dependable-foundations.md). Both milestones ship
+in **v0.4.0**, together with the Gateway picker and Manta branding fixes. Follow
+the [installation and upgrade instructions](16-installation-and-upgrades.md).
 
 ## Create a specialist and assign work
 
@@ -209,7 +209,11 @@ or unrestricted arbitrary repository work.
 Offline tests cover mounted authoring/board controls, actual upstream Textual
 decisions, server restarts, inline sync/async graphs, pending-request races,
 nested programmatic tool approval, integration conflicts, durable scheduling and
-shared CLI/SDK behavior. Final matrix/build results are recorded in the PR.
+shared CLI/SDK behavior. The final source suites passed **1,126 tests each** on
+**Python 3.12.8** and **Python 3.14.5**. The installed wheel passed 41 mounted
+CLI/SDK/integration checks outside the checkout. Ruff, dependency consistency,
+source/wheel integrity and GitHub CI passed; independent reviews found no
+remaining blockers. See the [release notes](releases/v0.4.0.md).
 
 Gateway-only discovery and Manta branding retain their existing regressions.
 Searchable/editable/forgettable project memory, broader multimodal affordances

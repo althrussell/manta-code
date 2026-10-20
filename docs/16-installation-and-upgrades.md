@@ -1,6 +1,6 @@
 # Installation and upgrades
 
-Manta v0.3.0 is distributed as a GitHub release and immutable Git tag, with a
+Manta v0.4.0 is distributed as a GitHub release and immutable Git tag, with a
 wheel, source archive, dependency constraints, release notes, and SHA-256
 checksums. There is no PyPI publishing step in this release process.
 
@@ -9,28 +9,12 @@ CI. All commands below install the `agent` extra, which includes the interactive
 runtime and Databricks support; installing only the base package omits them.
 Examples use Bash unless marked PowerShell.
 
-The dependable-foundations source milestone adds the Manta-owned updater and
-runtime checks described below. The tagged `v0.3.0` commands remain the published
-release baseline; see the [foundation tracker](19-dependable-foundations.md) for
-candidate validation and release status. Installing that existing tag does not
-install unpublished source changes.
-
-The [visible agent team candidate](20-visible-agent-team.md) adds `/agents`
-authoring and `/tasks`, with isolated writable work and explicit integration.
-To test this PR from a local checkout, use its locked dependencies in a separate
-environment and run the candidate's CLI explicitly:
-
-```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements-dev.lock
-uv pip install --python .venv/bin/python --no-deps -e '.[agent,dev]'
-.venv/bin/manta -p my-workspace
-```
-
-These commands use the checked-out branch; they do not select or publish a new
-release. Keep `MANTA_HOME` and `DEEPAGENTS_HOME` separate if you want disposable
-agent/session state while evaluating it. Continue using the normal Databricks
-profile for authentication.
+v0.4.0 includes [dependable foundations](19-dependable-foundations.md), the
+[visible agent team](20-visible-agent-team.md), a Gateway-only Databricks model
+picker, and restored Manta branding. The release includes the Manta-owned updater,
+`/agents` authoring, `/tasks` tracking, isolated detached work and reviewed
+integration. [Measured model efficiency](17-coding-agent-harness-review.md)
+remains the next milestone.
 
 ## Recommended: isolated uv tool
 
@@ -40,61 +24,64 @@ then run:
 ```bash
 uv python install 3.12
 uv tool install --python 3.12 \
-  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
 uv tool update-shell
 manta --version
 ```
 
 Open a new terminal after updating your shell if necessary. The version command
-should print `0.3.0`. The constraints file selects the dependency versions used
+should print `0.4.0`. The constraints file selects the dependency versions used
 for qualification; it does not install the development tools by itself.
 
 ## Upgrade an older installation
 
-On a Manta version with the foundation updater, first check stable GitHub
-releases without modifying packages:
+**v0.3.0 and earlier do not have the Manta-owned updater.** Save your work and
+exit interactive sessions, then replace the tool with the new tag and its
+matching constraints:
+
+```bash
+uv tool install --force --upgrade --python 3.12 \
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
+manta --version
+manta doctor
+```
+
+The version should print `0.4.0`. `uv tool upgrade manta-code` stays within the
+source you originally selected: an installation pinned to `@v0.3.0` does not
+select `@v0.4.0`. For subsequent manual upgrades, change both the package URL's
+tag and the constraints URL's tag. For a pip installation, use the new virtual
+environment instructions below.
+
+Once v0.4.0 or newer is installed, check stable releases without modifying
+packages:
 
 ```bash
 manta update --check
-manta update --check --version v0.3.0
+manta update --check --version v0.4.0
 ```
 
 Save work and exit interactive sessions before installing the chosen release:
 
 ```bash
-manta update --version vMAJOR.MINOR.PATCH
+manta update --version v0.4.0
 manta --version
 manta doctor
 ```
 
-Replace `vMAJOR.MINOR.PATCH` with a published stable tag. Without `--version`,
-`manta update` selects the latest stable release and installs only if newer.
-An explicit tag can reinstall/select that release. The updater detects its own
-uv tool or pip environment, installs `manta-code[agent]` from the immutable tag
-with that tag's full constraints, and preserves installer failures as failures.
-It never upgrades `deepagents-code` independently. `/update` and `--update`
-use the same Manta release contract; `/update` checks and gives the shell action
-so an active session is not replaced underneath you. Start a fresh `manta`
-process after installation; runtime restart paths also re-enter Manta.
+For a later release, replace `v0.4.0` with its published stable tag. Without
+`--version`, `manta update` selects the latest stable release and installs only
+if newer. An explicit tag can reinstall/select that release. The updater detects
+its own uv tool or pip environment, installs `manta-code[agent]` from the
+immutable tag with that tag's full constraints, and preserves installer failures
+as failures. It never upgrades `deepagents-code` independently. `/update` and
+`--update` use the same Manta release contract; `/update` checks and gives the
+shell action so an active session is not replaced underneath you. Start a fresh
+`manta` process after installation; runtime restart paths also re-enter Manta.
 
-For versions without that updater, replace the existing tool explicitly with
-the new tag and a Python 3.12+ environment:
-
-```bash
-uv tool install --force --upgrade --python 3.12 \
-  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
-manta --version
-```
-
-`uv tool upgrade manta-code` upgrades within the source you originally selected.
-If that source is `@v0.2.0`, it does not discover and select `@v0.3.0`. Explicitly
-install the new tag as above. For subsequent releases, change both the tag in
-the package URL and the tag in the constraints URL.
-
-The Python floor increased from 3.11 to 3.12, and the Databricks bridge packages
-were replaced by `langchain-openai` plus the Databricks SDK. A new tool environment
+Since v0.3.0, the Python floor is 3.12 rather than 3.11, and the Databricks
+bridge packages were replaced by `langchain-openai` plus the Databricks SDK. A new tool environment
 avoids retaining the old bridge's MCP 1 dependencies alongside the new runtime's
 MCP 2 stack. The install does not remove your Manta configuration, registry,
 usage ledger, or saved sessions.
@@ -129,15 +116,15 @@ API, or workspace, start a fresh thread with `/clear`.
 
 ## pip in a virtual environment
 
-Use a new environment for this runtime migration:
+Use a separate environment, especially when migrating from a pre-v0.3.0 runtime:
 
 ```bash
-python3.12 -m venv ~/.venvs/manta-0.3.0
-source ~/.venvs/manta-0.3.0/bin/activate
+python3.12 -m venv ~/.venvs/manta-0.4.0
+source ~/.venvs/manta-0.4.0/bin/activate
 python -m pip install --upgrade pip
 python -m pip install \
-  --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+  --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
 python -m pip check
 manta --version
 ```
@@ -145,10 +132,10 @@ manta --version
 On Windows, install Git and Python 3.12, then use PowerShell:
 
 ```powershell
-py -3.12 -m venv "$env:USERPROFILE\.venvs\manta-0.3.0"
-& "$env:USERPROFILE\.venvs\manta-0.3.0\Scripts\Activate.ps1"
+py -3.12 -m venv "$env:USERPROFILE\.venvs\manta-0.4.0"
+& "$env:USERPROFILE\.venvs\manta-0.4.0\Scripts\Activate.ps1"
 python -m pip install --upgrade pip
-python -m pip install --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
+python -m pip install --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
 python -m pip check
 manta --version
 ```
@@ -162,9 +149,9 @@ The GitHub release also provides a wheel for environments that do not use Git.
 With the [GitHub CLI](https://cli.github.com/) installed:
 
 ```bash
-mkdir manta-0.3.0-release
-cd manta-0.3.0-release
-gh release download v0.3.0 --repo althrussell/manta-code
+mkdir manta-0.4.0-release
+cd manta-0.4.0-release
+gh release download v0.4.0 --repo althrussell/manta-code
 if command -v sha256sum >/dev/null; then
   sha256sum --check SHA256SUMS
 else
@@ -179,7 +166,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --constraint requirements-dev.lock \
-  './manta_code-0.3.0-py3-none-any.whl[agent]'
+  './manta_code-0.4.0-py3-none-any.whl[agent]'
 python -m pip check
 manta --version
 ```
@@ -258,8 +245,19 @@ runtime route also reaches upstream `doctor`/`agents` groups shadowed by Manta.
 Help does not synchronize profiles, discover workspace models or call inference.
 
 If resolution reports an MCP 1/MCP 2 conflict, recreate the environment using the
-v0.3.0 commands rather than adding the old Databricks bridge packages.
+v0.4.0 commands rather than adding the old Databricks bridge packages.
 
 For an editable checkout and offline regression tests, follow
 [CONTRIBUTING.md](../CONTRIBUTING.md). `scripts/bootstrap.sh` sets up the locked
-development environment; it is not the end-user installer.
+development environment. To install directly from an existing checkout:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.lock
+uv pip install --python .venv/bin/python --no-deps -e '.[agent,dev]'
+.venv/bin/manta -p my-workspace
+```
+
+These commands use the checked-out revision. Keep `MANTA_HOME` and
+`DEEPAGENTS_HOME` separate for disposable agent/session state while testing.
+Continue using your normal Databricks profile for authentication.

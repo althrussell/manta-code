@@ -96,7 +96,7 @@ class Release:
 
 def check_release(tag: str | None = None) -> Release:
     if tag and not TAG_PATTERN.fullmatch(tag):
-        raise ValueError("Use a stable Manta release tag such as v0.3.0")
+        raise ValueError(f"Use a stable Manta release tag such as v{__version__}")
     suffix = f"tags/{tag}" if tag else "latest"
     request = Request(
         f"https://api.github.com/repos/{REPOSITORY}/releases/{suffix}",

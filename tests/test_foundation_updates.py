@@ -57,6 +57,7 @@ def test_editable_update_preserves_checkout():
 
 
 def test_cli_propagates_installer_failure(monkeypatch):
+    monkeypatch.setattr(updates, "__version__", "0.3.0")
     monkeypatch.setattr(updates, "check_release", lambda tag=None: updates.Release("v0.4.0", "url"))
     monkeypatch.setattr(updates, "install_method", lambda: "pip")
     monkeypatch.setattr(updates, "upgrade", lambda *a: 7)
@@ -266,6 +267,7 @@ def test_unusable_installation_lock_fails_without_installer(monkeypatch, tmp_pat
 
 
 def test_cli_busy_update_reports_refusal_without_installer(monkeypatch, tmp_path):
+    monkeypatch.setattr(updates, "__version__", "0.3.0")
     monkeypatch.setattr(updates, "installation_lock_path", lambda: tmp_path / "installation.lock")
     monkeypatch.setattr(updates, "check_release", lambda tag=None: updates.Release("v0.4.0", "url"))
     monkeypatch.setattr(updates, "install_method", lambda: "pip")
