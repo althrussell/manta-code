@@ -152,9 +152,10 @@ class RequestCollector(BaseCallbackHandler):
             scope = replace(scope, model=requested, scaffold_tokens=0, net_new_tokens=0)
         from dataclasses import replace
         from .agents.usage import effective_pricing, usage_db_path
+        from .tasks.events import _current_task_id
         scope = replace(scope, ledger_path=scope.ledger_path or usage_db_path(),
                         pricing=scope.pricing if scope.pricing is not None else effective_pricing(),
-                        task=scope.task or os.environ.get("MANTA_TASK_ID") or scope.agent)
+                        task=_current_task_id() or scope.task or scope.agent)
         kind = _purpose(metadata, tags or [])
         if kind in {"agent", "helper"}:
             with self._lock:

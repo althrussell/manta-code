@@ -13,7 +13,7 @@ from manta_code import budget_runtime
 @pytest.fixture
 def client(monkeypatch):
     from deepagents_code.client import non_interactive as client
-    for name in ("_process_hitl_interrupts", "_stream_agent", "generate_thread_id"):
+    for name in ("_process_hitl_interrupts", "_process_interrupts", "_stream_agent", "generate_thread_id"):
         monkeypatch.setattr(client, name, getattr(client, name))
     # Other tests/doctor may have installed an adapter already. Remove only its
     # marker so this isolated instance can wrap the stubbed upstream functions.

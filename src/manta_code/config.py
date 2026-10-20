@@ -40,9 +40,7 @@ class RuntimeConfig(BaseModel):
 
 class InteractiveConfig(BaseModel):
     default_endpoint: str = ROLE_TARGETS["orchestrator"]
-    extra_endpoints: list[str] = Field(
-        default_factory=extra_role_targets
-    )
+    extra_endpoints: list[str] = Field(default_factory=extra_role_targets)
 
 
 class BudgetConfig(BaseModel):
@@ -97,7 +95,11 @@ def project_manta_dir(root: Path | None = None) -> Path:
     if root is None:
         hint = os.environ.get("MANTA_PROJECT_ROOT")
         cwd = Path.cwd().resolve()
-        root = Path(hint) if hint else next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), cwd)
+        root = (
+            Path(hint)
+            if hint
+            else next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), cwd)
+        )
     return root / ".manta"
 
 
@@ -133,6 +135,10 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def load_config(root: Path | None = None) -> MantaConfig:
+    # Detached tasks run inside an isolated checkout but keep the reviewed
+    # project configuration. The task manifest validates its digest on restore.
+    if root is None and os.environ.get("MANTA_TASK_CONFIG_ROOT"):
+        root = Path(os.environ["MANTA_TASK_CONFIG_ROOT"])
     user_cfg = load_toml(user_manta_dir() / "config.toml")
     project_cfg = load_toml(project_manta_dir(root) / "config.toml")
     merged = deep_merge(user_cfg, project_cfg)

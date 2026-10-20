@@ -467,14 +467,14 @@ class TokenEconomyMiddleware(AgentMiddleware):
         try:
             from ..tasks.store import EventRecord, record_event
 
-            import os
+            from ..tasks.events import _current_task_id
 
             record_event(
                 EventRecord(
                     agent=self._agent,
                     kind="budget",
                     detail=description[:200],
-                    task_id=os.environ.get("MANTA_TASK_ID") or None,
+                    task_id=_current_task_id(),
                 )
             )
         except Exception:  # noqa: BLE001
@@ -492,9 +492,9 @@ class TokenEconomyMiddleware(AgentMiddleware):
             # Task attribution (ADR 0010 Phase C): background tasks export
             # MANTA_TASK_ID, so their spend is drillable per task — not just
             # per agent. Interactive sessions fall back to the agent label.
-            import os
+            from ..tasks.events import _current_task_id
 
-            task = os.environ.get("MANTA_TASK_ID") or self._agent
+            task = _current_task_id() or self._agent
             record = record_model_response(
                 getattr(request, "model", None), message,
                 agent=self._agent, task=task, thread_id=thread,

@@ -14,8 +14,13 @@ from manta_code.tasks import executor, store
 @pytest.fixture(autouse=True)
 def _manta_home(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
     for var in ("MANTA_TASK_ID", "MANTA_UNATTENDED", "MANTA_ALLOW_ASKS",
-                "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE"):
+                "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE", "MANTA_TASK_CONFIG_ROOT", "MANTA_PROJECT_ROOT",
+                "MANTA_ORIGINAL_CWD", "DEEPAGENTS_CODE_SERVER_CWD", "DEEPAGENTS_CODE_SERVER_PROJECT_ROOT",
+                "MANTA_TASK_DB_PATH", "MANTA_TASK_DEPTH"):
         monkeypatch.delenv(var, raising=False)
 
 

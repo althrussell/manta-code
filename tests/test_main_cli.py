@@ -145,7 +145,9 @@ def test_agents_create_and_delete_round_trip(monkeypatch, tmp_path):
 
     deleted = runner.invoke(app, ["agents", "delete", "data-reviewer", "--yes"])
     assert deleted.exit_code == 0
-    assert runner.invoke(app, ["agents", "show", "data-reviewer"]).exit_code == 1
+    assert "disabled" in runner.invoke(app, ["agents", "show", "data-reviewer"]).stdout
+    from manta_code.agents.workspace import AgentWorkspace
+    assert "data-reviewer" not in {value.name for value in AgentWorkspace().list()}
 
 
 def test_agents_memory_add_show_clear(monkeypatch, tmp_path):
@@ -401,14 +403,18 @@ def test_task_cli_routes_to_typer():
 
 def test_task_submit_and_lifecycle_cli(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
-    from manta_code.tasks import executor
+    from manta_code.tasks import executor, isolation, store
     from manta_code.tasks import context
     monkeypatch.setattr(context, "_workspace", lambda profile, config_file: (profile, "https://fixture.databricks.com"))
 
-    class _Proc:
-        pid = 4242
+    monkeypatch.setattr(isolation, "prepare", lambda task_id, manifest, mode: manifest)
 
-    monkeypatch.setattr(executor.subprocess, "Popen", lambda *a, **k: _Proc())
+    def spawn(record, **kwargs):
+        store.update_task(record.id, state="running", pid=4242, expect_state="starting")
+        return store.get_task(record.id)
+
+    monkeypatch.setattr(executor, "_spawn_task", spawn)
+    monkeypatch.setattr(executor.os, "killpg", lambda *args: None)
 
     result = runner.invoke(app, ["task", "submit", "swe", "fix the flaky test"])
     assert result.exit_code == 0
@@ -421,7 +427,7 @@ def test_task_submit_and_lifecycle_cli(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["task", "status", task_id])
     assert result.exit_code == 0
-    assert "queued" in result.stdout
+    assert "running" in result.stdout
 
     result = runner.invoke(app, ["task", "cancel", task_id])
     assert result.exit_code == 0

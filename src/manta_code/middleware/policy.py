@@ -22,7 +22,7 @@ _FS_TOOL_OPERATIONS: dict[str, Literal["read", "write"]] = {
 # effects via metadata; names such as get_* are deliberately not guessed safe.
 _READ_TOOLS = frozenset({
     "read_file", "ls", "glob", "grep", "write_todos", "ask_user", "ask_user_question",
-    "compact_conversation", "update_goal", "manta_remember", "manta_task_status", "manta_task_output", "manta_task_list",
+    "compact_conversation", "update_goal", "manta_remember", "manta_request_input", "manta_task_artifact", "manta_task_review", "manta_task_status", "manta_task_output", "manta_task_list",
     "uc_list_catalogs", "uc_list_schemas", "uc_list_tables", "uc_describe_table",
     "uc_table_lineage", "sql_query", "list_jobs", "get_run_status", "get_run_diagnostics",
 })
@@ -186,7 +186,8 @@ class ToolPolicyMiddleware(AgentMiddleware):
         if tool_name not in self._ask:
             return None
         from ..tasks.events import unattended_run
-        if not unattended_run() or os.environ.get("MANTA_ALLOW_ASKS", "").strip() == "1":
+        from ..tasks.approvals import managed_task
+        if not unattended_run() or managed_task() or os.environ.get("MANTA_ALLOW_ASKS", "").strip() == "1":
             return None
         return (f"'{tool_name}' requires human approval and this is an unattended run "
                 "(ask-gated tools fail closed). Resubmit with --allow-asks to pre-approve.")

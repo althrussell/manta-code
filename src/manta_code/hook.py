@@ -249,7 +249,7 @@ def _assemble_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     definition = _active_profile_def()
     role = definition.name if definition else "orchestrator"
     if "model" in candidate:
-        candidate["model"] = model_for_agent(candidate["model"], role)
+        candidate["model"] = model_for_agent(candidate["model"], role, definition=definition)
     inherited = list(kwargs.get("tools") or ())
     native = build_databricks_tools()
     extra_tools = [*native, *build_task_tools(), *build_memory_tools(definition)]
@@ -282,7 +282,12 @@ def _assemble_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         if isinstance(spec, dict) and "runnable" not in spec:
             inherited_model = spec.get("model", candidate.get("model"))
             if inherited_model is not None:
-                spec["model"] = model_for_agent(inherited_model, spec["name"])
+                from .agents.workspace import AgentWorkspace
+                try:
+                    child_definition = AgentWorkspace().resolve(spec["name"])
+                except FileNotFoundError:
+                    child_definition = None
+                spec["model"] = model_for_agent(inherited_model, spec["name"], definition=child_definition)
     orchestrator = build_orchestrator_middleware()
     upstream = middleware_for_agent(list(kwargs.get("middleware") or ()), role)
     configurable = [m for m in upstream if type(m).__name__ == "ConfigurableModelMiddleware"]
@@ -295,6 +300,7 @@ def _assemble_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         other = install_approval_gates(other, {**(kwargs.get("interrupt_on") or {}), **gates})
         candidate["interrupt_on"] = {}
     dispatch = RuntimeDispatchMiddleware(agent=definition.name if definition else "orchestrator", interrupt_on=gates)
+    dispatch.definition = definition
     dispatch.databricks_selection = list(definition.databricks_tools) if definition else ["auto"]
     stack = [*configurable, *events, dispatch, *control, *other, SessionPolicyMiddleware(), *economy]
     for mw in stack:

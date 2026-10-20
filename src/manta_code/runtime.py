@@ -22,6 +22,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode, ToolRuntime
 from .middleware.policy import ToolPolicyMiddleware, tool_effect
 
 _RUNTIME_KEY = "__manta_programmatic_runtime"
+_SYNC_DISPATCH_KEY = "__manta_programmatic_sync_graph"
 _LAST_MANIFEST: dict[str, Any] | None = None
 _LAUNCH_POLICY: ContextVar[dict[str, Any] | None] = ContextVar("manta_launch_policy", default=None)
 
@@ -39,16 +40,73 @@ def launch_memory_enabled() -> bool:
     return os.environ.get("DEEPAGENTS_CODE_SERVER_ENABLE_MEMORY", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def model_for_agent(model: Any, agent: str) -> Any:
+def _model_control_signature(model: Any) -> Any:
+    # Metadata may contain locks, callbacks or clients. Snapshot ordinary
+    # control containers while retaining opaque runtime objects by identity.
+    def snapshot(value: Any, seen: frozenset[int] = frozenset()) -> Any:
+        if value is None or type(value) in (str, int, float, bool, bytes):
+            return value
+        if id(value) in seen:
+            return ("opaque", id(value))
+        seen = seen | {id(value)}
+        if type(value) is dict:
+            return ("dict", tuple((snapshot(k, seen), snapshot(v, seen)) for k, v in value.items()))
+        if type(value) in (list, tuple):
+            return (type(value).__name__, tuple(snapshot(item, seen) for item in value))
+        if type(value) in (set, frozenset):
+            return ("set", frozenset(snapshot(item, seen) for item in value))
+        return ("opaque", id(value))
+
+    keys = ("reasoning", "reasoning_effort", "max_tokens", "max_output_tokens", "max_completion_tokens")
+    controls = {key: getattr(model, key, None) for key in ("metadata", "profile", *keys)}
+    if hasattr(model, "bound"):
+        controls["bound"] = _model_control_signature(model.bound)
+        controls["kwargs"] = {key: value for key, value in model.kwargs.items() if key in keys}
+    return snapshot(controls)
+
+
+def model_for_agent(model: Any, agent: str, *, definition: Any = None) -> Any:
     """Shallow-copy model identity without copying clients or changing a peer."""
     from langchain_core.language_models import BaseChatModel
     from langchain_core.runnables.base import RunnableBindingBase
     if isinstance(model, BaseChatModel):
-        if (model.metadata or {}).get("manta_agent") == agent:
+        updates = {"metadata": {**(model.metadata or {}), "manta_agent": agent}}
+        profile = model.profile or {}
+        effort = getattr(definition, "reasoning_effort", None)
+        output = getattr(definition, "max_output_tokens", None)
+        fields = type(model).model_fields
+        if effort is not None:
+            levels = profile.get("reasoning_effort_levels")
+            if levels is not None and effort not in levels:
+                raise RuntimeBuildError(f"{agent}: model does not support reasoning effort {effort!r}; supported: {levels}")
+            if "reasoning_effort" not in fields:
+                raise RuntimeBuildError(f"{agent}: model adapter has no reasoning effort control")
+            updates["reasoning_effort"] = effort
+            if getattr(model, "reasoning", None):
+                updates["reasoning"] = {k: v for k, v in model.reasoning.items() if k != "effort"}
+        if output is not None:
+            maximum = profile.get("max_output_tokens")
+            if maximum and output > maximum:
+                raise RuntimeBuildError(f"{agent}: output limit {output} exceeds model limit {maximum}")
+            key = next((key for key in ("max_tokens", "max_output_tokens") if key in fields), None)
+            if key is None:
+                raise RuntimeBuildError(f"{agent}: model adapter has no output limit control")
+            updates[key] = output
+        if all(getattr(model, key, None) == value for key, value in updates.items()):
             return model
-        return model.model_copy(update={"metadata": {**(model.metadata or {}), "manta_agent": agent}})
+        return model.model_copy(update=updates)
     if isinstance(model, RunnableBindingBase):
-        return model.model_copy(update={"bound": model_for_agent(model.bound, agent)})
+        kwargs = dict(model.kwargs)
+        effort = getattr(definition, "reasoning_effort", None)
+        output = getattr(definition, "max_output_tokens", None)
+        if effort is not None:
+            kwargs.pop("reasoning_effort", None)
+            if isinstance(kwargs.get("reasoning"), dict):
+                kwargs["reasoning"] = {k: v for k, v in kwargs["reasoning"].items() if k != "effort"}
+        if output is not None:
+            for key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+                kwargs.pop(key, None)
+        return model.model_copy(update={"bound": model_for_agent(model.bound, agent, definition=definition), "kwargs": kwargs})
     return model
 
 
@@ -124,6 +182,48 @@ def tool_node(graph: Any) -> ToolNode:
     return bound
 
 
+def _normalize_checkpoint_context(graph: Any) -> None:
+    """Keep inherited ``checkpoint_id=None`` from turning resume into replay.
+
+    LangGraph tool runtimes use a null checkpoint ID to select the latest
+    checkpoint. Its graph loop currently treats the *presence* of that key as
+    replay, which skips completed functional task results in a resumed child.
+    Normalize only that sentinel at this graph's checkpoint boundary; explicit
+    checkpoint IDs retain LangGraph's replay behavior. Bind the actual compiled
+    graph after SDK subagent copies have been created.
+    """
+    import functools
+
+    original = getattr(graph, "_own_checkpoint_config", None)
+    if not callable(original):
+        raise RuntimeBuildError("Compiled graph has no checkpoint context boundary; durable programmatic dispatch cannot be verified.")
+    if getattr(original, "__manta_checkpoint_context__", False):
+        return
+
+    @functools.wraps(original)
+    def normalize(config: RunnableConfig) -> RunnableConfig:
+        resolved = original(config)
+        configurable = resolved.get("configurable", {})
+        if "checkpoint_id" in configurable and configurable["checkpoint_id"] is None:
+            return {**resolved, "configurable": {k: v for k, v in configurable.items() if k != "checkpoint_id"}}
+        return resolved
+
+    normalize.__manta_checkpoint_context__ = True
+    graph._own_checkpoint_config = normalize
+    original_copy = getattr(graph, "copy", None)
+    if callable(original_copy):
+        @functools.wraps(original_copy)
+        def copy_graph(*args: Any, **kwargs: Any) -> Any:
+            # dcode applies recursion controls with graph.copy() after the
+            # build hook, and Deep Agents uses with_config() for supplied
+            # children. Pregel reconstructs copies and drops instance methods.
+            copied = original_copy(*args, **kwargs)
+            _normalize_checkpoint_context(copied)
+            return copied
+
+        graph.copy = copy_graph
+
+
 def child_graphs(node: ToolNode) -> dict[str, Any]:
     """Read SDK task closure's compiled graphs, without executing a tool."""
     task = node.tools_by_name.get("task")
@@ -155,6 +255,8 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
                  interrupt_on: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.agent = agent
+        self.definition: Any = None
+        self._configured_models: dict[int, tuple[Any, Any, Any]] = {}
         self.databricks_selection: list[str] | None = None
         self._node: ToolNode | None = None
         self._middleware = list(middleware or ())
@@ -198,6 +300,7 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
 
     def bind(self, graph: Any) -> None:
         self._node = tool_node(graph)
+        _normalize_checkpoint_context(graph)
         if not self._explicit_ptc_names <= self._node.tools_by_name.keys():
             raise RuntimeBuildError(f"{self.agent}: explicit programmatic tools are absent from actual ToolNode")
         if self._interpreter_names and not self._interpreter_names <= self._node.tools_by_name.keys():
@@ -237,6 +340,21 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
                               func=invoke, coroutine=ainvoke, metadata=tool.metadata)
 
     def _prepare_model(self, request: Any) -> Any:
+        if self.definition is not None:
+            model = request.model
+            key = id(model)
+            signature = (_model_control_signature(model),
+                         getattr(self.definition, "reasoning_effort", None),
+                         getattr(self.definition, "max_output_tokens", None))
+            entry = self._configured_models.get(key)
+            if entry is None or entry[0] is not model or entry[1] != signature:
+                configured = model_for_agent(model, self.agent, definition=self.definition)
+                self._configured_models[key] = (model, signature, configured)
+                if len(self._configured_models) > 16:
+                    del self._configured_models[next(iter(self._configured_models))]
+            else:
+                configured = entry[2]
+            request = request.override(model=configured)
         if not self._interpreter_names:
             return request
         # Ordinary model tools retain their schemas; only the interpreter's raw
@@ -246,21 +364,47 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
     def wrap_model_call(self, request: Any, handler: Callable) -> Any:
         return handler(self._prepare_model(request))
 
+    def before_model(self, state: Any, runtime: Any) -> dict | None:
+        from .tasks.inline import CURRENT_INLINE_TASK
+        from .middleware.inbox import InboxMiddleware
+        task_id = CURRENT_INLINE_TASK.get()
+        return InboxMiddleware(task_id=task_id).before_model(state, runtime) if task_id else None
+
+    async def abefore_model(self, state: Any, runtime: Any) -> dict | None:
+        return self.before_model(state, runtime)
+
     async def awrap_model_call(self, request: Any, handler: Callable) -> Any:
         return await handler(self._prepare_model(request))
 
-    def _prepare_tool(self, request: Any) -> Any:
+    def _prepare_tool(self, request: Any, *, asynchronous: bool) -> Any:
         if request.tool_call.get("name") not in self._interpreter_names:
             return request
         runtime = request.runtime
         tools = [self._proxy(t) for t in runtime.tools]
-        return request.override(runtime=dataclasses.replace(runtime, tools=tools))
+        for middleware in self._middleware:
+            if (not _is_interpreter(middleware) or middleware._ptc is None
+                    or request.tool_call["name"] not in {tool.name for tool in middleware.tools}):
+                continue
+            from langchain_quickjs._ptc import filter_tools_for_ptc
+
+            # A checkpoint can resume directly at js_eval in a fresh server,
+            # without running the model hook that normally binds PTC tools.
+            # Rebuild that ephemeral binding from this graph's guarded tools.
+            exposed = filter_tools_for_ptc(tools, middleware._ptc, self_tool_name=request.tool_call["name"])
+            slot_id = middleware._slot_id(runtime.state)
+            middleware._registry.get(slot_id).install_tools(exposed)
+            middleware._ptc_tools_by_slot[slot_id] = tuple(exposed)
+        # QuickJS uses an async bridge even for a synchronous graph. Preserve
+        # the owning graph's scheduler kind across its worker-loop boundary.
+        return request.override(runtime=dataclasses.replace(
+            runtime, tools=tools, config={**runtime.config, _SYNC_DISPATCH_KEY: not asynchronous},
+        ))
 
     def wrap_tool_call(self, request: Any, handler: Callable) -> Any:
-        return handler(self._prepare_tool(request))
+        return handler(self._prepare_tool(request, asynchronous=False))
 
     async def awrap_tool_call(self, request: Any, handler: Callable) -> Any:
-        return await handler(self._prepare_tool(request))
+        return await handler(self._prepare_tool(request, asynchronous=True))
 
     def _dispatch(self, tool: BaseTool, positional: tuple, args: dict, config: dict,
                   *, asynchronous: bool) -> Any:
@@ -269,7 +413,8 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
             raise RuntimeBuildError("Programmatic tool dispatch has no validated graph runtime; execution refused.")
         if positional:
             raise RuntimeBuildError("Programmatic dispatch requires named, schema-validated arguments.")
-        clean_config = {k: v for k, v in runtime.config.items() if k != _RUNTIME_KEY}
+        synchronous_graph = bool(runtime.config.get(_SYNC_DISPATCH_KEY))
+        clean_config = {k: v for k, v in runtime.config.items() if k not in {_RUNTIME_KEY, _SYNC_DISPATCH_KEY}}
         clean_config["configurable"] = {k: v for k, v in clean_config.get("configurable", {}).items() if k != _RUNTIME_KEY}
         call_id = f"manta-js-{uuid.uuid4().hex}"
         runtime = dataclasses.replace(runtime, config=clean_config, tool_call_id=call_id)
@@ -279,7 +424,7 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
         # it never reaches the approval prompt or the real tool.
         blocked = any(policy._blocked(request) is not None for policy in self._policies)
         if asynchronous:
-            return self._durable_adispatch(request, blocked)
+            return self._durable_adispatch(request, blocked, synchronous_graph=synchronous_graph)
         if request.runtime.config.get("configurable", {}).get("__pregel_scratchpad") is not None:
             from langgraph.func import task
             @task(name=f"manta_programmatic_{self.agent}_{tool.name}")
@@ -288,10 +433,24 @@ class RuntimeDispatchMiddleware(AgentMiddleware):
             return durable().result()
         return self._sdispatch(request, blocked)
 
-    async def _durable_adispatch(self, request: Any, blocked: bool) -> Any:
+    async def _durable_adispatch(self, request: Any, blocked: bool, *, synchronous_graph: bool = False) -> Any:
         if request.runtime.config.get("configurable", {}).get("__pregel_scratchpad") is None:
             return await self._adispatch(request, blocked)
         from langgraph.func import task
+        if synchronous_graph:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+
+            @task(name=f"manta_programmatic_{self.agent}_{request.tool_call['name']}")
+            def durable_sync() -> Any:
+                # The sync graph runs this task in its executor. Execute the
+                # async tool on the bridge loop with the durable task context,
+                # while its caller awaits without blocking that event loop.
+                return asyncio.run_coroutine_threadsafe(self._adispatch(request, blocked), loop).result()
+
+            return await asyncio.wrap_future(durable_sync())
+
         @task(name=f"manta_programmatic_{self.agent}_{request.tool_call['name']}")
         async def durable() -> Any:
             return await self._adispatch(request, blocked)

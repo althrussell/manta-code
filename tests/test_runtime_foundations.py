@@ -178,7 +178,7 @@ def test_real_dcode_composition_manifest_global_fs_and_no_memory(monkeypatch, is
         manifest = last_effective_manifest()
         assert manifest["validated"]
         helper = next(a for a in manifest["agents"] if a["name"] == "helper")
-        assert {t["name"] for t in helper["tools"]} == {"read_file", "glob", "grep"}
+        assert {t["name"] for t in helper["tools"]} == {"read_file", "glob", "grep", "manta_request_input"}
         assert helper["databricks_tools"] == []
         assert "ServerHooksMiddleware" in helper["middleware"]
         assert "CodeModelRetryMiddleware" in helper["middleware"]

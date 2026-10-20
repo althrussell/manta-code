@@ -44,6 +44,8 @@ TASK_TOOL_NAMES: tuple[str, ...] = (
     "manta_task_list",
     "manta_task_send",
     "manta_task_cancel",
+    "manta_task_review",
+    "manta_task_artifact",
 )
 
 
@@ -93,23 +95,36 @@ def _interrupt_on(defn: AgentDef) -> dict[str, Any]:
 
 
 def _runtime_interrupt_on(defn: AgentDef) -> dict[str, Any]:
-    """ASK is enforced by policy; unattended preapproval must not hang HITL."""
+    """Managed tasks checkpoint real decisions; legacy headless stays explicit."""
+    import os
+    from ..tasks.approvals import managed_task
     from ..tasks.events import unattended_run
-    return {name: {"allowed_decisions": ["approve", "reject"], "when": lambda request: not unattended_run()}
+
+    def required(name: str):
+        def predicate(request: Any) -> bool:
+            if managed_task():
+                # ASK preapproval never waives an explicit approval policy.
+                return name in defn.approval or os.environ.get("MANTA_ALLOW_ASKS", "").strip() != "1"
+            return not unattended_run()
+        return predicate
+
+    return {name: {"allowed_decisions": ["approve", "reject"], "when": required(name)}
             for name in _interrupt_on(defn)}
 
 
 def native_interrupt_on(tools: list[Any], *, primary: bool = False) -> dict[str, Any]:
     """Approval for native mutations added after dcode builds its tool map."""
     from ..runtime import current_launch_policy
+    from ..tasks.approvals import managed_task
     launch = current_launch_policy() or {}
-    if launch.get("auto_approve") or not any(getattr(tool, "name", "") == "run_job" for tool in tools):
+    managed = managed_task()
+    if (launch.get("auto_approve") and not managed) or not any(getattr(tool, "name", "") == "run_job" for tool in tools):
         return {}
     from deepagents_code.agent import _interrupt_predicate
     return {"run_job": {
         "allowed_decisions": ["approve", "reject"],
         "description": "Trigger a Databricks job run.",
-        "when": _interrupt_predicate(auto_mode_enabled=bool(primary and launch.get("auto_mode_enabled"))),
+        "when": (lambda request: True) if managed else _interrupt_predicate(auto_mode_enabled=bool(primary and launch.get("auto_mode_enabled"))),
     }}
 
 
@@ -168,6 +183,7 @@ def compile_subagent(
         "name": defn.name,
         "description": defn.description,
         "system_prompt": defn.system_prompt,
+        "mode": defn.context_mode,
     }
     if defn.model:
         subagent["model"] = defn.model
@@ -251,7 +267,7 @@ def compose_subagent(spec: dict[str, Any], *, template: dict[str, Any] | None,
             if resolved is not None:
                 result["model"] = resolved
     if "model" in result:
-        result["model"] = model_for_agent(result["model"], defn.name)
+        result["model"] = model_for_agent(result["model"], defn.name, definition=defn)
     selected_tools = select_agent_tools(defn, inherited_tools)
     upstream = []
     gates = {**native_interrupt_on(selected_tools), **_runtime_interrupt_on(defn)}
@@ -278,6 +294,7 @@ def compose_subagent(spec: dict[str, Any], *, template: dict[str, Any] | None,
         if isinstance(mw, ToolPolicyMiddleware):
             mw.bind_scope(backend)
     dispatch = RuntimeDispatchMiddleware(agent=defn.name, interrupt_on=_runtime_interrupt_on(defn))
+    dispatch.definition = defn
     mws.insert(len(events), dispatch)
     dispatch.configure(mws, gates)
     result["middleware"] = mws

@@ -27,6 +27,8 @@ transport limits.
   shared exact-target capability controls, context/effort limits and live evidence.
 - [19-dependable-foundations.md](19-dependable-foundations.md) — packages 1–5
   implementation, user workflows, acceptance evidence and remaining validation.
+- [20-visible-agent-team.md](20-visible-agent-team.md) — packages 6–8: agent
+  authoring, isolated work, durable human decisions and the unified task board.
 
 ## Architecture decision records
 
