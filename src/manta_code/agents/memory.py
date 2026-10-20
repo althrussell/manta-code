@@ -20,17 +20,20 @@ privacy-first:
   so agents don't read each other's context unless they share a namespace.
 - **Recall, not pollution:** :class:`AgentMemoryMiddleware` injects an agent's
   remembered notes into the system prompt only when present, and never writes —
-  writing is explicit (the ``manta agents memory --add`` path / future tools),
+  writing is explicit (the ``manta agents memory --add`` path or ``manta_remember``),
   keeping curation under control.
 
-Everything is guarded so a missing store or an upstream API change degrades to
-"no memory" rather than blocking a launch.
+Store access during recall is best-effort. Construction errors propagate so a
+launch never claims enabled memory when its middleware or tools are missing.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+import json
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,46 @@ from ..config import user_manta_dir
 
 #: Where the durable memory store lives.
 MEMORY_DB_PATH = Path(".state") / "memory.db"
+MEMORY_SCHEMA_VERSION = 2
+
+
+def _migrate_legacy_notes(conn: sqlite3.Connection, db_path: Path) -> None:
+    """Keep old notes inspectable without guessing their original project.
+
+    The SQLite backup is a recoverable snapshot, made before modifying legacy
+    values. The transaction makes repeat/concurrent launches idempotent.
+    """
+    rows = conn.execute("SELECT prefix, key, value FROM store").fetchall()
+    legacy = []
+    for prefix, key, raw in rows:
+        value = json.loads(raw)
+        if isinstance(value, dict) and "text" in value and "_manta" not in value:
+            legacy.append((prefix, key, raw, value))
+    if not legacy:
+        return
+    backup = db_path.with_name(db_path.name + ".pre-v2.bak")
+    if not backup.exists():
+        with sqlite3.connect(backup) as dest:
+            conn.backup(dest)
+    backup.chmod(0o600)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for prefix, key, raw, value in legacy:
+            value["_manta"] = {
+                "schema_version": MEMORY_SCHEMA_VERSION,
+                "scope": "legacy-unassigned",
+                "source": "legacy-sqlite",
+                "original_namespace": prefix,
+            }
+            # Preserve original content and timestamps, including on retries.
+            conn.execute(
+                "UPDATE store SET value=? WHERE prefix=? AND key=? AND value=?",
+                (json.dumps(value), prefix, key, raw),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 # --- redaction ------------------------------------------------------------
 
@@ -141,8 +184,13 @@ def open_store(path: Path | None = None) -> Any:
     # manages its own BEGIN/COMMIT (the default sqlite3 implicit transaction
     # would otherwise collide with the store's explicit BEGIN).
     conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
+    db_path.chmod(0o600)
     inner = SqliteStore(conn)
     inner.setup()
+    from ..state_lock import state_lock
+
+    with state_lock(db_path.with_name(db_path.name + ".migration.lock")):
+        _migrate_legacy_notes(conn, db_path)
     return _redacting_store_class()(inner)
 
 
@@ -151,6 +199,7 @@ def open_store(path: Path | None = None) -> Any:
 #: the recall middleware reads it directly instead.
 _SHARED_STORE: Any | None = None
 _SHARED_STORE_TRIED = False
+_SHARED_STORE_PATH: Path | None = None
 
 
 def shared_memory_store() -> Any | None:
@@ -161,14 +210,19 @@ def shared_memory_store() -> Any | None:
     rather than raising. The underlying connection uses
     ``check_same_thread=False`` so the langgraph server's worker threads share it.
     """
-    global _SHARED_STORE, _SHARED_STORE_TRIED  # noqa: PLW0603
+    global _SHARED_STORE, _SHARED_STORE_TRIED, _SHARED_STORE_PATH  # noqa: PLW0603
+    path = user_manta_dir() / MEMORY_DB_PATH
+    if _SHARED_STORE_PATH != path:
+        _SHARED_STORE = None
+        _SHARED_STORE_TRIED = False
+        _SHARED_STORE_PATH = path
     if _SHARED_STORE is not None:
         return _SHARED_STORE
     if _SHARED_STORE_TRIED:
         return None
     _SHARED_STORE_TRIED = True
     try:
-        _SHARED_STORE = open_store()
+        _SHARED_STORE = open_store(path)
     except Exception:  # noqa: BLE001
         _SHARED_STORE = None
     return _SHARED_STORE
@@ -183,21 +237,38 @@ def memory_namespace(defn: Any) -> tuple[str, str]:
     return ("memories", ns)
 
 
-def write_memory(store: Any, namespace: tuple[str, str], key: str, text: str) -> None:
+def write_memory(
+    store: Any, namespace: tuple[str, str], key: str, text: str,
+    *, source: str = "explicit-note", agent: str | None = None,
+) -> None:
     """Write a memory note (redaction is enforced by the store wrapper)."""
-    store.put(namespace, key, {"text": text})
+    store.put(namespace, key, {"text": text, "_manta": {
+        "schema_version": MEMORY_SCHEMA_VERSION,
+        "scope": "shared-agent" if agent and agent != namespace[-1] else "agent",
+        "namespace": namespace[-1], "agent": agent or namespace[-1],
+        "source": source, "created_at": time.time(),
+    }})
 
 
-def read_memories(store: Any, namespace: tuple[str, str], *, limit: int = 50) -> list[str]:
-    """Return remembered note texts for a namespace (most-relevant first)."""
+def read_memories(
+    store: Any, namespace: tuple[str, str], *, limit: int = 50,
+    include_legacy: bool = True,
+) -> list[str]:
+    """Return notes for inspection; recall explicitly excludes unassigned notes."""
     try:
         items = store.search(namespace, limit=limit)
     except Exception:  # noqa: BLE001
         return []
     texts: list[str] = []
     for item in items:
-        value = getattr(item, "value", None) or {}
-        text = value.get("text") if isinstance(value, dict) else None
+        value = getattr(item, "value", None)
+        if not isinstance(value, dict):
+            continue
+        metadata = value.get("_manta")
+        scope = metadata.get("scope") if isinstance(metadata, dict) else None
+        if not include_legacy and scope in (None, "legacy-unassigned"):
+            continue
+        text = value.get("text")
         if text:
             texts.append(str(text))
     return texts
@@ -214,6 +285,19 @@ def clear_memories(store: Any, namespace: tuple[str, str]) -> int:
         key = getattr(item, "key", None)
         if key is not None:
             store.delete(namespace, key)
+            count += 1
+    return count
+
+
+def legacy_memory_count(store: Any, namespace: tuple[str, str]) -> int:
+    """Number of preserved unassigned notes, for a visible migration notice."""
+    count = 0
+    for item in store.search(namespace, limit=10000):
+        value = getattr(item, "value", None)
+        if not isinstance(value, dict) or not value.get("text"):
+            continue
+        metadata = value.get("_manta")
+        if not isinstance(metadata, dict) or metadata.get("scope") == "legacy-unassigned":
             count += 1
     return count
 
@@ -246,7 +330,7 @@ def _agent_memory_middleware_class() -> type:
             return self._store if self._store is not None else shared_memory_store()
 
         def _recall_block(self, store: Any) -> str | None:
-            notes = read_memories(store, self._namespace, limit=20)
+            notes = read_memories(store, self._namespace, limit=20, include_legacy=False)
             if not notes:
                 return None
             bullets = "\n".join(f"- {n}" for n in notes)
@@ -289,16 +373,13 @@ def agent_memory_middleware(defn: Any, store: Any | None = None) -> Any | None:
 
     Called by the build hook when compiling each agent. ``store`` is an optional
     explicit store (used in tests); when omitted the middleware reads the
-    per-process :func:`shared_memory_store` at call time. Guarded so a langchain
-    API change degrades to "no memory middleware" rather than breaking the agent.
+    per-process :func:`shared_memory_store` at call time. Construction errors
+    propagate so callers can verify that enabled memory is installed.
     """
     if not getattr(defn, "memory", False):
         return None
-    try:
-        cls = _agent_memory_middleware_class()
-        return cls(memory_namespace(defn), store=store)
-    except Exception:  # noqa: BLE001
-        return None
+    cls = _agent_memory_middleware_class()
+    return cls(memory_namespace(defn), store=store)
 
 
 def orchestrator_memory_middleware(store: Any | None = None) -> Any | None:
@@ -308,11 +389,8 @@ def orchestrator_memory_middleware(store: Any | None = None) -> Any | None:
     writes durable session learnings, so bare sessions compound too — not
     just the named agents.
     """
-    try:
-        cls = _agent_memory_middleware_class()
-        return cls(("memories", "orchestrator"), store=store)
-    except Exception:  # noqa: BLE001
-        return None
+    cls = _agent_memory_middleware_class()
+    return cls(("memories", "orchestrator"), store=store)
 
 
 # --- self-writing memory (ADR 0012) ------------------------------------------
@@ -326,8 +404,11 @@ def _active_memory_namespace() -> tuple[str, str]:
     ``orchestrator`` namespace.
     """
     try:
-        from ..hook import active_agent_name
+        from ..hook import _active_profile_def, active_agent_name
 
+        defn = _active_profile_def()
+        if defn is not None:
+            return memory_namespace(defn)
         return ("memories", active_agent_name() or "orchestrator")
     except Exception:  # noqa: BLE001
         return ("memories", "orchestrator")
@@ -341,26 +422,46 @@ def manta_remember(note: str) -> str:
     automatically at the start of future sessions. Secrets are redacted on
     write. Keep each note short and self-contained.
     """
+    from ..hook import _active_profile_def
+    from ..runtime import launch_memory_enabled
+
+    defn = _active_profile_def()
+    if not launch_memory_enabled() or (defn is not None and not defn.memory):
+        return "Memory is disabled for this agent; note not saved."
+    return _remember(note, memory_namespace(defn) if defn is not None else _active_memory_namespace(),
+                     agent=defn.name if defn is not None else "orchestrator")
+
+
+def _remember(note: str, namespace: tuple[str, str], *, agent: str) -> str:
     if not note or not note.strip():
         return "Nothing to remember (empty note)."
     store = shared_memory_store()
     if store is None:
         return "Memory store unavailable; note not saved."
-    import time as _time
-
-    namespace = _active_memory_namespace()
     try:
-        write_memory(store, namespace, key=f"note-{int(_time.time() * 1000)}", text=note.strip())
+        write_memory(store, namespace, key=f"note-{uuid.uuid4().hex}", text=note.strip(),
+                     source="manta_remember", agent=agent)
     except Exception as exc:  # noqa: BLE001
         return f"Could not save the note: {exc}"
     return f"Remembered (namespace: {namespace[-1]}; secrets redacted on write)."
 
 
-def build_memory_tools() -> list[Any]:
-    """LangChain tool(s) for self-writing memory; ``[]`` when unavailable."""
-    try:
-        from langchain_core.tools import StructuredTool
+def build_memory_tools(defn: Any | None = None) -> list[Any]:
+    """Bind memory writes to the compiled agent, never its parent's process env.
 
-        return [StructuredTool.from_function(manta_remember)]
-    except Exception:  # noqa: BLE001
+    Missing dependencies raise for enabled memory: callers must not claim the
+    declared capability was installed when it was silently omitted.
+    """
+    if defn is not None and not defn.memory:
         return []
+    from langchain_core.tools import StructuredTool
+
+    namespace = memory_namespace(defn) if defn is not None else ("memories", "orchestrator")
+    agent = defn.name if defn is not None else "orchestrator"
+
+    def remember(note: str) -> str:
+        return _remember(note, namespace, agent=agent)
+
+    return [StructuredTool.from_function(
+        remember, name="manta_remember", description=manta_remember.__doc__ or "Save a durable note.",
+    )]

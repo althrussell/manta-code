@@ -19,9 +19,14 @@ import signal
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
 from . import store
+from .context import (
+    TaskContextError, build_execution_manifest, resolve_profile as resolve_profile,
+    validate_execution_manifest,
+)
 
 #: Env var the runner/middleware use to attribute events + usage to a task.
 TASK_ID_ENV = "MANTA_TASK_ID"
@@ -75,6 +80,10 @@ def submit_task(
         )
     if not prompt or not prompt.strip():
         raise TaskError("a non-empty task prompt is required")
+    try:
+        manifest = build_execution_manifest(agent, profile)
+    except (TaskContextError, OSError, ValueError) as exc:
+        raise TaskError(str(exc)) from exc
 
     # Refuse runaway recursion: a task spawning a task spawning a task…
     try:
@@ -86,6 +95,7 @@ def submit_task(
             f"task nesting limit reached (depth {depth}); a background task's "
             "tasks may not submit further tasks"
         )
+    manifest["task_depth"] = depth + 1
 
     task_id = store.new_task_id()
     log_dir = store.task_log_dir()
@@ -101,22 +111,44 @@ def submit_task(
             timeout=timeout,
             max_turns=max_turns,
             allow_asks=allow_asks,
+            manifest=manifest,
         ),
         path=db_path,
     )
 
+    return _spawn_task(record, depth=depth + 1, db_path=db_path)
+
+
+def _spawn_task(
+    record: store.TaskRecord, *, depth: int,
+    resume_value: dict | None = None, db_path: Path | None = None,
+) -> store.TaskRecord:
+    task_id = record.id
+    log_path = Path(record.log_path)
     env = dict(os.environ)
     env[TASK_ID_ENV] = task_id
-    env[TASK_DEPTH_ENV] = str(depth + 1)
-    if allow_asks:
+    env[TASK_DEPTH_ENV] = str(depth)
+    env.pop("MANTA_RESUME_THREAD_ID", None)
+    env.pop("MANTA_RESUME_VALUE", None)
+    if resume_value is not None:
+        env["MANTA_RESUME_THREAD_ID"] = record.thread_id
+        env["MANTA_RESUME_VALUE"] = json.dumps(resume_value)
+    if record.allow_asks:
         # Human pre-approval of ask-gated tools, granted at submission
         # (ADR 0011) — the policy layer reads this in the detached runner.
         env["MANTA_ALLOW_ASKS"] = "1"
     else:
         env.pop("MANTA_ALLOW_ASKS", None)
+    profile = record.manifest.get("profile")
     if profile:
         env["MANTA_PROFILE"] = profile
         env["DATABRICKS_CONFIG_PROFILE"] = profile
+    else:
+        env.pop("MANTA_PROFILE", None)
+        env.pop("DATABRICKS_CONFIG_PROFILE", None)
+    env["DATABRICKS_CONFIG_FILE"] = record.manifest["config_file"]
+    env["MANTA_ORIGINAL_CWD"] = record.manifest["original_cwd"]
+    env["MANTA_PROJECT_ROOT"] = record.manifest["project_root"]
 
     argv = [sys.executable, "-m", "manta_code.tasks.runner", task_id]
     try:
@@ -128,6 +160,7 @@ def submit_task(
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
                 env=env,
+                cwd=record.manifest["original_cwd"],
             )
     except OSError as exc:
         # Never leave a forever-queued row behind a failed spawn.
@@ -139,12 +172,11 @@ def submit_task(
             path=db_path,
         )
         raise TaskError(f"could not start the task runner: {exc}") from exc
-    store.update_task(task_id, pid=process.pid, path=db_path)
+    store.update_task(task_id, pid=process.pid, expect_state="queued", path=db_path)
     store.record_event(
         store.EventRecord(
-            agent=agent,
-            kind="task_submitted",
-            detail=prompt.strip()[:200],
+            agent=record.agent,
+            kind="task_resumed" if resume_value is not None else "task_submitted",
             task_id=task_id,
         ),
         path=db_path,
@@ -153,15 +185,38 @@ def submit_task(
     return record
 
 
+def resume_task(
+    task_id: str, *, resume_value: dict | None = None, db_path: Path | None = None,
+) -> store.TaskRecord:
+    """Continue a persisted budget checkpoint in its original execution context."""
+    record = store.get_task(task_id, path=db_path)
+    if record is None or record.state != "paused_budget":
+        raise TaskError("Only a task paused at a budget checkpoint can be resumed.")
+    value = resume_value if resume_value is not None else record.checkpoint.get("resume_value")
+    if not record.thread_id or not isinstance(value, dict) or not value:
+        raise TaskError("The task has no resumable checkpoint; inspect its output and submit a new task.")
+    if record.pid and _pid_alive(record.pid):
+        raise TaskError("The paused runner is still stopping; retry resume after it exits.")
+    try:
+        validate_execution_manifest(record.manifest)
+    except (TaskContextError, OSError, ValueError) as exc:
+        raise TaskError(str(exc)) from exc
+    if not store.update_task(task_id, state="queued", pid=None, finished_at=None,
+                             exit_code=None, result="", pending_reason="", expect_state="paused_budget", path=db_path):
+        raise TaskError("The task changed while resuming; inspect its current state.")
+    record.state = "queued"
+    return _spawn_task(record, depth=record.manifest.get("task_depth", 1), resume_value=value, db_path=db_path)
+
+
 def cancel_task(task_id: str, *, db_path: Path | None = None) -> store.TaskRecord:
     """Cancel a queued/running task, signalling its process group."""
     record = store.get_task(task_id, path=db_path)
     if record is None:
         raise TaskError(f"no task '{task_id}'")
-    if record.state not in store.ACTIVE_STATES:
+    if record.state not in (*store.ACTIVE_STATES, "paused_budget", "blocked"):
         raise TaskError(f"task '{task_id}' is already {record.state}")
 
-    if record.pid:
+    if record.pid and record.state in store.ACTIVE_STATES:
         try:
             os.killpg(record.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):

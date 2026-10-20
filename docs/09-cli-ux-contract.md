@@ -51,17 +51,29 @@ Common commands include:
 ```bash
 manta doctor          # dependencies, runtime hooks, model wiring, Databricks auth
 manta doctor --probe  # opt-in inference against pinned models
+manta runtime --help  # upstream runtime, including groups shadowed by Manta
+manta runtime mcp --help
+manta update --check  # published stable Manta release; no installation
+manta update --version vMAJOR.MINOR.PATCH # complete tag plus matching constraints
 manta init            # write .manta/config.toml
 manta run "<task>"    # bounded headless execution
 manta agents list     # registry, model pins, and enforced boundaries
 manta status          # background tasks and spend
 manta cost            # local usage ledger
 manta receipts        # estimated savings and advice results
+manta pricing         # effective rates and their source/version
+manta task resume <id> # explicit approval of a budget-paused task
 manta gateway         # Unity service and legacy endpoint gateway metadata
 manta gateway --target system.ai.gpt-6-1-sol
 ```
 
-Use `manta --help` and each subcommand's `--help` for the complete surface.
+Use `manta --help` and each subcommand's `--help` for Manta commands.
+Unknown runtime subgroups retain their own help, and `manta runtime <command>`
+explicitly exposes groups such as upstream `agents` and `doctor` that Manta
+shadows. Runtime help runs without model discovery, profile synchronization or
+inference. The runtime's `/help` covers goals/rubrics, context offload, classifier
+controls, plugins, hooks, ACP and sandboxes; their detailed behavior belongs to
+the pinned runtime.
 The [README command reference](../README.md) describes the normal workflows.
 
 ### `manta doctor`
@@ -72,6 +84,9 @@ Databricks is configured it checks SDK credentials and validates
 agent pins against independent Unity and legacy inventories. These checks can
 make network requests. Doctor does not perform inference unless `--probe` is
 supplied, and constructing the model itself does not require credentials.
+Required adapters and effective graph validation are distinct diagnostics. When
+doctor has not compiled a graph, its manifest status is explicitly pending;
+adapter availability is not represented as a validated graph.
 
 Metadata checks distinguish denied, unavailable, unsupported, partial, and
 complete results. A configured service remains usable when metadata access is
@@ -105,6 +120,23 @@ manta run "explain this project" --json text
 manta run "explain this project" --json stream-json --stream
 ```
 
+### Paused tasks and release ownership
+
+Checkpoint budget mode preserves unattended tasks as `paused_budget`, retaining
+their thread, partial output and execution manifest. `manta task resume <id>`
+explicitly approves continuation from the saved checkpoint after validating
+project/workspace/model/policy identity. It refuses missing checkpoints or drift
+rather than starting the original task again. Plain headless runs report a
+thread ID that can be resumed interactively. Explicit advisory budget mode
+continues at observed thresholds. These checks occur between requests and are
+not a hard billing ceiling.
+
+`manta update` installs a complete stable Manta GitHub tag with matching
+dependency constraints in its detected pip/uv environment. `/update` checks
+and gives the corresponding shell action. Editable source checkouts require
+deliberate Git/lockfile updates. Independent automatic dcode updates are disabled
+and restart re-enters Manta. See [installation](16-installation-and-upgrades.md).
+
 ## Error style
 
 Errors identify the failed operation and a concrete next step. For example:
@@ -114,8 +146,8 @@ The interactive runtime (deepagents-code) is not installed.
 Install it with: uv tool install --python 3.12 --force --upgrade --constraints "https://raw.githubusercontent.com/althrussell/manta-code/v0.3.0/requirements-dev.lock" "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.3.0"
 ```
 
-The runtime requires Python 3.12+. Runtime hook failures produce a visible
-warning when Manta falls back to upstream behavior.
+The runtime requires Python 3.12+. Required control failures stop construction
+with a diagnosis; optional presentation adapters may warn and degrade.
 
 The recovery command uses the running Manta release's Git tag and matching
 dependency constraints. It works outside a source checkout; repeat the current

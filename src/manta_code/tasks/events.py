@@ -2,19 +2,19 @@
 
 Appends a lightweight event per tool call to the task store, attributed to the
 agent it wraps and (when running inside a background task) the task id from
-``MANTA_TASK_ID``. Four kinds:
+``MANTA_TASK_ID``. Outcomes include:
 
 - ``tool`` — an ordinary tool call ran.
-- ``approved`` — an approval-gated tool ran in an *interactive* session:
-  deepagents' ``interrupt_on`` HITL pauses before the call, so the call
-  executing means the human approved it. This is the approval audit record
-  ADR 0009's fleet story needs later.
+- ``approved`` — an active per-call human gate returned an approval. A gate
+  declaration or interactive session alone is never evidence of approval.
 - ``auto_approved`` — an approval-gated tool ran **unattended** (headless /
   background-task runs set the server's auto-approve flag, and no human was
   in the loop). Recorded distinctly so the audit trail never claims a human
   approval that didn't happen.
 - ``denied`` — the tool-policy middleware blocked the call (recognizable by
   the error ``ToolMessage`` it returns).
+- ``tool_error``, ``cancelled``, ``interrupted`` — a tool failed or execution
+  stopped before completion. Arguments, results and exception text are omitted.
 
 Fully guarded: event recording can never break a tool call.
 """
@@ -22,6 +22,9 @@ Fully guarded: event recording can never break a tool call.
 from __future__ import annotations
 
 import os
+import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +37,18 @@ _POLICY_BLOCK_MARKER = "Blocked by Manta tool policy"
 
 #: Server env flag set by upstream when HITL is bypassed (headless runs).
 _AUTO_APPROVE_ENV = "DEEPAGENTS_CODE_SERVER_AUTO_APPROVE"
+_CONFIRMED_APPROVAL: ContextVar[frozenset[str]] = ContextVar("manta_confirmed_tool_approval", default=frozenset())
+
+
+@contextmanager
+def confirmed_tool_approval(request: Any):
+    """Process-local proof set only after a real per-call gate has returned."""
+    call_id = str(request.tool_call.get("id") or "")
+    token = _CONFIRMED_APPROVAL.set(_CONFIRMED_APPROVAL.get() | {call_id})
+    try:
+        yield
+    finally:
+        _CONFIRMED_APPROVAL.reset(token)
 
 
 def _current_task_id() -> str | None:
@@ -89,17 +104,23 @@ class EventLogMiddleware(AgentMiddleware):
         call = getattr(request, "tool_call", None)
         return call if isinstance(call, dict) else {}
 
-    def _record(self, request: Any, result: Any) -> None:
+    def _record(self, request: Any, result: Any, *, outcome: str | None = None) -> None:
         try:
             call = self._tool_call(request)
             tool = call.get("name", "") or "?"
-            args = call.get("args") or {}
-            path = args.get("file_path") if isinstance(args, dict) else None
-            detail = f"{tool}({path})" if isinstance(path, str) and path else tool
-            if _is_policy_denial(result):
+            # Neither arguments/results nor exception messages belong in the
+            # activity feed: each may contain credentials or private content.
+            detail = tool
+            if outcome is not None:
+                kind = outcome
+            elif _is_policy_denial(result):
                 kind = "denied"
-            elif tool in self._approval:
-                kind = "approved" if _hitl_active() else "auto_approved"
+            elif getattr(result, "status", None) == "error":
+                kind = "tool_error"
+            elif str(call.get("id") or "") in _CONFIRMED_APPROVAL.get():
+                kind = "approved"
+            elif tool in self._approval and unattended_run():
+                kind = "auto_approved"
             else:
                 kind = "tool"
             record_event(
@@ -114,37 +135,44 @@ class EventLogMiddleware(AgentMiddleware):
             pass
 
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        result = handler(request)
+        try:
+            result = handler(request)
+        except BaseException as exc:
+            self._record(request, None, outcome=_exception_outcome(exc))
+            raise
         self._record(request, result)
         return result
 
     async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        result = await handler(request)
+        try:
+            result = await handler(request)
+        except BaseException as exc:
+            self._record(request, None, outcome=_exception_outcome(exc))
+            raise
         self._record(request, result)
         return result
 
 
-def agent_event_middleware(defn: Any) -> AgentMiddleware | None:
-    """Event-log middleware for an :class:`AgentDef`; ``None`` on failure.
+def _exception_outcome(exc: BaseException) -> str:
+    if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+        return "cancelled"
+    if type(exc).__name__ == "GraphInterrupt":
+        return "interrupted"
+    return "tool_error"
+
+
+def agent_event_middleware(defn: Any) -> AgentMiddleware:
+    """Event-log middleware for an :class:`AgentDef`.
 
     Ask-gated tools (ADR 0011) audit through the same approved/auto_approved
     distinction as upstream-HITL approval tools.
     """
-    try:
-        gated = set(getattr(defn, "approval", None) or ()) | set(
-            getattr(defn, "tools_ask", None) or ()
-        )
-        return EventLogMiddleware(
-            agent=getattr(defn, "name", "agent"),
-            approval=gated,
-        )
-    except Exception:  # noqa: BLE001
-        return None
+    gated = set(getattr(defn, "approval", None) or ()) | set(
+        getattr(defn, "tools_ask", None) or ()
+    )
+    return EventLogMiddleware(agent=getattr(defn, "name", "agent"), approval=gated)
 
 
-def orchestrator_event_middleware() -> AgentMiddleware | None:
-    """Event-log middleware for the base orchestrator; ``None`` on failure."""
-    try:
-        return EventLogMiddleware(agent="orchestrator")
-    except Exception:  # noqa: BLE001
-        return None
+def orchestrator_event_middleware() -> AgentMiddleware:
+    """Event-log middleware for the base orchestrator."""
+    return EventLogMiddleware(agent="orchestrator")

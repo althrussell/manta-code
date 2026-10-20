@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import store
+from .context import TaskContextError, execution_context, validate_execution_manifest
 
 
 def _result_from_log(log_path: str) -> str:
@@ -33,26 +34,8 @@ def _result_from_log(log_path: str) -> str:
     return ""
 
 
-def _ensure_valid_cwd() -> None:
-    """Recover when our inherited working directory has been deleted.
-
-    A task submitted from *inside* a session (the ``@agent … &`` path or the
-    chief's task tools) inherits that session's server cwd — which can be an
-    ephemeral directory that is deleted moments later when the session ends.
-    The first ``Path.cwd()`` (config loading) then dies with
-    ``FileNotFoundError`` before the task even starts. Fall back to home.
-    """
-    try:
-        os.getcwd()
-    except OSError:
-        home = str(Path.home())
-        os.chdir(home)
-        print(f"manta task runner: working directory vanished; using {home}", file=sys.stderr)
-
-
 def run_task(task_id: str) -> int:
     """Execute one stored task to completion; returns the exit code."""
-    _ensure_valid_cwd()
     record = store.get_task(task_id)
     if record is None:
         print(f"manta task runner: no task '{task_id}'", file=sys.stderr)
@@ -64,13 +47,24 @@ def run_task(task_id: str) -> int:
         )
         return 2
 
-    store.update_task(
+    try:
+        validate_execution_manifest(record.manifest)
+    except (TaskContextError, OSError, ValueError, KeyError) as exc:
+        reason = str(exc)
+        store.update_task(task_id, state="blocked", pending_reason=reason, result=reason,
+                          expect_state="queued")
+        print(f"manta task runner: blocked: {reason}", file=sys.stderr)
+        return 2
+
+    started = store.update_task(
         task_id,
         state="running",
         started_at=time.time(),
         pid=os.getpid(),
         expect_state="queued",
     )
+    if not started:
+        return 2  # a cancellation or another runner won the transition
     store.record_event(
         store.EventRecord(agent=record.agent, kind="task_started", task_id=task_id)
     )
@@ -82,22 +76,32 @@ def run_task(task_id: str) -> int:
         from ..auth import databricks_configured
         from ..config import interactive_endpoints, load_config
 
-        cfg = load_config()
-        configured = databricks_configured()
-        exit_code = dcode.run_headless(
-            profile=None,  # the executor exported the profile into our env
-            default_endpoint=cfg.interactive.default_endpoint if configured else None,
-            endpoints=interactive_endpoints(cfg) if configured else [],
-            message=record.prompt,
-            passthrough=["-a", record.agent],
-            timeout=record.timeout,
-            max_turns=record.max_turns,
-        )
+        with execution_context(record.manifest):
+            cfg = load_config()
+            profile = record.manifest.get("profile")
+            configured = databricks_configured(profile)
+            exit_code = dcode.run_headless(
+                profile=profile,
+                default_endpoint=cfg.interactive.default_endpoint if configured else None,
+                endpoints=interactive_endpoints(cfg) if configured else [],
+                message=record.prompt,
+                passthrough=["-a", record.agent],
+                timeout=record.timeout,
+                max_turns=record.max_turns,
+            )
+    except TaskContextError as exc:
+        store.update_task(task_id, state="blocked", pending_reason=str(exc), result=str(exc),
+                          expect_state="running")
+        return 2
     except Exception as exc:  # noqa: BLE001 - record the failure, don't vanish
         print(f"manta task runner: {exc}", file=sys.stderr)
         exit_code = 1
 
     result = _result_from_log(record.log_path)
+    current = store.get_task(task_id)
+    if current is not None and current.state == "paused_budget":
+        store.update_task(task_id, result=result, pid=None, expect_state="paused_budget")
+        return exit_code
     final_state = "done" if exit_code == 0 else "failed"
     updated = store.update_task(
         task_id,

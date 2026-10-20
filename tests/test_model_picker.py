@@ -214,6 +214,22 @@ def test_real_selector_lists_full_gateway_inventory_and_selects_exact_fqn(
         assert all(spec.startswith("databricks:") for spec in requests[0][0])
 
 
+def test_gateway_footer_uses_effective_profile_and_cli_overrides(monkeypatch):
+    from deepagents_code.tui.widgets.model_selector import ModelSelectorScreen
+    monkeypatch.setattr(ModelSelectorScreen, "_update_footer", ModelSelectorScreen._update_footer)
+    _boot.rebrand_model_selector_footer()
+    spec = "databricks:system.ai.claude-sonnet-5-5"
+    content = []
+    fake = SimpleNamespace(_filtered_models=[(spec, "databricks")], _selected_index=0,
+        _profiles={spec: {"profile": {"max_input_tokens": 12_000}, "overridden_keys": ["max_input_tokens"]}},
+        _cli_profile_override={"reasoning_effort_levels": ["low"], "max_output_tokens": 1000},
+        query_one=lambda *a: SimpleNamespace(update=content.append))
+    ModelSelectorScreen._update_footer(fake)
+    text = content[0].plain
+    assert "Context: 12,000" in text and "Output: 1,000" in text
+    assert "Effort: low\n" in text and "Overrides:" in text
+
+
 def test_typed_direct_provider_cannot_open_an_api_key_prompt(gateway_picker, monkeypatch):
     from textual.app import App
     from textual.widgets import Input
@@ -278,3 +294,71 @@ def test_catalog_conversion_removes_direct_and_stale_personal_rows(gateway_picke
     assert data.default_spec is None
     assert set(data.profiles) == {good}
     assert data.install_extras == {}
+
+
+def test_remote_catalog_selection_exposes_real_effort_control(gateway_picker, monkeypatch, tmp_path):
+    """A remote selection absent from local config reaches actual `/effort` UI."""
+    from deepagents_code import model_config, reasoning_effort
+    from deepagents_code.app import DeepAgentsApp
+    from deepagents_code.tui.widgets.effort_selector import EffortSelectorScreen
+    from manta_code.databricks_chat import MantaChatDatabricks
+    from manta_code.model_capabilities import install_model_capability_bridge
+    from textual.app import App
+    from textual.widgets import Static
+
+    monkeypatch.setenv("DEEPAGENTS_HOME", str(tmp_path))
+    monkeypatch.setattr(model_config.ModelConfig, "load", classmethod(lambda cls: model_config.ModelConfig()))
+    model_config.clear_caches()
+    assert install_model_capability_bridge()
+    name = "system.ai.claude-opus-5-5"
+    spec = f"databricks:{name}"
+    monkeypatch.setattr(_boot, "_gateway_picker_inventory", lambda *_: SimpleNamespace(names=(name,)))
+
+    async def remote_catalog(*_):
+        # A server catalog's scalar transport schema cannot carry effort lists.
+        return _catalog(models=[spec])
+
+    class Harness(App):
+        _resolve_effort_context = DeepAgentsApp._resolve_effort_context
+        _show_effort_selector = DeepAgentsApp._show_effort_selector
+        _profile_override = None
+        _chat_input = None
+        _agent_running = _agent_reconciling = _shell_running = False
+        _connecting = _startup_sequence_running = False
+        model_spec = None
+        _model_params_override = {"reasoning": {"effort": "high", "summary": "auto"}}
+
+        def _effective_model_spec(self):
+            return self.model_spec
+
+        async def _set_effort_override(self, value):
+            assert reasoning_effort.is_effort_supported_for_model(self.model_spec, value)
+            self._model_params_override = reasoning_effort.with_effort_model_params(
+                self.model_spec, self._model_params_override, value,
+            )
+
+    async def render():
+        app = Harness()
+        async with app.run_test(size=(110, 45)) as pilot:
+            def select(result):
+                app.model_spec = result[0]
+
+            screen = gateway_picker.ModelSelectorScreen(default_scope=None,
+                include_recent_models=False, catalog_loader=remote_catalog, result_callback=select)
+            await app.push_screen(screen)
+            await pilot.pause()
+            assert screen._catalog.profiles[spec].profile["max_input_tokens"] == 1_000_000
+            assert "Output: 128,000" in str(screen.query_one("#model-detail-footer", Static).content)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.model_spec == spec
+            await app._show_effort_selector("/effort")
+            await pilot.pause()
+            assert isinstance(app.screen, EffortSelectorScreen)
+            assert app.screen._efforts == ("low", "medium", "high", "xhigh", "max")
+            await pilot.press("end", "enter")
+            await pilot.pause()
+            payload = MantaChatDatabricks(model=name, **app._model_params_override)._get_request_payload("hello")
+            assert payload["reasoning"] == {"summary": "auto", "effort": "max"}
+
+    asyncio.run(render())

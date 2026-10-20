@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from manta_code.agents.profiles import (
     MANTA_PROFILE_SENTINEL,
+    MANTA_MEMORY_SENTINEL,
+    ROLE_FILENAME,
     clean_legacy_subagents,
     render_profile_md,
     sync_agent_profiles,
@@ -32,7 +34,8 @@ def test_sync_writes_profiles_and_skips_base_agent(tmp_path):
     for name in ("planning", "swe"):
         md = tmp_path / name / "AGENTS.md"
         assert md.is_file()
-        assert MANTA_PROFILE_SENTINEL in md.read_text(encoding="utf-8")
+        assert MANTA_MEMORY_SENTINEL in md.read_text(encoding="utf-8")
+        assert MANTA_PROFILE_SENTINEL in (tmp_path / name / ROLE_FILENAME).read_text()
 
 
 def test_sync_is_idempotent(tmp_path):
@@ -51,7 +54,7 @@ def test_sync_regenerates_on_prompt_change(tmp_path):
         [_agent("planning", "v2")], deepagents_dir=tmp_path, state_path=state
     )
     assert "planning" in result.written
-    assert "v2" in (tmp_path / "planning" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "v2" in (tmp_path / "planning" / ROLE_FILENAME).read_text(encoding="utf-8")
 
 
 def test_sync_skips_non_manta_profile(tmp_path):
@@ -97,13 +100,18 @@ def test_clean_legacy_subagents_removes_unmodified(tmp_path):
     legacy = tmp_path / "agent" / "agents" / "planning"
     legacy.mkdir(parents=True)
     (legacy / "AGENTS.md").write_text(
-        "---\nname: planning\n---\nYou are Manta's planning specialist ...",
+        "---\nname: planning\n---\nYou are Manta's planning specialist ...\nLearned custom note",
         encoding="utf-8",
     )
+    (legacy / "skills").mkdir()
+    (legacy / "skills" / "custom.md").write_text("User-authored skill")
     removed = clean_legacy_subagents(deepagents_dir=tmp_path, marker_path=marker)
     assert removed == ["planning"]
     assert not legacy.exists()
     assert marker.exists()
+    (archived,) = (marker.parent / "manta-legacy-subagent-archive").glob("planning-*")
+    assert "Learned custom note" in (archived / "AGENTS.md").read_text()
+    assert (archived / "skills" / "custom.md").read_text() == "User-authored skill"
     # Second run is a no-op (marker gates it).
     assert clean_legacy_subagents(deepagents_dir=tmp_path, marker_path=marker) == []
 

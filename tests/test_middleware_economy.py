@@ -143,6 +143,552 @@ def test_no_budget_never_pauses(tmp_path):
     mw._maybe_pause("t-1")  # must be a no-op, no exception
 
 
+@pytest.mark.parametrize("first_scope", ["agent", "daily"])
+def test_approval_of_one_budget_does_not_waive_a_later_other_budget(tmp_path, monkeypatch, first_scope):
+    from types import SimpleNamespace
+    import langgraph.types as lt
+
+    running = {"tokens": 100.0 if first_scope == "agent" else 0.0,
+               "usd": 0.0, "unknown_calls": 0.0}
+    daily_spend = [2.0 if first_scope == "daily" else 0.0]
+    prompts = []
+    monkeypatch.setattr(E.TokenEconomyMiddleware, "_running", lambda self, thread: running)
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: daily_spend[0])
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    monkeypatch.setattr(lt, "interrupt", lambda payload: (
+        prompts.append(payload) or {"decisions": [{"type": "approve"}]}
+    ))
+    options = dict(agent="swe", max_tokens=100, daily_max_usd=1, ledger_path=tmp_path / "u.db")
+    middleware = E.TokenEconomyMiddleware(**options)
+    assert middleware._maybe_pause("same-thread") is None
+    assert prompts[0]["action_requests"][0]["args"]["budget_scopes"] == [first_scope]
+
+    running["tokens"] = 100.0
+    daily_spend[0] = 2.0
+    # A rebuilt graph/helper retains only the consent actually granted.
+    middleware = E.TokenEconomyMiddleware(**options)
+    assert middleware._maybe_pause("same-thread") is None
+    second_scope = "daily" if first_scope == "agent" else "agent"
+    assert [p["action_requests"][0]["args"]["budget_scopes"] for p in prompts] == [
+        [first_scope], [second_scope]
+    ]
+    assert E.TokenEconomyMiddleware(**options)._maybe_pause("same-thread") is None
+    assert len(prompts) == 2
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_daily_budget_decision_and_coverage_reset_on_utc_rollover(tmp_path, monkeypatch, decision):
+    from types import SimpleNamespace
+    import langgraph.types as lt
+
+    day = ["2026-10-20"]
+    prompts, coverage_checks, warnings = [], [], []
+    monkeypatch.setattr(U, "_utc_day_start", lambda *args: (day[0], 0.0))
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: (
+        coverage_checks.append(day[0]) or SimpleNamespace(cost_known=False)
+    ))
+    monkeypatch.setattr(lt, "interrupt", lambda payload: (
+        prompts.append(payload) or {"decisions": [{"type": decision}]}
+    ))
+    middleware = E.TokenEconomyMiddleware(daily_max_usd=1, ledger_path=tmp_path / "u.db")
+    monkeypatch.setattr(middleware, "_record_budget_event", warnings.append)
+    expected = "stop" if decision == "reject" else None
+    assert middleware._maybe_pause("long-lived") == expected
+    assert middleware._maybe_pause("long-lived") == expected
+    day[0] = "2026-10-21"
+    assert middleware._maybe_pause("long-lived") == expected
+    assert middleware._maybe_pause("long-lived") == expected
+    assert [p["action_requests"][0]["args"]["utc_day"] for p in prompts] == [
+        "2026-10-20", "2026-10-21"
+    ]
+    assert coverage_checks == ["2026-10-20", "2026-10-21"]
+    assert len(warnings) == 2
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_daily_consent_is_shared_across_agents_but_not_other_threads(tmp_path, monkeypatch, decision):
+    from types import SimpleNamespace
+    import langgraph.types as lt
+
+    prompts = []
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    monkeypatch.setattr(lt, "interrupt", lambda payload: (
+        prompts.append(payload) or {"decisions": [{"type": decision}]}
+    ))
+    options = dict(daily_max_usd=1, ledger_path=tmp_path / "u.db")
+    expected = "stop" if decision == "reject" else None
+    assert E.TokenEconomyMiddleware(agent="swe", **options)._maybe_pause("shared") == expected
+    assert E.TokenEconomyMiddleware(agent="review", **options)._maybe_pause("shared") == expected
+    assert len(prompts) == 1
+    assert E.TokenEconomyMiddleware(agent="review", **options)._maybe_pause("different") == expected
+    assert len(prompts) == 2
+
+
+def test_simultaneous_agent_and_daily_budget_pause_resumes_once(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    middleware = E.TokenEconomyMiddleware(max_tokens=100, daily_max_usd=1,
+                                        ledger_path=tmp_path / "u.db")
+    middleware._totals["both"] = {"tokens": 100.0, "usd": 0.0, "unknown_calls": 0.0}
+    dispatched = []
+
+    def send(state):
+        assert middleware._maybe_pause("both") is None
+        dispatched.append("sent")
+        return {"done": True}
+
+    builder = StateGraph(dict)
+    builder.add_node("send", send)
+    builder.add_edge(START, "send")
+    builder.add_edge("send", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "both"}}
+    paused = graph.invoke({"done": False}, config)
+    assert dispatched == []
+    action = paused["__interrupt__"][0].value["action_requests"][0]
+    assert action["args"]["budget_scopes"] == ["agent", "daily"]
+    resumed = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    assert resumed["done"] is True
+    assert dispatched == ["sent"]
+    assert middleware._maybe_pause("both") is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("change", ["utc_rollover", "new_daily_cap"])
+def test_delayed_budget_approval_retains_reviewed_scope_and_rechecks(
+    tmp_path, monkeypatch, asynchronous, change
+):
+    from types import SimpleNamespace
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+
+    day = ["2026-10-20"]
+    daily_spend = [2.0 if change == "utc_rollover" else 0.0]
+    running = {"tokens": 0.0 if change == "utc_rollover" else 100.0,
+               "usd": 0.0, "unknown_calls": 0.0}
+    monkeypatch.setattr(U, "_utc_day_start", lambda *args: (day[0], 0.0))
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: daily_spend[0])
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    middleware = E.TokenEconomyMiddleware(max_tokens=100, daily_max_usd=1,
+                                        ledger_path=tmp_path / "u.db")
+    monkeypatch.setattr(middleware, "_running", lambda thread: running)
+    request = _Request(runtime=_Runtime(thread_id="delayed"))
+    dispatched = []
+
+    def handler(request):
+        dispatched.append("sent")
+        return _Response(result=[_ai({"input_tokens": 1, "output_tokens": 1})])
+
+    async def async_handler(request):
+        return handler(request)
+
+    def send(state):
+        middleware.wrap_model_call(request, handler)
+        return {"done": True}
+
+    async def async_send(state):
+        await middleware.awrap_model_call(request, async_handler)
+        return {"done": True}
+
+    builder = StateGraph(dict)
+    builder.add_node("send", async_send if asynchronous else send)
+    builder.add_edge(START, "send")
+    builder.add_edge("send", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "delayed"}}
+    invoke = (lambda value: asyncio.run(graph.ainvoke(value, config))) if asynchronous else (
+        lambda value: graph.invoke(value, config)
+    )
+    first = invoke({"done": False})["__interrupt__"][0].value["action_requests"][0]["args"]
+    if change == "utc_rollover":
+        assert first["utc_day"] == "2026-10-20"
+        day[0] = "2026-10-21"
+    else:
+        assert first["budget_scopes"] == ["agent"]
+        daily_spend[0] = 2.0
+
+    second = invoke(Command(resume={"decisions": [{"type": "approve"}]}))
+    assert dispatched == []
+    action = second["__interrupt__"][0].value["action_requests"][0]["args"]
+    assert action["budget_scopes"] == ["daily"]
+    assert action["utc_day"] == day[0]
+    assert ("delayed", day[0]) not in middleware._daily_approved
+    if change == "utc_rollover":
+        assert ("delayed", "2026-10-20") in middleware._daily_approved
+    else:
+        assert ("delayed", "") in middleware._agent_approved
+
+    completed = invoke(Command(resume={"decisions": [{"type": "approve"}]}))
+    assert completed["done"] is True
+    assert dispatched == ["sent"]
+    assert ("delayed", day[0]) in middleware._daily_approved
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_direct_helper_callback_retains_budget_scope_during_replay(tmp_path, monkeypatch, asynchronous):
+    from types import SimpleNamespace
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+    from manta_code import accounting
+
+    day = ["2026-10-20"]
+    ledger = tmp_path / "usage.db"
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setattr(U, "_utc_day_start", lambda *args: (day[0], 0.0))
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    accounting.install_usage_collector()
+    middleware = E.TokenEconomyMiddleware(agent="helper", daily_max_usd=1, ledger_path=ledger)
+    model = FakeMessagesListChatModel(responses=[_ai({"input_tokens": 1, "output_tokens": 1})])
+    call_config = {"metadata": {"lc_source": "summarization"}}
+
+    def scope():
+        return accounting.accounting_scope(agent="helper", thread_id="helper-delay", model=model,
+                                           ledger_path=ledger, budget_guard=middleware)
+
+    def send(state):
+        with scope():
+            model.invoke("summarize", config=call_config)
+        return {"done": True}
+
+    async def async_send(state):
+        with scope():
+            await model.ainvoke("summarize", config=call_config)
+        return {"done": True}
+
+    builder = StateGraph(dict)
+    builder.add_node("helper", async_send if asynchronous else send)
+    builder.add_edge(START, "helper")
+    builder.add_edge("helper", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "helper-delay"}}
+    invoke = (lambda value: asyncio.run(graph.ainvoke(value, config))) if asynchronous else (
+        lambda value: graph.invoke(value, config)
+    )
+    assert "__interrupt__" in invoke({"done": False})
+    day[0] = "2026-10-21"
+    second = invoke(Command(resume={"decisions": [{"type": "approve"}]}))
+    assert second["__interrupt__"][0].value["action_requests"][0]["args"]["utc_day"] == day[0]
+    accounting.flush_usage()
+    assert U.totals(path=ledger).calls == 0
+    assert invoke(Command(resume={"decisions": [{"type": "approve"}]}))["done"] is True
+    accounting.flush_usage()
+    assert U.totals(path=ledger).calls == 1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("helper", [False, True])
+@pytest.mark.parametrize("cleared_by", [
+    "utc_rollover", "ledger_correction", "raised_cap", "removed_cap", "advisory_mode"
+])
+def test_pending_rejection_is_honored_after_live_threshold_clears(
+    tmp_path, monkeypatch, asynchronous, helper, cleared_by
+):
+    from types import SimpleNamespace
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+    from manta_code import accounting
+
+    day, spend = ["2026-10-20"], [2.0]
+    ledger = tmp_path / "usage.db"
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setattr(U, "_utc_day_start", lambda *args: (day[0], 0.0))
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: spend[0])
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    middlewares = [E.TokenEconomyMiddleware(daily_max_usd=1, ledger_path=ledger)]
+    model = FakeMessagesListChatModel(responses=[_ai({"input_tokens": 1, "output_tokens": 1})])
+    request = _Request(runtime=_Runtime(thread_id="cleared"))
+    dispatched = []
+    accounting.install_usage_collector()
+
+    def scope():
+        return accounting.accounting_scope(thread_id="cleared", model=model,
+                                           ledger_path=ledger, budget_guard=middlewares[0])
+
+    def handler(request):
+        dispatched.append("sent")
+        return _Response(result=[_ai({"input_tokens": 1, "output_tokens": 1})])
+
+    async def async_handler(request):
+        return handler(request)
+
+    def send(state):
+        if helper:
+            with scope():
+                model.invoke("summarize", config={"metadata": {"lc_source": "summarization"}})
+        else:
+            middlewares[0].wrap_model_call(request, handler)
+        return {"done": True}
+
+    async def async_send(state):
+        if helper:
+            with scope():
+                await model.ainvoke("summarize", config={"metadata": {"lc_source": "summarization"}})
+        else:
+            await middlewares[0].awrap_model_call(request, async_handler)
+        return {"done": True}
+
+    builder = StateGraph(dict)
+    builder.add_node("send", async_send if asynchronous else send)
+    builder.add_edge(START, "send")
+    builder.add_edge("send", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "cleared"}}
+    invoke = (lambda value: asyncio.run(graph.ainvoke(value, config))) if asynchronous else (
+        lambda value: graph.invoke(value, config)
+    )
+    assert "__interrupt__" in invoke({"done": False})
+    if cleared_by == "utc_rollover":
+        day[0], spend[0] = "2026-10-21", 0.0
+    elif cleared_by == "ledger_correction":
+        spend[0] = 0.0
+    elif cleared_by == "raised_cap":
+        middlewares[0] = E.TokenEconomyMiddleware(daily_max_usd=3, ledger_path=ledger)
+    elif cleared_by == "removed_cap":
+        middlewares[0] = E.TokenEconomyMiddleware(ledger_path=ledger)
+    else:
+        middlewares[0] = E.TokenEconomyMiddleware(daily_max_usd=1, budget_mode="advisory", ledger_path=ledger)
+    rejection = Command(resume={"decisions": [{"type": "reject"}]})
+    if helper:
+        with pytest.raises(RuntimeError, match="Stopped at the budget cap"):
+            invoke(rejection)
+    else:
+        assert invoke(rejection)["done"] is True
+    accounting.flush_usage()
+    assert dispatched == []
+    assert U.totals(path=ledger).calls == 0
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("kind", ["agent", "daily"])
+def test_rebuilt_budget_limit_requires_its_own_approval(tmp_path, monkeypatch, asynchronous, kind):
+    from types import SimpleNamespace
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+
+    ledger = tmp_path / "usage.db"
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    options = dict(ledger_path=ledger)
+    options["max_tokens" if kind == "agent" else "daily_max_usd"] = 100 if kind == "agent" else 1
+    middlewares = [E.TokenEconomyMiddleware(**options)]
+    monkeypatch.setattr(E.TokenEconomyMiddleware, "_running", lambda self, thread: {
+        "tokens": 100.0, "usd": 0.0, "unknown_calls": 0.0
+    })
+    dispatched = []
+
+    def send(state):
+        assert middlewares[0]._maybe_pause("changed-cap") is None
+        dispatched.append("sent")
+        return {"done": True}
+
+    async def async_send(state):
+        return await asyncio.to_thread(send, state)
+
+    builder = StateGraph(dict)
+    builder.add_node("send", async_send if asynchronous else send)
+    builder.add_edge(START, "send")
+    builder.add_edge("send", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "changed-cap"}}
+    invoke = (lambda value: asyncio.run(graph.ainvoke(value, config))) if asynchronous else (
+        lambda value: graph.invoke(value, config)
+    )
+    assert "__interrupt__" in invoke({"done": False})
+    options["max_tokens" if kind == "agent" else "daily_max_usd"] = 50 if kind == "agent" else 0.5
+    middlewares[0] = E.TokenEconomyMiddleware(**options)
+    second = invoke(Command(resume={"decisions": [{"type": "approve"}]}))
+    args = second["__interrupt__"][0].value["action_requests"][0]["args"]
+    assert args["max_tokens" if kind == "agent" else "daily_max_usd"] == (50 if kind == "agent" else 0.5)
+    assert dispatched == []
+    assert invoke(Command(resume={"decisions": [{"type": "approve"}]}))["done"] is True
+    assert dispatched == ["sent"]
+
+
+def test_reviewed_budget_scope_survives_sqlite_graph_and_process_state_rebuild(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+
+    day = ["2026-10-20"]
+    ledger = tmp_path / "usage.db"
+    monkeypatch.setattr(U, "_utc_day_start", lambda *args: (day[0], 0.0))
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    dispatched = []
+
+    def build(saver):
+        middleware = E.TokenEconomyMiddleware(daily_max_usd=1, ledger_path=ledger)
+
+        def send(state):
+            assert middleware._maybe_pause("sqlite-replay") is None
+            dispatched.append("sent")
+            return {"done": True}
+
+        builder = StateGraph(dict)
+        builder.add_node("send", send)
+        builder.add_edge(START, "send")
+        builder.add_edge("send", END)
+        return builder.compile(checkpointer=saver), middleware
+
+    checkpoint = str(tmp_path / "checkpoints.db")
+    config = {"configurable": {"thread_id": "sqlite-replay"}}
+    with SqliteSaver.from_conn_string(checkpoint) as saver:
+        graph, _ = build(saver)
+        assert "__interrupt__" in graph.invoke({"done": False}, config)
+    day[0] = "2026-10-21"
+    # Separate processes have no in-memory decision cache. The saved task
+    # scope and resume positions must still preserve both approval boundaries.
+    monkeypatch.setattr(E, "_DECISIONS", {})
+    with SqliteSaver.from_conn_string(checkpoint) as saver:
+        graph, middleware = build(saver)
+        second = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+        assert second["__interrupt__"][0].value["action_requests"][0]["args"]["utc_day"] == day[0]
+        assert ("sqlite-replay", "2026-10-20") in middleware._daily_approved
+        assert dispatched == []
+    monkeypatch.setattr(E, "_DECISIONS", {})
+    with SqliteSaver.from_conn_string(checkpoint) as saver:
+        graph, middleware = build(saver)
+        completed = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+        assert completed["done"] is True
+        assert middleware._daily_approved == {("sqlite-replay", "2026-10-20"),
+                                              ("sqlite-replay", "2026-10-21")}
+        assert dispatched == ["sent"]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("changed_to", ["removed_cap", "advisory"])
+def test_unscoped_helper_honors_pending_rejection_after_budget_config_changes(
+    tmp_path, monkeypatch, asynchronous, changed_to
+):
+    from types import SimpleNamespace
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+    from manta_code import accounting
+
+    monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    monkeypatch.setenv("MANTA_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: 2.0)
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    settings = tmp_path / "config.toml"
+    settings.write_text('[budget]\ndaily_max_usd=1\nmode="checkpoint"\n')
+    accounting.install_usage_collector()
+    model = FakeMessagesListChatModel(responses=[_ai({"input_tokens": 1, "output_tokens": 1})])
+    call_config = {"metadata": {"lc_source": "summarization"}}
+
+    def send(state):
+        model.invoke("summarize", config=call_config)
+        return {"done": True}
+
+    async def async_send(state):
+        await model.ainvoke("summarize", config=call_config)
+        return {"done": True}
+
+    builder = StateGraph(dict)
+    builder.add_node("helper", async_send if asynchronous else send)
+    builder.add_edge(START, "helper")
+    builder.add_edge("helper", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "unscoped-helper"}}
+    invoke = (lambda value: asyncio.run(graph.ainvoke(value, config))) if asynchronous else (
+        lambda value: graph.invoke(value, config)
+    )
+    assert "__interrupt__" in invoke({"done": False})
+    settings.write_text('' if changed_to == "removed_cap" else '[budget]\ndaily_max_usd=1\nmode="advisory"\n')
+    with pytest.raises(RuntimeError, match="Stopped at the budget cap"):
+        invoke(Command(resume={"decisions": [{"type": "reject"}]}))
+    accounting.flush_usage()
+    assert U.totals().calls == 0
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_completed_budget_check_preserves_later_effect_and_other_approval(tmp_path, monkeypatch, asynchronous):
+    from types import SimpleNamespace
+    from langgraph.func import task
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command, interrupt
+    from manta_code.budget_runtime import _pending_budget_interrupt_ids
+
+    spend = [0.0]
+    monkeypatch.setattr(U, "today_total_usd", lambda **kwargs: spend[0])
+    monkeypatch.setattr(U, "today_totals", lambda **kwargs: SimpleNamespace(cost_known=True))
+    middleware = E.TokenEconomyMiddleware(daily_max_usd=1, ledger_path=tmp_path / "usage.db")
+    dispatched, effects = [], []
+    external_request = {"action_requests": [{"name": "fixture_write"}]}
+
+    @task(name="completed_effect")
+    def effect():
+        effects.append("effect")
+        return "done"
+
+    def first(state):
+        assert middleware._maybe_pause("other-interrupt") is None
+        assert effect().result() == "done"
+        decision = interrupt(external_request)
+        return {"decision": decision}
+
+    async def async_first(state):
+        assert await asyncio.to_thread(middleware._maybe_pause, "other-interrupt") is None
+        assert await effect() == "done"
+        decision = interrupt(external_request)
+        return {"decision": decision}
+
+    def send(state):
+        assert middleware._maybe_pause("other-interrupt") is None
+        dispatched.append("sent")
+        return state
+
+    async def async_send(state):
+        assert await asyncio.to_thread(middleware._maybe_pause, "other-interrupt") is None
+        dispatched.append("sent")
+        return state
+
+    builder = StateGraph(dict)
+    builder.add_node("first", async_first if asynchronous else first)
+    builder.add_node("send", async_send if asynchronous else send)
+    builder.add_edge(START, "first")
+    builder.add_edge("first", "send")
+    builder.add_edge("send", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "other-interrupt"}}
+    invoke = (lambda value: asyncio.run(graph.ainvoke(value, config))) if asynchronous else (
+        lambda value: graph.invoke(value, config)
+    )
+    original = invoke({})["__interrupt__"][0]
+    assert original.value == external_request
+    assert effects == ["effect"]
+    spend[0] = 2.0
+    decision = {"decisions": [{"type": "approve"}]}
+    budget = invoke(Command(resume={original.id: decision}))["__interrupt__"][0]
+    assert budget.id != original.id
+    assert budget.value["action_requests"][0]["name"] == "manta_budget_continue"
+    assert middleware._daily_approved == set()
+    assert dispatched == []
+    assert effects == ["effect"]
+    assert _pending_budget_interrupt_ids(graph.get_state(config)) == {budget.id}
+    completed = invoke(Command(resume={budget.id: decision}))
+    assert completed["decision"] == decision
+    assert dispatched == ["sent"]
+    assert effects == ["effect"]
+
+
 def test_async_wrap_records(tmp_path):
     db = tmp_path / "usage.db"
     mw = E.TokenEconomyMiddleware(agent="planning", ledger_path=db)
@@ -277,7 +823,8 @@ def test_missing_usage_is_unknown_and_budget_continues_with_visible_coverage(tmp
     mw.wrap_model_call(request, lambda r: response)
     total = U.totals(path=tmp_path / "usage.db")
     assert total.cost_known is False
-    assert total.missing_usage_calls == 2
+    # Re-observing the same provider request is one accounting event.
+    assert total.missing_usage_calls == 1
     assert mw._running("t-1")["usd"] == 0
     assert mw._running("t-1")["unknown_calls"] == 2
     assert len(events) == 1

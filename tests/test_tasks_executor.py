@@ -8,6 +8,12 @@ from manta_code.tasks import executor, store
 @pytest.fixture(autouse=True)
 def _manta_home(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
+    config = tmp_path / "databricks.ini"
+    config.write_text("[DEFAULT]\nhost=https://workspace.example.com\n[selected]\nhost=https://selected.example.com\n")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(config))
+    for key in ("DATABRICKS_HOST", "MANTA_PROFILE", "DATABRICKS_CONFIG_PROFILE",
+                "DEEPAGENTS_CODE_SERVER_CWD", "DEEPAGENTS_CODE_SERVER_PROJECT_ROOT", "MANTA_ORIGINAL_CWD"):
+        monkeypatch.delenv(key, raising=False)
 
 
 class _FakeProcess:
@@ -47,6 +53,7 @@ def test_submit_creates_task_and_spawns_detached_runner(_fake_spawn):
     # Submission is audited as an event.
     kinds = {e.kind for e in store.recent_events(task_id=record.id)}
     assert "task_submitted" in kinds
+    assert all(not event.detail for event in store.recent_events(task_id=record.id))
 
 
 def test_submit_accepts_at_prefixed_agent(_fake_spawn):

@@ -20,6 +20,13 @@ transport limits.
   and current gateway limitations.
 - `16-installation-and-upgrades.md` — tagged installs, release assets, upgrades,
   Python migration, and workspace verification.
+- [17-coding-agent-harness-review.md](17-coding-agent-harness-review.md) — historical
+  harness assessment, agent/task/memory gaps, model controls, and ordered uplift
+  packages with acceptance criteria (20 October 2026).
+- [18-model-capability-qualification.md](18-model-capability-qualification.md) —
+  shared exact-target capability controls, context/effort limits and live evidence.
+- [19-dependable-foundations.md](19-dependable-foundations.md) — packages 1–5
+  implementation, user workflows, acceptance evidence and remaining validation.
 
 ## Architecture decision records
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,8 @@ from manta_code.tasks.events import EventLogMiddleware, agent_event_middleware
 def _manta_home(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     monkeypatch.delenv("MANTA_TASK_ID", raising=False)
+    monkeypatch.delenv("MANTA_UNATTENDED", raising=False)
+    monkeypatch.delenv("DEEPAGENTS_CODE_SERVER_AUTO_APPROVE", raising=False)
 
 
 @dataclass
@@ -33,18 +36,16 @@ def test_ordinary_tool_call_recorded():
     (event,) = _events()
     assert event.agent == "swe"
     assert event.kind == "tool"
-    assert event.detail == "read_file(/tmp/x.py)"
+    assert event.detail == "read_file"  # arguments may contain private content
     assert event.task_id is None
 
 
-def test_approval_gated_tool_recorded_as_approved():
-    # interrupt_on pauses BEFORE the call; the call running means the human
-    # approved it — this is the audit record.
+def test_declared_gate_alone_does_not_claim_human_approval():
     mw = EventLogMiddleware(agent="swe", approval={"execute"})
     req = _ToolRequest({"name": "execute", "args": {}, "id": "1"})
     mw.wrap_tool_call(req, lambda r: ToolMessage(content="ran", tool_call_id="1"))
     (event,) = _events()
-    assert event.kind == "approved"
+    assert event.kind == "tool"
 
 
 def test_policy_denial_recorded_as_denied():
@@ -59,6 +60,62 @@ def test_policy_denial_recorded_as_denied():
     assert result is denial
     (event,) = _events()
     assert event.kind == "denied"
+
+
+def test_failed_tool_result_never_claims_approval_or_records_private_content():
+    mw = EventLogMiddleware(agent="swe", approval={"execute"})
+    req = _ToolRequest({"name": "execute", "args": {"command": "private argument"}, "id": "1"})
+    result = ToolMessage(content="private failure output", tool_call_id="1", status="error")
+    assert mw.wrap_tool_call(req, lambda _: result) is result
+    (event,) = _events()
+    assert event.kind == "tool_error"
+    assert event.detail == "execute"
+
+
+@pytest.mark.parametrize("exception,outcome", [
+    (RuntimeError("private exception"), "tool_error"),
+    (KeyboardInterrupt(), "cancelled"),
+])
+def test_tool_exception_audited_and_reraised(exception, outcome):
+    mw = EventLogMiddleware(agent="swe", approval={"execute"})
+    req = _ToolRequest({"name": "execute", "args": {"command": "private argument"}, "id": "1"})
+
+    def fail(_):
+        raise exception
+
+    with pytest.raises(type(exception)):
+        mw.wrap_tool_call(req, fail)
+    (event,) = _events()
+    assert event.kind == outcome
+    assert event.detail == "execute"
+
+
+def test_async_cancellation_audited_and_reraised():
+    mw = EventLogMiddleware(agent="swe")
+    req = _ToolRequest({"name": "execute", "args": {}, "id": "1"})
+
+    async def cancelled(_):
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(mw.awrap_tool_call(req, cancelled))
+    (event,) = _events()
+    assert event.kind == "cancelled"
+
+
+def test_checkpoint_interrupt_audited_and_reraised():
+    from langgraph.errors import GraphInterrupt
+
+    mw = EventLogMiddleware(agent="swe")
+    req = _ToolRequest({"name": "execute", "args": {}, "id": "1"})
+
+    def interrupt(_):
+        raise GraphInterrupt()
+
+    with pytest.raises(GraphInterrupt):
+        mw.wrap_tool_call(req, interrupt)
+    (event,) = _events()
+    assert event.kind == "interrupted"
 
 
 def test_task_id_attributed_from_env(monkeypatch):

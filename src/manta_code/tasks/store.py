@@ -7,8 +7,9 @@ best-effort, while task CRUD (driven by the CLI and runner, not the model loop)
 raises normally so callers see real errors.
 
 Task lifecycle: ``queued`` → ``running`` → ``done`` | ``failed`` | ``cancelled``.
-State transitions by the runner are conditional on the current state so a
-``cancel`` issued while the runner is finishing is never overwritten.
+Budget interrupts persist as ``paused_budget`` until explicitly resumed, and
+unverifiable execution context becomes ``blocked``. State transitions are
+conditional so a cancellation or budget pause is never overwritten at exit.
 
 Events are deliberately lightweight rows (agent, kind, detail, optional
 task id) appended by the event middleware and the executor; ``manta status``
@@ -18,6 +19,7 @@ joins them with tasks and the usage ledger into the single pane of glass.
 from __future__ import annotations
 
 import sqlite3
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -32,7 +34,7 @@ TASKS_DB_PATH = Path(".state") / "tasks.db"
 TASK_LOG_DIR = Path(".state") / "task-logs"
 
 #: Valid task states.
-STATES = ("queued", "running", "done", "failed", "cancelled")
+STATES = ("queued", "running", "paused_budget", "blocked", "done", "failed", "cancelled")
 
 #: States in which a task is still alive (cancellable, not collectable).
 ACTIVE_STATES = ("queued", "running")
@@ -58,6 +60,12 @@ class TaskRecord:
     #: Human pre-approval of ask-gated tools, granted at submission
     #: (ADR 0011): unattended runs deny `tools_ask` tools unless set.
     allow_asks: bool = False
+    #: Immutable, nonsecret execution context. Empty denotes a legacy job whose
+    #: project identity is unknown; the runner must not guess it.
+    manifest: dict = field(default_factory=dict)
+    pending_reason: str = ""
+    thread_id: str = ""
+    checkpoint: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -126,6 +134,10 @@ CREATE INDEX IF NOT EXISTS idx_inbox_task ON task_inbox(task_id, consumed_at);
 #: so existing databases migrate in place.
 _MIGRATIONS = (
     "ALTER TABLE tasks ADD COLUMN allow_asks INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE tasks ADD COLUMN pending_reason TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE tasks ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE tasks ADD COLUMN checkpoint_json TEXT NOT NULL DEFAULT '{}'",
 )
 
 
@@ -147,8 +159,9 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     for migration in _MIGRATIONS:
         try:
             conn.execute(migration)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
     return conn
 
 
@@ -173,6 +186,10 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         timeout=row["timeout"],
         max_turns=row["max_turns"],
         allow_asks=bool(row["allow_asks"]) if "allow_asks" in row.keys() else False,
+        manifest=json.loads(row["manifest_json"]),
+        pending_reason=row["pending_reason"],
+        thread_id=row["thread_id"],
+        checkpoint=json.loads(row["checkpoint_json"]),
     )
 
 
@@ -183,7 +200,8 @@ def create_task(record: TaskRecord, *, path: Path | None = None) -> TaskRecord:
         conn.execute(
             "INSERT INTO tasks (id, agent, prompt, state, created_at, started_at, "
             "finished_at, pid, exit_code, log_path, result, timeout, max_turns, "
-            "allow_asks) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "allow_asks, manifest_json, pending_reason, thread_id, checkpoint_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 record.id,
                 record.agent,
@@ -199,6 +217,10 @@ def create_task(record: TaskRecord, *, path: Path | None = None) -> TaskRecord:
                 record.timeout,
                 record.max_turns,
                 1 if record.allow_asks else 0,
+                json.dumps(record.manifest, sort_keys=True),
+                record.pending_reason,
+                record.thread_id,
+                json.dumps(record.checkpoint),
             ),
         )
         conn.commit()
@@ -259,6 +281,9 @@ def update_task(
         "exit_code",
         "log_path",
         "result",
+        "pending_reason",
+        "thread_id",
+        "checkpoint",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -267,6 +292,8 @@ def update_task(
         raise ValueError(f"invalid task state: {fields['state']!r}")
     if not fields:
         return False
+    if "checkpoint" in fields:
+        fields["checkpoint_json"] = json.dumps(fields.pop("checkpoint"))
     sets = ", ".join(f"{name} = ?" for name in fields)
     values: list[object] = list(fields.values())
     where = "id = ?"
@@ -281,6 +308,24 @@ def update_task(
         return cursor.rowcount > 0
     finally:
         conn.close()
+
+
+def pause_task(
+    task_id: str, reason: str, *, thread_id: str,
+    checkpoint: dict | None = None, path: Path | None = None,
+) -> bool:
+    """Persist a budget interrupt before the headless client exits.
+
+    The checkpoint contains nonsecret resume/checkpoint identifiers, never a
+    transcript or credentials. A concurrent cancellation wins.
+    """
+    if not thread_id:
+        raise ValueError("a persistent thread id is required for budget pause")
+    return update_task(
+        task_id, state="paused_budget", pending_reason=reason,
+        thread_id=thread_id, checkpoint=checkpoint or {},
+        expect_state="running", path=path,
+    )
 
 
 # --- events ----------------------------------------------------------------

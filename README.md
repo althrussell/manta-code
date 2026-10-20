@@ -1,8 +1,8 @@
 # Manta
 
 **A token-smart coding agent with a real team behind it.** Manta runs the
-right model for every job, tells you when to switch, accounts for every
-token — and lets you hand long-running work to named, *enforced* agents you
+right model for every job, tells you when to switch, records reported model
+usage — and lets you hand long-running work to named agents you
 can steer mid-flight, coordinated by a chief of staff.
 
 Databricks is Manta's home and power source — models brokered through
@@ -22,8 +22,9 @@ The incumbents proved the interactive coding-agent UX. Manta bets on the three
 things they treat as afterthoughts:
 
 1. **The token economy is the product.** Roles select qualified model services;
-   specialists escalate when the role warrants it. Every call lands in a
-   local ledger with cache-hit and scaffolding-vs-work splits, an advisor
+   specialists escalate when the role warrants it. A shared request collector
+   records main, specialist and helper calls in a local ledger, including
+   reported reasoning/cache usage, latency and call purpose. An advisor
    recommends model switches based on how the session is *actually going*, and
    `manta receipts` estimates savings when prices are known, with the
    counterfactual labelled as such. In-session, `/cost` shows the
@@ -31,9 +32,11 @@ things they treat as afterthoughts:
 2. **Real agents, real boundaries.** `planning`, `swe`, `review`, and `chief`
    (plus any agent you create) have model pins, tool allow/deny lists,
    per-path filesystem rules, approval gates, budgets, and durable memory —
-   **enforced at the tool-call layer**, not requested in a prompt. A read-only
-   reviewer *cannot* write files, full stop. Ask-gated tools pause for a human
-   interactively and **fail closed** in unattended runs.
+   enforced through the compiled runtime's tool dispatch. Read-only roles deny
+   known write/execute effects and tools with unknown effects; policy also
+   applies when JavaScript dispatches tools. Ask-gated tools pause interactively
+   and fail closed unattended unless explicitly pre-approved. This is an agent
+   tool boundary; use a sandbox for operating-system isolation.
 3. **Work you can walk away from.** `@swe land the refactor &` returns a task
    id immediately; the work runs detached, survives your session, accepts
    mid-flight steering (`manta task send`), notifies your desktop when it
@@ -42,12 +45,18 @@ things they treat as afterthoughts:
 
 And underneath: **reliability as a feature**. Manta enriches the upstream
 [`deepagents-code`](https://pypi.org/project/deepagents-code/) runtime through
-a contract-tested seam (40 verified patch targets); if anything moves, Manta
-falls back to a clean vanilla launch and *says so*. `manta doctor --probe`
-even live-tests every pinned model in the real agent loop before you bet a
-session on it.
+a contract-tested integration. Missing required controls stop construction with
+a diagnosis; optional presentation adapters can degrade with a warning.
+`manta doctor` checks adapter health and distinguishes it from validation of a
+compiled graph. `manta doctor --probe` exercises a bounded two-request tool loop
+for each configured target in the selected workspace.
 
 ## Install
+
+The commands below install published v0.3.0. The
+[dependable-foundations milestone](docs/19-dependable-foundations.md) is an
+unreleased source candidate; its new task continuation, update and control
+features require that candidate until a later tag is published.
 
 **v0.3.0 requires Python 3.12+** and is distributed through
 [GitHub Releases](https://github.com/althrussell/manta-code/releases).
@@ -83,6 +92,10 @@ uv tool install --force --upgrade --python 3.12 \
 ```
 
 A tag-pinned installation stays on that tag when you run `uv tool upgrade`.
+The foundation update adds `manta update --check` and
+`manta update --version vMAJOR.MINOR.PATCH` to check and install a complete Manta
+release with its matching constraints. `/update` supplies the same workflow
+inside the session; editable checkouts retain deliberate Git/lockfile updates.
 Existing user model pins and defaults are preserved; see the
 [installation and upgrade guide](docs/16-installation-and-upgrades.md) for pip,
 release assets, migration, and troubleshooting, and the [changelog](CHANGELOG.md)
@@ -112,6 +125,7 @@ And from any shell, even after closing the session:
 manta status                           # tasks × events × spend, one pane
 manta task send <id> "prefer the adapter approach"  # steer the running task
 manta task output <id>                 # collect the result
+manta task resume <id>                 # explicitly continue a budget-paused task
 manta receipts                         # what did this week cost — and save?
 ```
 
@@ -125,7 +139,7 @@ Everything below happens inline, without leaving the conversation.
 | --- | --- |
 | `@swe fix the failing tests` | Deterministic delegation to that agent — its model pin, permissions, and budget apply. Autocomplete suggests agents after `@` at the start of a message. |
 | `@swe fix the failing tests &` | Same, but **detached**: you get a task id back instantly, keep working, and your desktop pings when it lands. |
-| `make a plan for the migration` | Plan requests auto-route to the read-only `planning` agent (opus) — no keyword magic needed, and `MANTA_AUTODELEGATE_PLANNING=0` turns it off. |
+| `make a plan for the migration` | A conservative intent matcher routes fresh planning requests to the read-only `planning` agent (opus); `MANTA_AUTODELEGATE_PLANNING=0` turns it off. |
 | "remember that we never use mocks" | The agent saves it with `manta_remember` (redacted, durable) and future sessions start warm. |
 | "check on task ab12 / cancel it / tell it to skip the docs" | The orchestrator and `chief` carry the task tools (`manta_task_status`, `manta_task_send`, …) — manage background work conversationally. |
 
@@ -136,7 +150,9 @@ Everything below happens inline, without leaving the conversation.
 | `/cost` (or `/spend`) | **This session's spend**: per-agent totals, the most recent model calls with per-call cost, today's total vs your daily budget. Works even while the agent is busy. |
 | `/agents` | Switch agents — your conversation follows you, the new agent's model pin is applied truthfully, `Ctrl+S` sets your default. |
 | `/model` | Lists all discovered Unity Gateway services and legacy chat endpoints for the active workspace, plus configured targets. Search exact model names and press Enter to switch using Databricks authentication; direct-key providers are excluded. |
+| `/effort` | Selects the exact service/protocol's supported effort values. The model card shows known context/output limits, capability evidence and unknowns. |
 | `/auth` | Databricks workspace picker on top, provider API keys below; `Tab` moves between the sections. |
+| `/update` | Checks stable Manta releases and shows the complete tagged install action. |
 
 Plus the runtime's own: `/clear` (fresh thread), `/threads` (resume any
 conversation), `/tokens`, `/copy`, `/editor`, `/skill:<name>`, `@file` to
@@ -144,9 +160,21 @@ inject file contents, `!cmd` for shell, `Shift+Tab` to toggle auto-approve —
 `/help` lists everything.
 
 **Guardrails you'll meet inline**: approval prompts before `swe` writes or
-executes; a pause-to-continue if an agent hits its budget cap or your daily
-budget; advisory notes ("> **Manta advice:** …") appended to answers when
+executes; a checkpoint before another request once an observed agent or daily
+budget is exhausted; advisory notes ("> **Manta advice:** …") appended to answers when
 you're burning premium tokens on routine work or a cheap model keeps failing.
+Checkpoint mode also pauses unattended tasks, preserving their thread for
+`manta task resume`. Explicit advisory mode logs the limit and continues.
+These are checks between requests, so a request may exceed a limit; unreported
+usage or unknown prices cannot establish a hard dollar ceiling.
+
+**Use the inherited runtime**: `/goal` and `/rubric` manage completion criteria;
+`/offload` and `/context-doctor` help inspect context pressure; `/auto` exposes
+classifier controls, and `/btw` asks a side question. `/help` documents the
+installed runtime's exact syntax. From the shell, `manta runtime --help`,
+`manta runtime mcp --help` and `manta runtime plugin --help` expose advanced
+commands, including groups shadowed by Manta. Skills, hooks, ACP and remote
+sandboxes remain runtime features with their own configuration and constraints.
 
 ## The agents
 
@@ -164,7 +192,17 @@ pin, tools, filesystem rules, ask-gates, budget, and memory all live in
 model for the next session or `/restart` with `manta agents set-model` (verified
 against your workspace's Unity services and legacy endpoints). Agents remember:
 they save durable learnings with
-`manta_remember` and recall them next session.
+`manta_remember` and recall them next session. Notes use the compiled agent's
+configured namespace; shared namespaces are explicit, and `memory=false` or
+`--no-memory` disables runtime recall and note tools. These namespaces are
+agent-scoped, so use separate agents/namespaces for unrelated projects.
+
+Role instructions are generated into `~/.deepagents/<agent>/MANTA_ROLE.md`;
+the neighboring `AGENTS.md` holds editable learned context and survives sync.
+Old mixed files are backed up before migration, and deleted managed profiles
+are archived. Legacy SQLite notes remain inspectable but are marked
+legacy/unassigned and excluded from automatic recall. See the
+[foundation guide](docs/19-dependable-foundations.md) for ownership and limits.
 
 ## Command reference
 
@@ -172,6 +210,8 @@ they save durable learnings with
 manta                       # interactive session (passthrough: -r, -a <agent>, -M <model>, …)
 manta run "task"            # one-shot headless run (CI-safe: bounded, enforced)
 manta doctor [--probe]      # preflight; --probe live-tests every pinned model
+manta runtime <command>    # upstream commands/help, including shadowed groups
+manta update [--check] [--version vMAJOR.MINOR.PATCH] # qualified Manta releases
 manta init                  # write .manta/config.toml
 
 manta agents                # list agents + enforcement   (show/create/edit/delete/sync/import)
@@ -179,12 +219,13 @@ manta agents set-model <name> <model>      # next session or /restart; workspace
 manta agents memory <name>  # inspect an agent's durable memory
 
 manta task submit <agent> "..." [--allow-asks]   # detached background task
-manta task list|status|output|send|cancel        # the task lifecycle
+manta task list|status|output|send|cancel|resume # the task lifecycle
 manta status                # chief-of-staff pane: tasks, events, audit, spend
 
 manta cost [--by agent|model|task] [--breakdown] [--advise]   # (in-session: /cost)
 manta budget | manta watch  # spend windows, live refresh
 manta receipts              # spend vs all-premium counterfactual + advisor stats
+manta pricing               # effective exact-target rates and provenance
 manta gateway               # Unity services and legacy endpoint gateway metadata
 ```
 
@@ -221,11 +262,14 @@ service_api = "auto"
 application = "manta-code"
 
 [budget]
-daily_max_usd = 25.0        # optional: pause-for-approval at the daily cap
+daily_max_usd = 25.0        # optional: checked between requests
+mode = "checkpoint"        # checkpoint (default) | advisory
 
 [pricing."my-finetune"]     # optional: price private endpoints
 input  = 2.0                # USD per 1M tokens
 output = 8.0
+source = "workspace contract" # optional provenance for your verified rates
+as_of = "2026-10-20"
 ```
 
 Databricks targets can also be exact Unity Catalog model-service names:
@@ -247,7 +291,11 @@ protocol. Incompatible switches with opaque reasoning/tool state require a fresh
 thread. Unknown service prices remain unknown and dollar reports show coverage.
 See the [configuration reference](docs/10-config-schema.md),
 [integration guide](docs/13-deepagents-integration.md), and
-[qualification results](docs/15-unity-gateway-qualification.md).
+[qualification results](docs/15-unity-gateway-qualification.md). The
+[model control qualification](docs/18-model-capability-qualification.md) records
+exact effort/context evidence; the
+[foundation tracker](docs/19-dependable-foundations.md) records implementation
+and remaining validation for this milestone.
 
 Env toggles: `MANTA_AGENT_ADDRESSING=0`, `MANTA_ADVICE=0`,
 `MANTA_SWAP_RESUME=0`, `MANTA_NOTIFY=0`, `MANTA_HOME=<dir>`.
@@ -256,9 +304,10 @@ Env toggles: `MANTA_AGENT_ADDRESSING=0`, `MANTA_ADVICE=0`,
 
 Manta is an **owned control plane on top of `deepagents-code`** — not a fork
 (ADR 0007/0008). One contract-tested seam injects the compiled agents,
-policy/economy/advice middleware, and Databricks tools; pinned upstream
-versions plus `manta doctor` keep the seam honest, and any failure degrades
-to a vanilla launch with a visible warning. Everything is local-first:
+policy/economy/advice middleware, and Databricks tools. Pinned upstream
+versions, compiled tool manifests and `manta doctor` check the integration.
+Required policy/accounting/checkpoint adapters fail closed; optional UI failures
+are reported. Everything is local-first:
 agents, memory, the usage ledger, tasks, and audit events live in
 `~/.manta/` as SQLite/TOML — the enterprise fleet layer (ADR 0009) bolts on
 later without a rewrite.

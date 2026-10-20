@@ -178,7 +178,7 @@ def validate_sdist(path: Path, spec: ReleaseSpec, destination: Path) -> Path:
             *(f"src/{name}" for name in spec.modules),
         }
         for pattern in (
-            "docs/**/*.md", "configs/**/*.toml", "scripts/**/*.py", "scripts/**/*.sh",
+            "docs/**/*.md", "docs/qualification/*.json", "configs/**/*.toml", "scripts/**/*.py", "scripts/**/*.sh",
             "examples/**/*.yml", "evals/**/*.py", "evals/**/*.md", "tests/**/*.py",
             ".github/workflows/*.yml",
         ):

@@ -32,6 +32,7 @@ class EvalOutput:
     cost_usd: float | None = None
     tokens: int = 0
     model: str = ""
+    exit_code: int = 0
 
 
 #: A solver turns a task into an output (text + cost).
@@ -91,6 +92,9 @@ def run_suite(
     for task in tasks or BENCHMARK:
         output = solver(task)
         grade = task.grader(output.text)
+        if output.exit_code:
+            from .graders import Grade
+            grade = Grade(0, f"Execution failed (exit {output.exit_code}); " + grade.notes)
         suite.results.append(
             TaskResult(
                 task_id=task.id,

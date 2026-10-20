@@ -524,7 +524,8 @@ def test_rebrand_model_selector_footer_neutralizes_databricks(monkeypatch):
 
         fake = _FakeSelector()
         screen._update_footer(fake)
-        assert "Databricks AI Gateway model" in fake._static.content.plain
+        assert "Context: unknown" in fake._static.content.plain
+        assert "Workspace authentication" in fake._static.content.plain
     finally:
         screen._update_footer = original
 
@@ -609,7 +610,7 @@ def test_switch_databricks_workspace_without_restart_hook(monkeypatch):
     assert any(sev == "warning" for sev, _ in app.notifications)
 
 
-def test_boot_main_announces_degraded_control_plane(monkeypatch, capsys):
+def test_boot_main_refuses_missing_required_control_plane(monkeypatch, capsys):
     # ADR 0010: falling back to vanilla is fine; falling back *silently* is not.
     pytest.importorskip("deepagents_code")
     import deepagents_code.main as upstream_main
@@ -625,11 +626,8 @@ def test_boot_main_announces_degraded_control_plane(monkeypatch, capsys):
     monkeypatch.setattr(_boot, "install_manta_build_hook", lambda: False)
     monkeypatch.setattr(upstream_main, "cli_main", lambda: None)
 
-    _boot.main()
-    err = capsys.readouterr().err
-    assert "Manta degraded" in err
-    assert "control plane" in err
-    assert "manta doctor" in err
+    with pytest.raises(RuntimeError, match="Required Manta integration unavailable: agent control plane"):
+        _boot.main()
 
 
 def test_boot_main_silent_when_everything_applies(monkeypatch, capsys):
@@ -1258,7 +1256,8 @@ def test_model_picker_renders_and_filters_offline_catalog(tmp_path, monkeypatch)
                 assert custom in dict(screen._filtered_models)
                 assert {provider for _, provider in screen._filtered_models} == {"databricks"}
                 footer = screen.query_one("#model-detail-footer", Static)
-                assert "Databricks AI Gateway model" in str(footer.content)
+                assert "Context:" in str(footer.content)
+                assert "Workspace authentication" in str(footer.content)
                 await pilot.press("ctrl+r")
                 await pilot.pause()
                 assert custom in dict(screen._filtered_models)

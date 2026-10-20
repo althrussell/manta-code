@@ -73,8 +73,8 @@ class FsRule(BaseModel):
 class AgentDef(BaseModel):
     """A complete Manta agent definition.
 
-    ``system_prompt`` is persisted separately in ``AGENTS.md`` (not in
-    ``agent.toml``) so it stays a readable markdown body.
+    ``system_prompt`` is persisted separately in ``MANTA_ROLE.md`` (not in
+    ``agent.toml``); ``AGENTS.md`` holds the agent's mutable learnings.
     """
 
     name: str
@@ -84,8 +84,8 @@ class AgentDef(BaseModel):
     model: str | None = None
     system_prompt: str = ""
 
-    #: Convenience switch: when true the factory denies all filesystem writes
-    #: and gates/blocks mutating tools, giving a provably read-only agent.
+    #: Tool policy blocks filesystem mutations, execution and unknown effects.
+    #: This is a harness boundary; it does not provide an OS/process sandbox.
     read_only: bool = False
 
     #: When set, only these tool names are allowed (an allow-list). ``None``

@@ -275,6 +275,29 @@ def test_main_entry_launches_when_no_subcommand(monkeypatch):
     assert seen["passthrough"] == ["-r"]
 
 
+def test_update_alias_preserves_root_profile(monkeypatch):
+    from types import SimpleNamespace
+    from manta_code import updates
+
+    seen = []
+    monkeypatch.setattr(updates, "check_release", lambda version: seen.append(version) or SimpleNamespace(
+        tag="v0.3.0", url="https://example.invalid/release", newer=False))
+    monkeypatch.setattr("sys.argv", ["manta", "-p", "labs", "--update", "--check"])
+    with pytest.raises(SystemExit) as exc:
+        main_mod.main_entry()
+    assert exc.value.code == 0
+    assert seen == [None]
+
+
+@pytest.mark.parametrize("literal", ["--update", "--auto-update"])
+def test_update_alias_does_not_consume_runtime_prompt(monkeypatch, literal):
+    seen = []
+    monkeypatch.setattr(main_mod, "_launch_interactive", lambda **kwargs: seen.append(kwargs))
+    monkeypatch.setattr("sys.argv", ["manta", "-n", literal])
+    main_mod.main_entry()
+    assert seen == [{"profile": None, "passthrough": ["-n", literal]}]
+
+
 def test_subcommand_does_not_launch_runtime(monkeypatch, tmp_path):
     called = {"launched": False}
 
@@ -379,6 +402,8 @@ def test_task_cli_routes_to_typer():
 def test_task_submit_and_lifecycle_cli(tmp_path, monkeypatch):
     monkeypatch.setenv("MANTA_HOME", str(tmp_path))
     from manta_code.tasks import executor
+    from manta_code.tasks import context
+    monkeypatch.setattr(context, "_workspace", lambda profile, config_file: (profile, "https://fixture.databricks.com"))
 
     class _Proc:
         pid = 4242
@@ -508,11 +533,11 @@ def _readme() -> str:
     return (Path(__file__).parent.parent / "README.md").read_text()
 
 
-def test_readme_patch_target_count_matches_code():
-    # This number drifted twice; CI now owns it.
-    from manta_code.reliability import PATCH_TARGETS
-
-    assert f"({len(PATCH_TARGETS)} verified patch targets)" in _readme()
+def test_readme_explains_required_runtime_contract():
+    readme = _readme()
+    assert "manta doctor" in readme
+    assert "required" in readme.lower()
+    assert "verified patch targets)" not in readme
 
 
 def test_readme_agent_pins_match_code():

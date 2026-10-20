@@ -14,10 +14,9 @@ We wrap that one symbol so Manta can, in a single place, enrich the agent with:
   ``langgraph dev`` server rejects custom graph stores).
 - **tools** — Databricks-native tools (UC / SQL / jobs / system tables).
 
-Reliability is non-negotiable (ADR 0008): the wrapper degrades gracefully. If
-loading the registry or compiling agents raises, it logs a warning and calls the
-original ``create_deep_agent`` unchanged, so ``manta`` still launches — it just
-loses the Manta enrichment rather than failing to start.
+Required controls are assembled atomically and fail closed with a diagnosis.
+A registry, policy, accounting, memory or graph-validation failure stops launch;
+optional advice remains best-effort.
 
 Installation timing: the hook is installed from :mod:`manta_code.databricks_chat`
 (imported by ``create_model`` via the provider ``class_path``), which runs in the
@@ -72,67 +71,45 @@ def _subagent_name(spec: Any) -> str | None:
     return getattr(spec, "name", None)
 
 
+def _required(value: Any, component: str) -> Any:
+    if value is None:
+        from .runtime import RuntimeBuildError
+        raise RuntimeBuildError(f"Required Manta {component} could not be constructed. Run manta doctor.")
+    return value
+
+
 def _agent_extra_middleware(defn: Any) -> list[Any]:
-    """Per-agent middleware to attach when compiling (memory, budget).
-
-    Filled in by later phases (memory in Phase 3, budget in Phase 4). Each
-    builder is imported lazily and guarded so a missing/!installed piece never
-    breaks agent construction.
-    """
-    extras: list[Any] = []
-
-    # Phase 3: durable per-agent memory middleware.
+    """Required memory, accounting and audit controls; optional advice."""
+    from .agents.memory import agent_memory_middleware
+    from .middleware.economy import agent_budget_middleware
+    from .tasks.events import agent_event_middleware
+    from .middleware.advice import agent_advice_middleware
+    extras = [_required(agent_event_middleware(defn), "audit"),
+              _required(agent_budget_middleware(defn), "accounting/budget")]
+    from .runtime import launch_memory_enabled
+    if defn.memory and launch_memory_enabled():
+        extras.append(_required(agent_memory_middleware(defn), "memory"))
     try:
-        from .agents.memory import agent_memory_middleware
-
-        mw = agent_memory_middleware(defn)
-        if mw is not None:
-            extras.append(mw)
-    except Exception:  # noqa: BLE001 - optional; never block construction
-        pass
-
-    # Phase 4: per-agent token budget governor.
-    try:
-        from .middleware.economy import agent_budget_middleware
-
-        mw = agent_budget_middleware(defn)
-        if mw is not None:
-            extras.append(mw)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # ADR 0010 Phase B: tool-call event log (the `manta status` feed, including
-    # the approval/denial audit records).
-    try:
-        from .tasks.events import agent_event_middleware
-
-        mw = agent_event_middleware(defn)
-        if mw is not None:
-            extras.append(mw)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # ADR 0010 Phase C: proactive model advice (session signals + tiered tips).
-    try:
-        from .middleware.advice import agent_advice_middleware
-
-        mw = agent_advice_middleware(defn)
-        if mw is not None:
-            extras.append(mw)
-    except Exception:  # noqa: BLE001
-        pass
-
+        advice = agent_advice_middleware(defn)
+        if advice is not None:
+            extras.append(advice)
+    except Exception:
+        logger.debug("Optional agent advice unavailable", exc_info=True)
     return extras
 
 
-def build_manta_subagents() -> list[dict[str, Any]]:
-    """Compile Manta's built-in + user agents into enforced ``SubAgent`` dicts."""
+def _runtime_definitions() -> list[Any]:
+    """Load every declared registry entry strictly for graph construction."""
     from .agents.defaults import merged_agents
-    from .agents.factory import compile_subagent
-    from .agents.registry import list_agents
+    from .agents.registry import agents_root, load_agent
+    directory = agents_root()
+    entries = sorted(directory.iterdir()) if directory.is_dir() else []
+    return merged_agents([load_agent(p.name) for p in entries if p.is_dir() and (p / "agent.toml").is_file()])
 
-    defs = merged_agents(list_agents())
-    return [compile_subagent(d, extra_middleware=_agent_extra_middleware(d)) for d in defs]
+
+def build_manta_subagents() -> list[dict[str, Any]]:
+    from .agents.factory import compile_subagent
+    return [compile_subagent(d, extra_middleware=_agent_extra_middleware(d)) for d in _runtime_definitions()]
 
 
 def active_agent_name() -> str | None:
@@ -152,213 +129,88 @@ def active_agent_name() -> str | None:
         key = f"{SERVER_ENV_PREFIX}ASSISTANT_ID"
     except Exception:  # noqa: BLE001 - fall back to the literal env var name
         key = "DEEPAGENTS_CODE_SERVER_ASSISTANT_ID"
-    name = os.environ.get(key)
+    from .runtime import current_launch_policy
+    launch = current_launch_policy() or {}
+    name = launch.get("assistant_id") or os.environ.get(key)
     if not name or name == "agent":
         return None
     return name
 
 
 def _active_profile_def() -> Any | None:
-    """Resolve the active profile name to a merged :class:`AgentDef`, or ``None``."""
     name = active_agent_name()
     if not name:
         return None
-    try:
-        from .agents.defaults import merged_agents
-        from .agents.registry import list_agents
-
-        return next((a for a in merged_agents(list_agents()) if a.name == name), None)
-    except Exception:  # noqa: BLE001
-        return None
+    definition = next((a for a in _runtime_definitions() if a.name == name), None)
+    if definition is None:
+        from .runtime import RuntimeBuildError
+        raise RuntimeBuildError(f"Selected Manta profile {name!r} has no valid agent definition. Run manta agents list or select the base agent.")
+    return definition
 
 
 def build_orchestrator_middleware() -> list[Any]:
-    """Top-level (primary agent) middleware: enforcement + economy + routing.
-
-    When the active profile is a Manta agent (the user selected it in the
-    ``/agents`` picker), this enforces *that agent's* boundaries on the primary
-    loop — its model pin, tool policy (read-only / allow / deny / filesystem),
-    memory recall for its namespace, and economy attributed to it (with its
-    budget caps). Otherwise it applies the generic orchestrator accounting.
-    Routing (cost-aware escalation) is applied in both cases.
-
-    Economy is attributed to the active profile *instead of* a separate
-    orchestrator instance so a call is never double-counted in the ledger. Each
-    piece is guarded so a missing module is simply skipped.
-    """
     import os
-
+    from .middleware.address import agent_address_middleware
+    from .middleware.inbox import task_inbox_middleware
+    from .middleware.routing import agent_model_pin_middleware, default_routing_middleware
+    from .middleware.advice import orchestrator_advice_middleware
     explicit_model = os.environ.get("MANTA_EXPLICIT_MODEL") == "1"
-    middleware: list[Any] = []
-    defn = _active_profile_def()
-
-    # @agent addressing (ADR 0010 Phase B), outermost in both branches: an
-    # explicit "@swe …" or "@swe … &" turn outranks every other routing
-    # decision (it only fires on an explicit @-mention of a real agent).
-    try:
-        from .middleware.address import agent_address_middleware
-
-        mw = agent_address_middleware()
-        if mw is not None:
-            middleware.append(mw)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Task-inbox steering (ADR 0011): active only inside a background task
-    # (MANTA_TASK_ID), attached once at the orchestrator level — never
-    # per-subagent, so a delegated subagent can't consume the user's note.
-    try:
-        from .middleware.inbox import task_inbox_middleware
-
-        mw = task_inbox_middleware()
-        if mw is not None:
-            middleware.append(mw)
-    except Exception:  # noqa: BLE001
-        pass
-
-    if defn is not None:
-        # Model pin first (outermost) so accounting/routing below see the pinned
-        # model, and the primary loop actually runs on the profile's model — not
-        # just delegated subagents.
-        try:
-            from .middleware.routing import agent_model_pin_middleware
-
-            mw = agent_model_pin_middleware(defn)
-            if mw is not None and not explicit_model:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .agents.factory import _tool_policy_middleware
-
-            middleware.extend(_tool_policy_middleware(defn))
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .agents.memory import agent_memory_middleware
-
-            mw = agent_memory_middleware(defn)
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .middleware.economy import agent_budget_middleware
-
-            mw = agent_budget_middleware(defn)
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .tasks.events import agent_event_middleware
-
-            mw = agent_event_middleware(defn)
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .middleware.advice import agent_advice_middleware
-
-            mw = agent_advice_middleware(defn)
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
+    definition = _active_profile_def()
+    middleware = []
+    for item in (agent_address_middleware(), task_inbox_middleware()):
+        if item is not None:
+            middleware.append(item)
+    if definition is not None:
+        from .agents.factory import _tool_policy_middleware
+        if definition.model and not explicit_model:
+            middleware.append(_required(agent_model_pin_middleware(definition), "selected profile model pin"))
+        middleware.extend(_tool_policy_middleware(definition))
+        middleware.extend(_agent_extra_middleware(definition))
     else:
-        # Deterministic plan-request delegation, outermost so it can short-circuit
-        # the model call entirely (no accounting noise for a call that never runs).
+        from .middleware.delegation import plan_delegation_middleware
+        from .middleware.economy import orchestrator_middleware
+        from .agents.memory import orchestrator_memory_middleware
+        from .tasks.events import orchestrator_event_middleware
+        planning = plan_delegation_middleware()
+        if planning is not None:
+            middleware.append(planning)
+        middleware.extend(orchestrator_middleware())
+        from .runtime import launch_memory_enabled
+        if launch_memory_enabled():
+            middleware.append(_required(orchestrator_memory_middleware(), "orchestrator memory"))
+        middleware.append(_required(orchestrator_event_middleware(), "orchestrator audit"))
         try:
-            from .middleware.delegation import plan_delegation_middleware
-
-            mw = plan_delegation_middleware()
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .middleware.economy import orchestrator_middleware
-
-            middleware.extend(orchestrator_middleware())
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .agents.memory import orchestrator_memory_middleware
-
-            mw = orchestrator_memory_middleware()
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .tasks.events import orchestrator_event_middleware
-
-            mw = orchestrator_event_middleware()
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from .middleware.advice import orchestrator_advice_middleware
-
-            mw = orchestrator_advice_middleware()
-            if mw is not None:
-                middleware.append(mw)
-        except Exception:  # noqa: BLE001
-            pass
-
-    try:
-        from .middleware.routing import default_routing_middleware
-
-        if not explicit_model:
-            middleware.extend(default_routing_middleware())
-    except Exception:  # noqa: BLE001
-        pass
+            advice = orchestrator_advice_middleware()
+            if advice is not None:
+                middleware.append(advice)
+        except Exception:
+            logger.debug("Optional model advice unavailable", exc_info=True)
+    if not explicit_model and definition is None:
+        middleware.extend(default_routing_middleware())
     return middleware
 
 
 def build_databricks_tools() -> list[Any]:
-    """Databricks-native tools to expose to the main agent (Phase 2).
-
-    Databricks is detect-and-enable (ADR 0010): with no workspace configured,
-    no tools are injected — off Databricks they would only error at call time
-    and crowd the tool list.
-    """
-    try:
-        from .auth import databricks_configured
-
-        if not databricks_configured():
-            return []
-        from .databricks_tools import build_default_databricks_tools
-
-        return build_default_databricks_tools()
-    except Exception:  # noqa: BLE001
+    """Detect-and-enable; configured integration failures abort construction."""
+    from .auth import databricks_configured
+    if not databricks_configured():
         return []
+    from .databricks_tools import build_default_databricks_tools
+    tools = build_default_databricks_tools()
+    if not tools:
+        raise RuntimeError("Databricks is configured but required native tools could not be built")
+    return tools
 
 
 def build_task_tools() -> list[Any]:
-    """Background-task tools for the main agent (ADR 0010 Phase B).
-
-    Gives the orchestrator the same task surface as the ``chief`` agent so
-    "run this in the background" works from any session.
-    """
-    try:
-        from .tasks.tools import build_task_tools as _build
-
-        return _build()
-    except Exception:  # noqa: BLE001
-        return []
+    from .tasks.tools import build_task_tools as build
+    return build()
 
 
-def build_memory_tools() -> list[Any]:
-    """Self-writing memory tool (ADR 0012): agents save durable learnings."""
-    try:
-        from .agents.memory import build_memory_tools as _build
-
-        return _build()
-    except Exception:  # noqa: BLE001
-        return []
+def build_memory_tools(defn: Any = None) -> list[Any]:
+    from .agents.memory import build_memory_tools as build
+    from .runtime import launch_memory_enabled
+    return build(defn) if launch_memory_enabled() else []
 
 
 def _maybe_add_delegation_policy(kwargs: dict[str, Any]) -> None:
@@ -385,83 +237,141 @@ def _maybe_add_delegation_policy(kwargs: dict[str, Any]) -> None:
         logger.debug("Manta delegation-policy injection failed", exc_info=True)
 
 
-def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Inject Manta's subagents, middleware, and tools into ``kwargs``.
-
-    Mutates and returns ``kwargs`` (the dict passed to ``create_deep_agent``).
-    Pure enough to unit-test directly: no global state beyond the registry it
-    reads. Manta subagents replace any inherited subagent of the same name. For
-    the base orchestrator it also appends a short delegation policy to the system
-    prompt so planning/review work is routed to the specialist agents.
-
-    Note: Manta does **not** inject a graph ``store=``. Durable memory is read by
-    the per-agent recall middleware from Manta's own SQLite store. The
-    ``langgraph dev`` server that runs the agent rejects graphs that carry a
-    custom ``BaseStore``, so injecting one here would crash the server at startup.
-    """
-    manta_subagents = build_manta_subagents()
-    if manta_subagents:
-        manta_names = {s["name"] for s in manta_subagents}
-        existing = list(kwargs.get("subagents") or [])
-        kept = [s for s in existing if _subagent_name(s) not in manta_names]
-        merged = [*kept, *manta_subagents]
-        kwargs["subagents"] = merged or None
-
-    orchestrator_mw = build_orchestrator_middleware()
-    upstream = list(kwargs.get("middleware") or ())
-    configurable = [mw for mw in upstream if type(mw).__name__ == "ConfigurableModelMiddleware"]
-    other = [mw for mw in upstream if mw not in configurable]
-    economy = [mw for mw in orchestrator_mw if type(mw).__name__ == "TokenEconomyMiddleware"]
-    control = [mw for mw in orchestrator_mw if mw not in economy]
-    # Account only after runtime overrides, explicit pins and optional routing
-    # have selected the model that will actually receive the request.
-    # Protocol restoration also precedes accounting so receipts describe the
-    # dialect used for resumed calls.
+def _assemble_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Atomically assemble required controls, preserving dcode launch policy."""
+    from .agents.factory import compose_subagent, select_agent_tools, _runtime_interrupt_on, native_interrupt_on, install_approval_gates
+    from .middleware.policy import ToolPolicyMiddleware
     from .middleware.session_policy import SessionPolicyMiddleware
-
-    kwargs["middleware"] = [*configurable, *control, *other, SessionPolicyMiddleware(), *economy]
-
-    _maybe_add_delegation_policy(kwargs)
-
-    extra_tools = [*build_databricks_tools(), *build_task_tools(), *build_memory_tools()]
-    if extra_tools:
-        kwargs["tools"] = [*list(kwargs.get("tools") or ()), *extra_tools]
-
+    from .runtime import RuntimeDispatchMiddleware, middleware_for_agent, model_for_agent
+    if any(isinstance(m, RuntimeDispatchMiddleware) for m in kwargs.get("middleware", ())):
+        return kwargs
+    candidate = dict(kwargs)
+    definition = _active_profile_def()
+    role = definition.name if definition else "orchestrator"
+    if "model" in candidate:
+        candidate["model"] = model_for_agent(candidate["model"], role)
+    inherited = list(kwargs.get("tools") or ())
+    native = build_databricks_tools()
+    extra_tools = [*native, *build_task_tools(), *build_memory_tools(definition)]
+    tools = list({getattr(t, "name", str(id(t))): t for t in [*inherited, *extra_tools]}.values())
+    specialist_tools = list(tools)
+    if definition is not None:
+        tools = select_agent_tools(definition, tools)
+    candidate["tools"] = tools
+    existing = [dict(s) if isinstance(s, dict) else s for s in (kwargs.get("subagents") or ())]
+    template = next((s for s in existing if isinstance(s, dict) and s.get("name") == "general-purpose"), None)
+    manta = build_manta_subagents()
+    names = {s["name"] for s in manta}
+    kept = [s for s in existing if _subagent_name(s) not in names]
+    composed = [compose_subagent(s, template=template, inherited_tools=specialist_tools, backend=kwargs.get("backend")) for s in manta]
+    # Existing markdown/GP children already carry the upstream stack. Guard
+    # their JS dispatch too and retain their explicit filesystem restrictions.
+    for spec in kept:
+        if isinstance(spec, dict) and "runnable" not in spec:
+            mws = middleware_for_agent(list(spec.get("middleware", ())), spec["name"])
+            native_gates = native_interrupt_on(spec.get("tools", tools))
+            mws = install_approval_gates(mws, native_gates)
+            if native_gates:
+                spec["interrupt_on"] = {}
+            if not any(isinstance(m, RuntimeDispatchMiddleware) for m in mws):
+                guard = RuntimeDispatchMiddleware(agent=spec["name"])
+                guard.configure(mws, spec.get("interrupt_on"))
+                spec["middleware"] = [guard, *mws]
+    candidate["subagents"] = [*kept, *composed] or None
+    for spec in candidate["subagents"] or ():
+        if isinstance(spec, dict) and "runnable" not in spec:
+            inherited_model = spec.get("model", candidate.get("model"))
+            if inherited_model is not None:
+                spec["model"] = model_for_agent(inherited_model, spec["name"])
+    orchestrator = build_orchestrator_middleware()
+    upstream = middleware_for_agent(list(kwargs.get("middleware") or ()), role)
+    configurable = [m for m in upstream if type(m).__name__ == "ConfigurableModelMiddleware"]
+    events = [m for m in orchestrator if type(m).__name__ == "EventLogMiddleware"]
+    economy = [m for m in orchestrator if type(m).__name__ == "TokenEconomyMiddleware"]
+    control = [m for m in orchestrator if m not in [*events, *economy]]
+    other = [m for m in upstream if m not in configurable and not isinstance(m, RuntimeDispatchMiddleware)]
+    gates = {**native_interrupt_on(tools, primary=True), **(_runtime_interrupt_on(definition) if definition is not None else {})}
+    if gates:
+        other = install_approval_gates(other, {**(kwargs.get("interrupt_on") or {}), **gates})
+        candidate["interrupt_on"] = {}
+    dispatch = RuntimeDispatchMiddleware(agent=definition.name if definition else "orchestrator", interrupt_on=gates)
+    dispatch.databricks_selection = list(definition.databricks_tools) if definition else ["auto"]
+    stack = [*configurable, *events, dispatch, *control, *other, SessionPolicyMiddleware(), *economy]
+    for mw in stack:
+        if isinstance(mw, ToolPolicyMiddleware):
+            mw.bind_scope(kwargs.get("backend"))
+    dispatch.configure(stack, candidate.get("interrupt_on"))
+    candidate["middleware"] = stack
+    for spec in candidate.get("subagents") or ():
+        if isinstance(spec, dict) and spec.get("mode") == "fork":
+            effective = list({m.name: m for m in [*stack, *spec.get("middleware", ())]}.values())
+            for mw in spec.get("middleware", ()):
+                if isinstance(mw, RuntimeDispatchMiddleware):
+                    mw.configure(effective, spec.get("interrupt_on"))
+    if definition is not None and definition.system_prompt:
+        marker = f"## Manta role: {definition.name}"
+        prompt = candidate.get("system_prompt") or ""
+        if isinstance(prompt, str) and marker not in prompt:
+            candidate["system_prompt"] = f"{prompt}\n\n{marker}\n{definition.system_prompt}".strip()
+    _maybe_add_delegation_policy(candidate)
+    kwargs.clear()
+    kwargs.update(candidate)
     return kwargs
 
 
-def install_build_hook() -> bool:
-    """Wrap ``deepagents_code.agent.create_deep_agent`` with Manta enrichment.
+def enrich_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Commit a complete candidate or restore all touched adapter settings."""
+    middleware = list(kwargs.get("middleware") or ())
+    for spec in kwargs.get("subagents") or ():
+        if isinstance(spec, dict):
+            middleware.extend(spec.get("middleware") or ())
+    snapshots = []
+    for mw in middleware:
+        for attribute in ("_ptc", "_approval", "_guarded_dispatch_names"):
+            if hasattr(mw, attribute):
+                value = getattr(mw, attribute)
+                snapshots.append((mw, attribute, set(value) if isinstance(value, set) else value))
+    try:
+        return _assemble_kwargs(kwargs)
+    except BaseException:
+        for mw, attribute, value in snapshots:
+            setattr(mw, attribute, value)
+        raise
 
-    Idempotent. Returns ``True`` when the hook is installed (or already was),
-    ``False`` when the patch target is unavailable (caller continues to launch
-    vanilla). The wrapper itself never raises out of enrichment — on any failure
-    it logs and calls the original unchanged.
-    """
+
+def install_build_hook() -> bool:
+    """Install an atomic, fail-closed build hook and usage collector."""
     global _installed
+    from .accounting import install_usage_collector
+    from .server_graph import install_server_bootstrap
+    install_usage_collector()
+    if not install_server_bootstrap():
+        return False
     if _installed:
         return True
     try:
         from deepagents_code import agent as dc_agent
-    except Exception:
+    except ImportError:
         return False
-
+    from .runtime import install_launch_policy_capture
+    install_launch_policy_capture(dc_agent)
     original = getattr(dc_agent, "create_deep_agent", None)
-    if original is None or not callable(original):
-        _warn(
-            "deepagents_code.agent.create_deep_agent not found; Manta control "
-            "plane disabled, launching vanilla. Run `manta doctor`."
-        )
+    if not callable(original):
         return False
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
+        from .runtime import RuntimeBuildError, effective_manifest, publish_manifest
+        publish_manifest(None)
         try:
-            enrich_kwargs(kwargs)
-        except Exception as exc:  # noqa: BLE001 - reliability: never block launch
-            _warn(f"Manta control-plane injection failed ({exc}); launching vanilla.")
-        return original(*args, **kwargs)
+            candidate = enrich_kwargs(dict(kwargs))
+            graph = original(*args, **candidate)
+            manifest = effective_manifest(graph, candidate)
+            publish_manifest(manifest)
+            return graph
+        except Exception as exc:
+            raise RuntimeBuildError(f"Manta required runtime controls could not be validated: {exc}. Agent execution was not started. Run manta doctor.") from exc
 
-    wrapped.__manta_hook__ = True  # type: ignore[attr-defined]  # marker for tests/idempotency
+    wrapped.__manta_hook__ = True
     dc_agent.create_deep_agent = wrapped
     _installed = True
     return True

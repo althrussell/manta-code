@@ -40,6 +40,9 @@ KNOWN_SUBCOMMANDS = frozenset(
         "status",
         "gateway",
         "receipts",
+        "runtime",
+        "update",
+        "pricing",
     }
 )
 
@@ -72,6 +75,10 @@ def classify_args(argv: list[str]) -> tuple[str, Optional[str], list[str]]:
             profile = arg[2:]
             i += 1
             continue
+        if arg in ("-h", "--help") and passthrough:
+            passthrough.append(arg)
+            i += 1
+            continue
         if arg in ("-h", "--help", "--version"):
             return ("delegate", None, None)
         if not arg.startswith("-"):
@@ -93,11 +100,110 @@ def main_entry() -> None:
     """
     import sys
 
-    mode, profile, passthrough = classify_args(sys.argv[1:])
+    arguments = sys.argv[1:]
+    # Only interpret an alias in command position. A task prompt, runtime
+    # argument or literal after `--` may contain the same text.
+    command_index = 0
+    while command_index < len(arguments):
+        arg = arguments[command_index]
+        if arg in {"-p", "--profile"}:
+            command_index += 2
+        elif arg.startswith("--profile=") or arg.startswith("-p") and len(arg) > 2:
+            command_index += 1
+        else:
+            break
+    command = arguments[command_index] if command_index < len(arguments) else None
+    if command == "--update":
+        app(args=[*arguments[:command_index], "update", *arguments[command_index + 1:]])
+        return
+    if command == "--auto-update":
+        console.print("Manta installs complete qualified releases. Use `manta update --check` or `manta update`.")
+        return
+    mode, profile, passthrough = classify_args(arguments)
     if mode == "delegate":
         app()
         return
+    if any(arg in {"-h", "--help"} for arg in (passthrough or [])):
+        _runtime_help(profile, passthrough or [])
+        return
     _launch_interactive(profile=profile, passthrough=passthrough or [])
+
+
+def _runtime_help(profile: str | None, arguments: list[str]) -> None:
+    """Show runtime help without discovery, profile sync or inference."""
+    import subprocess
+    import sys
+
+    with _databricks_profile_env(profile):
+        result = subprocess.run([sys.executable, "-m", "manta_code._boot", *arguments],
+                                check=False, capture_output=True, text=True)
+    # Keep upstream option details and versions, but make examples executable
+    # through the Manta bootstrap, including commands shadowed by our CLI.
+    for stream, content in ((sys.stdout, result.stdout), (sys.stderr, result.stderr)):
+        stream.write(content.replace("dcode update", "manta update").replace("dcode ", "manta runtime ")
+                     .replace("Install optional extras", "Qualified integration guidance")
+                     .replace("Remove an optional extra", "Qualified integration guidance")
+                     .replace("Toggle automatic updates on or off, then exit", "Show qualified Manta update guidance"))
+    raise SystemExit(result.returncode)
+
+
+@app.command("runtime", context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []})
+def runtime_command(ctx: typer.Context) -> None:
+    """Access dcode commands/flags, including groups shadowed by Manta.
+
+    Examples: manta runtime mcp --help; manta runtime doctor; manta runtime --acp.
+    """
+    profile = (ctx.obj or {}).get("profile")
+    args = list(ctx.args)
+    if args and args[0] in {"update", "--update"}:
+        app(args=["update", *args[1:]])
+        return
+    if args and args[0] == "--auto-update":
+        console.print("Manta updates complete qualified releases. Use `manta update --check` or `manta update`.")
+        return
+    if any(arg in {"-h", "--help"} for arg in ctx.args):
+        _runtime_help(profile, list(ctx.args))
+    else:
+        _launch_interactive(profile=profile, passthrough=list(ctx.args))
+
+
+@app.command("update")
+def update_command(
+    check: bool = typer.Option(False, "--check", help="Check without installing."),
+    version: Optional[str] = typer.Option(None, "--version", help="Exact stable Manta tag, e.g. v0.3.0."),
+) -> None:
+    """Check/install a complete Manta release with its qualified dependencies."""
+    from .updates import check_release, install_method, upgrade
+
+    try:
+        release = check_release(version)
+        console.print(f"Manta {__version__}; release {release.tag}: {release.url}")
+        if not check:
+            if not version and not release.newer:
+                console.print("Already on the latest published Manta release.")
+                return
+            code = upgrade(release, install_method())
+            if code:
+                raise typer.Exit(code=code)
+            console.print("Manta release installed. Start a fresh `manta` process to load it.")
+    except (ValueError, OSError) as exc:
+        console.print(f"[red]Manta update failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("pricing")
+def pricing_command() -> None:
+    """Inspect effective token prices, source and version; unknown stays unknown."""
+    from .agents.usage import effective_pricing, pricing_for
+
+    table = Table(title="Manta price estimates (Gateway billing is authoritative)")
+    for column in ("Target", "Input / 1M", "Output / 1M", "Source", "Version/date"):
+        table.add_column(column)
+    for target, price in sorted(effective_pricing().items()):
+        match = pricing_for(target)
+        table.add_row(target, f"${price.input:g}", f"${price.output:g}", match.source, match.version)
+    console.print(table)
+    console.print("Targets absent here are unpriced. Configure exact service FQNs under [pricing].")
 
 
 def _show_version(value: bool) -> None:
@@ -231,6 +337,26 @@ def doctor(
         dcode_ok,
         "interactive runtime" if dcode_ok else escape(runtime_install_command()),
     )
+    if dcode_ok:
+        try:
+            from .accounting import install_usage_collector
+            from .budget_runtime import install_budget_runtime
+            from .model_capabilities import install_model_capability_bridge
+            from .runtime_contract import runtime_health
+            from .updates import install_runtime_update_adapter
+
+            for label, installer in (
+                ("required: request accounting", install_usage_collector),
+                ("required: budget checkpoints", install_budget_runtime),
+                ("required: model capability bridge", install_model_capability_bridge),
+                ("required: qualified updates", install_runtime_update_adapter),
+            ):
+                add(label, bool(installer()), "Manta foundation adapter")
+            for health in runtime_health():
+                label = ("required: " if health["required"] else "optional/status: ") + health["name"]
+                add(label, health["ok"] if health["required"] else True, health["detail"])
+        except Exception as exc:
+            add("required: foundation integration", False, f"{type(exc).__name__}: {exc}")
 
     try:
         import langchain_openai  # noqa: F401
@@ -728,12 +854,15 @@ def agents_memory(
         console.print(f"Cleared {removed} memory item(s) for [bold]{name}[/bold].")
         return
     if add:
-        import time
+        import uuid
 
-        mem.write_memory(store, namespace, key=f"note-{int(time.time()*1000)}", text=add)
+        mem.write_memory(store, namespace, key=f"note-{uuid.uuid4().hex}", text=add,
+                         agent=defn.name, source="cli")
         console.print(f"Added a note to [bold]{name}[/bold]'s memory (secrets redacted on write).")
     if show:
         notes = mem.read_memories(store, namespace)
+        if mem.legacy_memory_count(store, namespace):
+            console.print("[dim]Legacy/unassigned notes are retained for inspection and excluded from automatic recall. Re-add a note to assign it explicitly to this agent. The migration backup is in <MANTA_HOME>/.state/memory.db.pre-v2.bak.[/dim]")
         if not notes:
             console.print(f"[dim]No memories for '{name}' yet.[/dim]")
             return
@@ -961,6 +1090,7 @@ def run(
     from . import dcode
     from .auth import databricks_configured
 
+    profile = profile or (ctx.find_root().obj or {}).get("profile")
     cfg = load_config()
     db_configured = databricks_configured(profile)
     try:
@@ -1112,6 +1242,7 @@ def _task_list(state: Optional[str]) -> None:
 
 @task_app.command("submit")
 def task_submit(
+    ctx: typer.Context,
     agent: str = typer.Argument(..., help="Agent to run the task (e.g. swe)."),
     prompt: str = typer.Argument(..., help="The task, in plain English."),
     timeout: int = typer.Option(
@@ -1136,9 +1267,8 @@ def task_submit(
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
     try:
-        record = executor.submit_task(
-            agent, prompt, profile=profile, allow_asks=allow_asks, **kwargs
-        )
+        selected = executor.resolve_profile(profile, (ctx.find_root().obj or {}).get("profile"))
+        record = executor.submit_task(agent, prompt, profile=selected, allow_asks=allow_asks, **kwargs)
     except executor.TaskError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -1150,6 +1280,19 @@ def task_submit(
         f"[dim]manta task status {record.id} • manta task output {record.id} • "
         f"manta task cancel {record.id}[/dim]"
     )
+
+
+@task_app.command("resume")
+def task_resume(task_id: str = typer.Argument(..., help="Budget-paused task ID.")) -> None:
+    """Approve continuation of a budget-paused task from its saved checkpoint."""
+    from .tasks import executor
+
+    try:
+        record = executor.resume_task(task_id)
+    except executor.TaskError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Resumed task {record.id} from saved thread {record.thread_id}.")
 
 
 @task_app.command("list")

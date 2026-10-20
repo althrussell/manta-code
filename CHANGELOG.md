@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Adds dependable foundations for the agent harness: atomic runtime composition,
+  shared tool-policy enforcement, bound memory namespaces and preserved learned
+  context, captured detached-task identity, and checkpointed budget continuation.
+- Connects exact-service capability evidence to model cards, effort choices and
+  context/output preflight, and records main, specialist and helper requests in
+  one usage ledger while keeping unknown prices visible.
+- Gives Manta ownership of qualified tagged updates and runtime help, and adds
+  four disposable repository evaluations with executable acceptance checks.
+  See the [foundation qualification record](docs/19-dependable-foundations.md)
+  for scope, evidence and remaining product milestones.
 - Restores the Manta ray, wordmark, product version, and title in the current
   interactive welcome screen, including narrow and ASCII terminals.
 - Makes `/model` show the active Databricks workspace's full chat-model

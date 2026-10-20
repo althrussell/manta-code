@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -47,9 +47,10 @@ class InteractiveConfig(BaseModel):
 
 class BudgetConfig(BaseModel):
     #: Daily (UTC) spend cap across all Manta usage on this machine (ADR
-    #: 0011). Trust-first: interactive runs pause for approval at the cap;
-    #: unattended runs log + record an event and continue. ``None`` = no cap.
+    #: 0011). Checkpoint mode pauses interactive and unattended runs; explicit
+    #: advisory mode records an event and continues. ``None`` = no cap.
     daily_max_usd: float | None = None
+    mode: Literal["checkpoint", "advisory"] = "checkpoint"
 
 
 class DatabricksConfig(BaseModel):
@@ -78,7 +79,7 @@ class MantaConfig(BaseModel):
     #:     output = 8.0
     #:
     #: Fields: input, output, and optionally cache_read / cache_creation.
-    pricing: dict[str, dict[str, float]] = Field(default_factory=dict)
+    pricing: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 def interactive_endpoints(cfg: MantaConfig) -> list[str]:
@@ -93,7 +94,11 @@ def interactive_endpoints(cfg: MantaConfig) -> list[str]:
 
 
 def project_manta_dir(root: Path | None = None) -> Path:
-    return (root or Path.cwd()) / ".manta"
+    if root is None:
+        hint = os.environ.get("MANTA_PROJECT_ROOT")
+        cwd = Path.cwd().resolve()
+        root = Path(hint) if hint else next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), cwd)
+    return root / ".manta"
 
 
 def user_manta_dir() -> Path:

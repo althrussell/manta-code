@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "qualified_on": "2026-10-20",
+  "profile": "labs",
+  "runtime": {
+    "deepagents_code": "0.1.86",
+    "deepagents": "0.7.28"
+  },
+  "rubric": {
+    "main_model": "system.ai.gpt-6-1-sol",
+    "grader_model": "system.ai.gpt-6-1-sol",
+    "answer": "42",
+    "criteria_satisfied": true,
+    "requests": [
+      {
+        "agent": "swe",
+        "model": "system.ai.gpt-6-1-sol",
+        "call_kind": "agent",
+        "protocol": "responses",
+        "input_tokens": 17858,
+        "output_tokens": 5,
+        "usage_complete": 1,
+        "cost_usd": null,
+        "outcome": "completed"
+      },
+      {
+        "agent": "swe",
+        "model": "databricks:system.ai.gpt-6-1-sol",
+        "call_kind": "grader",
+        "protocol": "responses",
+        "input_tokens": 2460,
+        "output_tokens": 51,
+        "usage_complete": 1,
+        "cost_usd": null,
+        "outcome": "completed"
+      }
+    ]
+  },
+  "detached_continuation": {
+    "schema_version": 1,
+    "qualification": "detached_task_resume",
+    "live": true,
+    "profile": "labs",
+    "model": "databricks:system.ai.gpt-6-1-sol",
+    "passed": true,
+    "task_id": "8c58642b",
+    "paused_state": "paused_budget",
+    "thread_id": "01a1596e-f0a3-7302-9c2d-a4bca9e3acce",
+    "had_resume_mapping": true,
+    "paused_processes_exited": true,
+    "resumed_same_task": true,
+    "resumed_new_runner": true,
+    "final_state": "done",
+    "resumed_same_thread": true,
+    "output_exact_marker": true,
+    "fixture_unchanged": true,
+    "command": ".venv/bin/python scripts/qualify_task_resume.py --live --profile labs --output /tmp/manta-reviewed-task-resume.json"
+  },
+  "limitations": [
+    "Unknown exact-service prices; no USD completeness or savings claim.",
+    "Claude Sonnet Responses forced tool choice is rejected; its rubric ToolStrategy is not qualified. Select a qualified helper such as GPT-6.1.",
+    "Four repository fixtures do not establish model superiority or long-context quality."
+  ],
+  "offline_matrix": {
+    "python_3_12_8": {
+      "passed": 939,
+      "warnings": 1,
+      "seconds": 110.73
+    },
+    "python_3_14_5": {
+      "passed": 939,
+      "warnings": 1,
+      "seconds": 121.3
+    },
+    "warning": "Upstream LangChain forked subagents beta notice",
+    "real_nested_budget_server_restart": true
+  },
+  "packaging": {
+    "sdist_wheel_validation": true,
+    "installed_wheel_python": "3.12.8",
+    "installed_outside_checkout": true,
+    "mounted_picker_branding_capability_tests_passed": 30,
+    "version_help_required_adapters_passed": true,
+    "dependency_check_passed": true,
+    "dependency_source": "Recorded Databricks package proxy and qualified local wheelhouse",
+    "public_index_only_install_qualified": false,
+    "release_published": false
+  }
+}

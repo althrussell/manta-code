@@ -58,12 +58,15 @@ kind = "endpoint"             # Disambiguates an actual dotted legacy endpoint.
 
 [budget]
 daily_max_usd = 25.0
+mode = "checkpoint"           # checkpoint (default) | advisory
 
 # Example only: set rates verified for this exact service and your pricing.
 [pricing."custom.team.private-service"]
 input = 2.0                   # USD per 1M tokens
 output = 8.0
 # Optional explicit cache_read and cache_creation rates.
+source = "workspace contract" # Optional provenance, displayed by manta pricing.
+as_of = "2026-10-20"
 ```
 
 `manta init` writes the current defaults from `model_defaults.py`;
@@ -95,13 +98,24 @@ substrings do not establish API support. An explicit selection known to be
 unsupported fails before inference. Metadata denial does not prevent a direct,
 explicitly configured call.
 
-Capabilities remain unknown unless supported by metadata, exact documented
-compatibility evidence, or an explicit `profile` override. A protocol advertisement
+One exact-target capability catalog supplies adapter validation, model cards,
+`/effort`, and context compaction. Facts carry source/date and protocol/workspace
+qualification separately. Capabilities remain unknown unless supported by
+metadata, exact documented compatibility evidence, or an explicit `profile`
+override. A protocol advertisement
 does not imply a context limit, tool support, or multimodal support. `profile`
 is a model capability map; `databricks_profile` selects SDK authentication.
 Native Anthropic Messages, native Gemini, and direct provider-service addressing
 are optional extensions outside this transport. Compatible services use the
 unified gateway APIs.
+
+The adapter checks known output and effort limits before dispatch. Context
+preflight estimates instructions, messages and tool schemas, then reserves the
+requested output cap (or the known maximum output when none was supplied).
+Media and opaque continuation state remain intact and are marked unmeasured;
+this estimate is not proof that a maximum-size context will succeed. See
+[model capability qualification](18-model-capability-qualification.md) for exact
+limits, provenance, tested controls and remaining unknowns.
 
 ## Discovery and diagnostics
 
@@ -132,7 +146,7 @@ Databricks uses the official OpenAI LangChain adapter plus Databricks SDK unifie
 auth. Profile precedence is:
 
 ```text
--p/--profile > MANTA_PROFILE > DATABRICKS_CONFIG_PROFILE > SDK default profile
+child -p/--profile > root -p/--profile > MANTA_PROFILE > DATABRICKS_CONFIG_PROFILE > SDK default profile
 ```
 
 An explicit model `databricks_profile` selects that model's SDK profile. The
@@ -165,16 +179,44 @@ Manta does not derive one vendor's rates from another vendor's economics.
 The local SQLite ledger migrates additively, preserving historical rows and the
 existing model field. New rows record requested target/service, observed backend
 when available, surface/API, gateway request ID when exposed, usage completeness,
-cache/reasoning detail, and pricing source/version. An echoed service name does
+cache/reasoning detail, call kind, latency, and pricing source/version. A shared
+LangChain callback collector observes main, specialist and helper requests;
+invocation/request identity deduplicates repeated accounting observations.
+An echoed service name does
 not establish a backend. Missing usage or rates produce unknown cost rather than
 a zero-dollar call. Reasoning tokens already included in output are not charged
 again. Historical usage completeness remains unconfirmed.
 
+`manta pricing` shows effective exact-target rates and source/version metadata.
+Project rates override user rates. Configured `source` and `as_of` values describe
+the supplied rate; Manta does not independently verify a private contract price.
 Cost, budget, receipts, and `/cost` show known subtotals and the number of calls
 priced when coverage is incomplete; savings are unavailable for incomplete
 receipts. Unknown charges cannot count toward a client USD cap. Manta records
-and warns about incomplete cap coverage while retaining trust-first continuation.
-Gateway budgets and actual billing remain separate from these local estimates.
+and warns about incomplete cap coverage. Gateway budgets and actual billing
+remain separate from these local estimates.
+
+Budget policy is explicit:
+
+| Mode | At an observed token/USD threshold |
+| --- | --- |
+| `checkpoint` (default) | Interrupt before another agent request. Interactive runs ask for approval; unattended runs retain a pending checkpoint instead of auto-approving it. Missing checkpoint machinery stops the request. |
+| `advisory` | Record the threshold and continue. |
+
+Per-agent `budget_max_tokens` and `budget_max_usd` belong in the agent registry;
+`budget.daily_max_usd` is the shared daily known-spend threshold. Checks happen
+between requests, so one request can exceed a limit. Helper calls are recorded
+and attributed, but this is not a prepaid or server-enforced spending ceiling.
+Unknown usage/prices cannot establish a hard dollar cap; use bounded turns/time
+and any applicable Gateway controls as well.
+
+Detached budget-paused tasks keep their task ID, thread, output and nonsecret
+execution manifest. Inspect `manta task status <id>` and
+`manta task output <id>`, then explicitly approve continuation with
+`manta task resume <id>`. Resume uses the saved graph checkpoint and validates
+the original project/workspace/agent identity; it refuses a missing checkpoint
+or changed execution context. It does not replay the original prompt as a new
+task. Ordinary headless runs report a thread ID for interactive `manta -r <id>`.
 
 ## Upstream provider config and ownership
 

@@ -79,10 +79,66 @@ class CapabilityEvidence:
     values: dict[str, Any] = field(default_factory=dict)
     sources: dict[str, str] = field(default_factory=dict)
     supported_api_types: tuple[str, ...] = ()
+    checked_at: str | None = None
+    states: dict[str, str] = field(default_factory=dict)
+    scoped_values: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scoped_sources: dict[str, dict[str, str]] = field(default_factory=dict)
+    qualified_features: dict[str, list[str]] = field(default_factory=dict)
+    qualification_context: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def profile(self) -> dict[str, Any]:
-        return {k: v for k, v in self.values.items() if v is not None and k not in {"forced_tool_choice", "preferred_api", "stream_usage"}}
+        return {k: v for k, v in self.values.items() if v is not None and k not in {"forced_tool_choice", "preferred_api", "stream_usage", "context_window", "max_output_tokens_unary", "service_status"}}
+
+    def for_protocol(self, surface: str, api: str) -> CapabilityEvidence:
+        """Apply only evidence established for the effective wire protocol."""
+        scope = f"{surface}:{api}"
+        values = self.scoped_values.get(scope, {})
+        return CapabilityEvidence(
+            values={**self.values, **values},
+            sources={**self.sources, **self.scoped_sources.get(scope, {})},
+            supported_api_types=self.supported_api_types,
+            checked_at=self.checked_at,
+            states={**self.states, **{key: "qualified" if key in self.qualified_features.get(scope, []) else "documented" for key in values}},
+            scoped_values=self.scoped_values, scoped_sources=self.scoped_sources,
+            qualified_features=self.qualified_features,
+            qualification_context=self.qualification_context,
+        )
+
+
+def merge_capability_evidence(*items: CapabilityEvidence) -> CapabilityEvidence:
+    """Merge exact-target evidence without losing protocol scope or provenance."""
+    values: dict[str, Any] = {}
+    sources: dict[str, str] = {}
+    states: dict[str, str] = {}
+    scoped_values: dict[str, dict[str, Any]] = {}
+    scoped_sources: dict[str, dict[str, str]] = {}
+    qualified: dict[str, list[str]] = {}
+    contexts: dict[str, dict[str, str]] = {}
+    apis: tuple[str, ...] = ()
+    checked_at = None
+    for item in items:
+        values.update(item.values)
+        sources.update(item.sources)
+        states.update(item.states)
+        for scope, entries in item.scoped_values.items():
+            scoped_values.setdefault(scope, {}).update(entries)
+        for scope, entries in item.scoped_sources.items():
+            scoped_sources.setdefault(scope, {}).update(entries)
+        for scope, entries in item.qualified_features.items():
+            qualified[scope] = list(dict.fromkeys([*qualified.get(scope, []), *entries]))
+        contexts.update(item.qualification_context)
+        apis = item.supported_api_types or apis
+        checked_at = item.checked_at or checked_at
+    return CapabilityEvidence(values, sources, apis, checked_at, states, scoped_values, scoped_sources, qualified, contexts)
+
+
+def capability_evidence_from_dict(data: dict[str, Any]) -> CapabilityEvidence:
+    """Read current and older exported inventory records."""
+    fields = {key: value for key, value in data.items() if key in CapabilityEvidence.__dataclass_fields__}
+    if "supported_api_types" in fields:
+        fields["supported_api_types"] = tuple(fields["supported_api_types"])
+    return CapabilityEvidence(**fields)
 
 
 # Exact, documented compatibility evidence, never a family-name heuristic.
@@ -91,22 +147,70 @@ _RESPONSES_ONLY = frozenset({"system.ai.gpt-6-1-sol"})
 
 
 def curated_capabilities(target: DatabricksTarget) -> CapabilityEvidence:
+    from ..model_capabilities import documented_capabilities
+
+    documented = documented_capabilities(target)
+    labs_context = {"profile": "labs", "workspace": "ddedd4c5da027e2a48ba70a105c080c0855c07d44489e08958c648eca8697a41"}
     if target.name in {"system.ai.gemini-3-7-flash", "system.ai.gemini-4-argon"} and target.kind == TargetKind.SERVICE:
         source = "Manta labs Unity qualification, 2026-10-20"
-        return CapabilityEvidence(
-            values={"tool_calling": True, "preferred_api": "chat", "stream_usage": False},
-            sources={
-                "tool_calling": source + ": Chat two-request tool roundtrip passed",
-                "preferred_api": source + ": Chat replays thoughtSignature; Responses rejects raw full-output replay with missing thought_signature",
-                "stream_usage": source + ": Chat stream_options rejected by Gateway generation_config",
-            },
-        )
-    if target.name == "system.ai.claude-sonnet-5-5" and target.kind == TargetKind.SERVICE:
+        scope = "unified:chat"
+        scoped_values = {"tool_calling": True, "stream_usage": False}
+        scoped_sources = {
+            "tool_calling": source + ": Chat two-request tool roundtrip passed",
+            "stream_usage": source + ": Chat stream_options rejected by Gateway generation_config",
+        }
+        qualified = ["tool_calling", "stream_usage"]
+        if target.name == "system.ai.gemini-4-argon":
+            scoped_values.update(reasoning_effort_levels=[], reasoning_effort_default=None)
+            scoped_sources.update({key: source + ": reasoning_effort rejected in generation_config (HTTP 400)" for key in ("reasoning_effort_levels", "reasoning_effort_default")})
+            qualified.extend(["reasoning_effort_levels", "reasoning_effort_default"])
+        else:
+            qualified.append("reasoning_effort_high")
+            scoped_sources["reasoning_effort_high"] = source + ": high effort accepted by adapter invocation"
+        return merge_capability_evidence(documented, CapabilityEvidence(
+            values={"preferred_api": "chat"},
+            scoped_values={scope: scoped_values}, scoped_sources={scope: scoped_sources},
+            sources={"preferred_api": source + ": Chat replays thoughtSignature; Responses rejects raw full-output replay with missing thought_signature"},
+            checked_at="2026-10-20", qualified_features={scope: qualified}, qualification_context={scope: labs_context},
+        ))
+    if target.name in {"system.ai.claude-opus-5-5", "system.ai.claude-sonnet-5-5"} and target.kind == TargetKind.SERVICE:
         source = "Manta labs Unity Responses qualification, 2026-10-20"
-        return CapabilityEvidence(values={"tool_calling": True, "tool_choice": False, "forced_tool_choice": False}, sources={"tool_calling": source + ": ordinary tool roundtrip passed", "tool_choice": source + ": forced tool choice rejected by service", "forced_tool_choice": source + ": forced tool choice rejected by service"})
+        scope = "unified:responses"
+        values = {"tool_calling": True,
+                  "reasoning_effort_levels": ["low", "medium", "high", "xhigh", "max"]}
+        sources = {key: source + ": all five effort values accepted by adapter invocation" for key in values}
+        sources["tool_calling"] = source + ": ordinary tool roundtrip passed"
+        if target.name == "system.ai.claude-sonnet-5-5":
+            values.update(tool_choice=False, forced_tool_choice=False)
+            sources.update({key: source + ": forced tool choice rejected by service" for key in ("tool_choice", "forced_tool_choice")})
+        return merge_capability_evidence(documented, CapabilityEvidence(
+            scoped_values={scope: values}, scoped_sources={scope: sources}, checked_at="2026-10-20",
+            qualified_features={scope: list(values)}, qualification_context={scope: labs_context},
+        ))
     if target.name in _RESPONSES_ONLY and target.kind == TargetKind.SERVICE:
-        return CapabilityEvidence(supported_api_types=("mlflow/v1/responses",), sources={"supported_api_types": "Databricks supported-models documentation, 2026-10-20"})
-    return CapabilityEvidence()
+        scope = "unified:responses"
+        return merge_capability_evidence(documented, CapabilityEvidence(
+            supported_api_types=("mlflow/v1/responses",),
+            sources={"supported_api_types": "Databricks supported-models documentation, 2026-10-20"},
+            scoped_sources={scope: {"reasoning_effort_low": "Manta labs Unity Responses qualification, 2026-10-20: low effort accepted by adapter invocation"}},
+            qualified_features={scope: ["reasoning_effort_low"]}, qualification_context={scope: labs_context},
+        ))
+    if target.kind == TargetKind.SERVICE and target.name in {
+        "system.ai.glm-5-3", "system.ai.glm-5-3-flash", "system.ai.kimi-k3", "system.ai.deepseek-v4-1-flash",
+    }:
+        scope = "unified:responses"
+        return merge_capability_evidence(documented, CapabilityEvidence(
+            scoped_sources={scope: {"reasoning_effort_high": "Manta labs Unity Responses qualification, 2026-10-20: high effort accepted by adapter invocation"}},
+            qualified_features={scope: ["reasoning_effort_high"]}, qualification_context={scope: labs_context},
+        ))
+    if target.kind == TargetKind.SERVICE and target.name == "system.ai.glm-5-2":
+        scope = "unified:responses"
+        return merge_capability_evidence(documented, CapabilityEvidence(
+            scoped_values={scope: {"service_status": "inference rejected as deprecated in labs"}},
+            scoped_sources={scope: {"service_status": "Manta labs Unity Responses qualification, 2026-10-20: HTTP 400 deprecated endpoint"}},
+            qualified_features={scope: ["service_status"]}, qualification_context={scope: labs_context},
+        ))
+    return documented
 
 
 def validate_request_tags(value: Any) -> dict[str, str]:
@@ -285,10 +389,10 @@ def resolve_target_policy(name: str, *, explicit: dict[str, Any] | None = None, 
     same_workspace = not explicit_workspace or not context.get("workspace") or context["workspace"] == hashlib.sha256(explicit_workspace.encode()).hexdigest()
     if capability is None and capability_key in inventory and same_profile and same_workspace:
         item = inventory[capability_key]
-        capability = CapabilityEvidence(values=item.get("values", {}), sources=item.get("sources", {}), supported_api_types=tuple(item.get("supported_api_types", ())))
+        capability = capability_evidence_from_dict(item)
     curated = curated_capabilities(target)
     capability = (
-        CapabilityEvidence(values={**curated.values, **capability.values}, sources={**curated.sources, **capability.sources}, supported_api_types=capability.supported_api_types or curated.supported_api_types)
+        merge_capability_evidence(curated, capability)
         if capability is not None else curated
     )
     apis = capability.supported_api_types
@@ -305,13 +409,14 @@ def resolve_target_policy(name: str, *, explicit: dict[str, Any] | None = None, 
         raise TargetResolutionError(f"{target.name} does not advertise unified {api}; supported APIs: {', '.join(apis)}. Choose a supported api/surface explicitly.")
     if apis and surface == "openai" and not (native_responses if api == "responses" else native_chat):
         raise TargetResolutionError(f"{target.name} does not advertise native OpenAI {api} support; supported APIs: {', '.join(apis)}.")
+    capability = capability.for_protocol(surface, api)
     explicit_profile = params.pop("profile", None)
     if explicit_profile is not None:
         if not isinstance(explicit_profile, dict):
             raise TargetResolutionError("Model profile must be a capability map; use databricks_profile for SDK authentication.")
         if "tool_choice" in explicit_profile and "forced_tool_choice" not in explicit_profile:
             explicit_profile = {**explicit_profile, "forced_tool_choice": explicit_profile["tool_choice"]}
-        capability = CapabilityEvidence(values={**capability.values, **explicit_profile}, sources={**capability.sources, **{k: "explicit override" for k in explicit_profile}}, supported_api_types=apis)
+        capability = merge_capability_evidence(capability, CapabilityEvidence(values=explicit_profile, sources={key: "explicit override" for key in explicit_profile}, states={key: "override" for key in explicit_profile}))
     tags = validate_request_tags({**settings.get("request_tags", {}), **params.pop("request_tags", {})})
     # max_output_tokens is the public policy option, ChatOpenAI owns dialect
     # conversion and requires its max_tokens constructor spelling.
