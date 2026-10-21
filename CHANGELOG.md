@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.4.1] — 2026-10-21
 
 - Fixes Gemini 4 Argon's rejection of the coding agent's `grep` tool schema.
   Chat requests translate exclusive integer bounds without changing local tool
@@ -111,6 +111,7 @@ version branding, and expanded README workflows.
 Initial pilot release of the Databricks-configured Deep Agents launcher and
 Manta agent control plane.
 
+[0.4.1]: https://github.com/althrussell/manta-code/releases/tag/v0.4.1
 [0.4.0]: https://github.com/althrussell/manta-code/releases/tag/v0.4.0
 [0.3.0]: https://github.com/althrussell/manta-code/releases/tag/v0.3.0
 [0.2.0]: https://github.com/althrussell/manta-code/releases/tag/v0.2.0

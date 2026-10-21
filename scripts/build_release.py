@@ -2,7 +2,7 @@
 """Build and verify GitHub release assets using the installed, locked build backend.
 
 Run from a qualified development environment:
-    python scripts/build_release.py --output-dir dist --tag v0.4.0
+    python scripts/build_release.py --output-dir dist --tag v0.4.1
 
 No dependencies are downloaded. The wheel is built from the source archive and
 its CLI is exercised outside the checkout before any assets reach output-dir.
@@ -267,7 +267,7 @@ def build_release(root: Path, output: Path, tag: str) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("dist"))
-    parser.add_argument("--tag", required=True, help="Release tag, such as v0.4.0")
+    parser.add_argument("--tag", required=True, help="Release tag, such as v0.4.1")
     args = parser.parse_args()
     try:
         files = build_release(Path(__file__).resolve().parents[1], args.output_dir, args.tag)
