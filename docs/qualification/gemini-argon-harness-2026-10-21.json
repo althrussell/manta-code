@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-21",
+  "qualification": "gemini_argon_coding_harness",
+  "live": true,
+  "profile": "labs",
+  "workspace_sha256": "ddedd4c5da027e2a48ba70a105c080c0855c07d44489e08958c648eca8697a41",
+  "baseline_failures": [
+    {
+      "target": "system.ai.gemini-4-argon",
+      "surface": "unified",
+      "api": "chat",
+      "status": 400,
+      "rejected_schema_keyword": "exclusiveMinimum",
+      "tool": "grep",
+      "parameter": "max_count",
+      "request_id": "0a0b5f0d-5721-4f03-b5d4-a71ddba5182a"
+    },
+    {
+      "target": "databricks-gemini-4-argon",
+      "surface": "legacy",
+      "api": "chat",
+      "status": 400,
+      "rejected_option": "stream_options",
+      "request_id": "ef6e49a9-6c07-41a0-b96c-8149fce456b2"
+    },
+    {
+      "target": "databricks-gemini-4-argon",
+      "surface": "legacy",
+      "api": "chat",
+      "status": 400,
+      "rejected_option": "reasoning_effort",
+      "request_id": "ec1e3a30-d502-409d-9660-347f23a4ab05"
+    }
+  ],
+  "adapter_tool_roundtrips": [
+    {
+      "target": "system.ai.gemini-4-argon",
+      "mode": "invoke",
+      "surface": "unified",
+      "api": "chat",
+      "tool_count": 34,
+      "passed": true,
+      "calls": [
+        "echo_value"
+      ],
+      "signature_preserved": true,
+      "checkpoint_roundtrip": true,
+      "completion": "OK",
+      "request_id": "e5cd8532-057b-4872-b559-d9c11800dfca"
+    },
+    {
+      "target": "system.ai.gemini-4-argon",
+      "mode": "stream",
+      "surface": "unified",
+      "api": "chat",
+      "tool_count": 34,
+      "passed": true,
+      "calls": [
+        "echo_value"
+      ],
+      "signature_preserved": true,
+      "checkpoint_roundtrip": true,
+      "completion": "OK",
+      "request_id": "9654472b-c0ff-423b-bf6c-ff0f9f0cc7be"
+    },
+    {
+      "target": "databricks-gemini-4-argon",
+      "mode": "invoke",
+      "surface": "legacy",
+      "api": "chat",
+      "tool_count": 34,
+      "passed": true,
+      "calls": [
+        "echo_value"
+      ],
+      "signature_preserved": true,
+      "checkpoint_roundtrip": true,
+      "completion": "OK",
+      "request_id": "40d61672-adf4-44de-b4a1-8d8afc02c8f3"
+    },
+    {
+      "target": "databricks-gemini-4-argon",
+      "mode": "stream",
+      "surface": "legacy",
+      "api": "chat",
+      "tool_count": 34,
+      "passed": true,
+      "calls": [
+        "echo_value"
+      ],
+      "signature_preserved": true,
+      "checkpoint_roundtrip": true,
+      "completion": "OK",
+      "request_id": "9ae5d072-9393-4048-89de-6dc92ce331a1"
+    }
+  ],
+  "interactive_harness": [
+    {
+      "target": "system.ai.gemini-4-argon",
+      "profile": "labs",
+      "passed": true,
+      "surface": "unified",
+      "api": "chat",
+      "tool_count": 34,
+      "stream_chunks": 7,
+      "tool_names": [
+        "grep"
+      ],
+      "positive_grep_limit": true,
+      "tool_results": 1,
+      "tool_errors": 0,
+      "signature_preserved": true,
+      "final_answer": true,
+      "fixture_unchanged": true,
+      "conversation": "ordinary_prior_text"
+    },
+    {
+      "target": "databricks-gemini-4-argon",
+      "profile": "labs",
+      "passed": true,
+      "surface": "legacy",
+      "api": "chat",
+      "tool_count": 34,
+      "stream_chunks": 7,
+      "tool_names": [
+        "grep"
+      ],
+      "positive_grep_limit": true,
+      "tool_results": 1,
+      "tool_errors": 0,
+      "signature_preserved": true,
+      "final_answer": true,
+      "fixture_unchanged": true,
+      "conversation": "ordinary_prior_text"
+    },
+    {
+      "target": "system.ai.gemini-4-argon",
+      "profile": "labs",
+      "passed": true,
+      "conversation": "fresh",
+      "surface": "unified",
+      "api": "chat",
+      "tool_count": 34,
+      "stream_chunks": 7,
+      "tool_names": [
+        "grep"
+      ],
+      "positive_grep_limit": true,
+      "tool_results": 1,
+      "tool_errors": 0,
+      "signature_preserved": true,
+      "final_answer": true,
+      "fixture_unchanged": true
+    }
+  ],
+  "scope": {
+    "synthetic_prompts_only": true,
+    "temporary_projects_only": true,
+    "workspace_changes": false,
+    "raw_signatures_retained": false,
+    "private_user_skills_disabled": true
+  },
+  "passed": true
+}

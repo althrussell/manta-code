@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.1] — 2026-10-21
+
+- Fixes Gemini 4 Argon's rejection of the coding agent's `grep` tool schema.
+  Chat requests translate exclusive integer bounds without changing local tool
+  validation. Qualification covers the exact Unity service and legacy endpoint.
+- Preserves Gemini tool signatures arriving after the initial streamed tool-call
+  fragment, including signature-only deltas and overlapping sync/async streams.
+- Disables unsupported streaming usage options on the qualified legacy Argon
+  endpoint, matching its verified Gateway behavior.
+
 ## [0.4.0] — 2026-10-21
 
 - Adds a visible agent team: `/agents` authoring, persistent enable/disable,
@@ -101,6 +111,7 @@ version branding, and expanded README workflows.
 Initial pilot release of the Databricks-configured Deep Agents launcher and
 Manta agent control plane.
 
+[0.4.1]: https://github.com/althrussell/manta-code/releases/tag/v0.4.1
 [0.4.0]: https://github.com/althrussell/manta-code/releases/tag/v0.4.0
 [0.3.0]: https://github.com/althrussell/manta-code/releases/tag/v0.3.0
 [0.2.0]: https://github.com/althrussell/manta-code/releases/tag/v0.2.0

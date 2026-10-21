@@ -1,6 +1,6 @@
 # Installation and upgrades
 
-Manta v0.4.0 is distributed as a GitHub release and immutable Git tag, with a
+Manta v0.4.1 is distributed as a GitHub release and immutable Git tag, with a
 wheel, source archive, dependency constraints, release notes, and SHA-256
 checksums. There is no PyPI publishing step in this release process.
 
@@ -9,12 +9,15 @@ CI. All commands below install the `agent` extra, which includes the interactive
 runtime and Databricks support; installing only the base package omits them.
 Examples use Bash unless marked PowerShell.
 
-v0.4.0 includes [dependable foundations](19-dependable-foundations.md), the
+v0.4.1 fixes Gemini 4 Argon coding-tool requests and streamed tool signatures.
+It retains v0.4.0’s [dependable foundations](19-dependable-foundations.md), the
 [visible agent team](20-visible-agent-team.md), a Gateway-only Databricks model
 picker, and restored Manta branding. The release includes the Manta-owned updater,
 `/agents` authoring, `/tasks` tracking, isolated detached work and reviewed
 integration. [Measured model efficiency](17-coding-agent-harness-review.md)
-remains the next milestone.
+remains the next milestone. See the [v0.4.1 release notes](releases/v0.4.1.md)
+for the exact Gemini targets and qualification scope. Dependencies are unchanged
+from v0.4.0.
 
 ## Recommended: isolated uv tool
 
@@ -24,14 +27,14 @@ then run:
 ```bash
 uv python install 3.12
 uv tool install --python 3.12 \
-  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.1/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.1"
 uv tool update-shell
 manta --version
 ```
 
 Open a new terminal after updating your shell if necessary. The version command
-should print `0.4.0`. The constraints file selects the dependency versions used
+should print `0.4.1`. The constraints file selects the dependency versions used
 for qualification; it does not install the development tools by itself.
 
 ## Upgrade an older installation
@@ -42,15 +45,15 @@ matching constraints:
 
 ```bash
 uv tool install --force --upgrade --python 3.12 \
-  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
+  --constraints https://raw.githubusercontent.com/althrussell/manta-code/v0.4.1/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.1"
 manta --version
 manta doctor
 ```
 
-The version should print `0.4.0`. `uv tool upgrade manta-code` stays within the
+The version should print `0.4.1`. `uv tool upgrade manta-code` stays within the
 source you originally selected: an installation pinned to `@v0.3.0` does not
-select `@v0.4.0`. For subsequent manual upgrades, change both the package URL's
+select `@v0.4.1`. For subsequent manual upgrades, change both the package URL's
 tag and the constraints URL's tag. For a pip installation, use the new virtual
 environment instructions below.
 
@@ -59,18 +62,18 @@ packages:
 
 ```bash
 manta update --check
-manta update --check --version v0.4.0
+manta update --check --version v0.4.1
 ```
 
 Save work and exit interactive sessions before installing the chosen release:
 
 ```bash
-manta update --version v0.4.0
+manta update --version v0.4.1
 manta --version
 manta doctor
 ```
 
-For a later release, replace `v0.4.0` with its published stable tag. Without
+For a later release, replace `v0.4.1` with its published stable tag. Without
 `--version`, `manta update` selects the latest stable release and installs only
 if newer. An explicit tag can reinstall/select that release. The updater detects
 its own uv tool or pip environment, installs `manta-code[agent]` from the
@@ -119,12 +122,12 @@ API, or workspace, start a fresh thread with `/clear`.
 Use a separate environment, especially when migrating from a pre-v0.3.0 runtime:
 
 ```bash
-python3.12 -m venv ~/.venvs/manta-0.4.0
-source ~/.venvs/manta-0.4.0/bin/activate
+python3.12 -m venv ~/.venvs/manta-0.4.1
+source ~/.venvs/manta-0.4.1/bin/activate
 python -m pip install --upgrade pip
 python -m pip install \
-  --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock \
-  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
+  --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.4.1/requirements-dev.lock \
+  "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.1"
 python -m pip check
 manta --version
 ```
@@ -132,10 +135,10 @@ manta --version
 On Windows, install Git and Python 3.12, then use PowerShell:
 
 ```powershell
-py -3.12 -m venv "$env:USERPROFILE\.venvs\manta-0.4.0"
-& "$env:USERPROFILE\.venvs\manta-0.4.0\Scripts\Activate.ps1"
+py -3.12 -m venv "$env:USERPROFILE\.venvs\manta-0.4.1"
+& "$env:USERPROFILE\.venvs\manta-0.4.1\Scripts\Activate.ps1"
 python -m pip install --upgrade pip
-python -m pip install --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.4.0/requirements-dev.lock "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.0"
+python -m pip install --constraint https://raw.githubusercontent.com/althrussell/manta-code/v0.4.1/requirements-dev.lock "manta-code[agent] @ git+https://github.com/althrussell/manta-code.git@v0.4.1"
 python -m pip check
 manta --version
 ```
@@ -149,9 +152,9 @@ The GitHub release also provides a wheel for environments that do not use Git.
 With the [GitHub CLI](https://cli.github.com/) installed:
 
 ```bash
-mkdir manta-0.4.0-release
-cd manta-0.4.0-release
-gh release download v0.4.0 --repo althrussell/manta-code
+mkdir manta-0.4.1-release
+cd manta-0.4.1-release
+gh release download v0.4.1 --repo althrussell/manta-code
 if command -v sha256sum >/dev/null; then
   sha256sum --check SHA256SUMS
 else
@@ -166,7 +169,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --constraint requirements-dev.lock \
-  './manta_code-0.4.0-py3-none-any.whl[agent]'
+  './manta_code-0.4.1-py3-none-any.whl[agent]'
 python -m pip check
 manta --version
 ```
@@ -200,7 +203,11 @@ running graph is protected. Required control construction failures stop the
 runtime with a diagnosis. Optional UI adapters can report degraded operation.
 
 The qualified Gemini services use unified Chat because their unified Responses
-tool continuation currently fails in the gateway. See the
+tool continuation currently fails in the gateway. v0.4.1 also qualifies the exact
+legacy endpoint `databricks-gemini-4-argon` separately from the Unity service
+`system.ai.gemini-4-argon`; both use Chat with streaming usage options and
+configurable reasoning effort disabled. See the
+[Argon harness qualification](21-gemini-argon-harness-qualification.md) and the
 [qualification report](15-unity-gateway-qualification.md) for exact targets and
 other limits. Unknown service prices remain unknown in local cost reports.
 The [model controls report](18-model-capability-qualification.md) separately
@@ -245,7 +252,7 @@ runtime route also reaches upstream `doctor`/`agents` groups shadowed by Manta.
 Help does not synchronize profiles, discover workspace models or call inference.
 
 If resolution reports an MCP 1/MCP 2 conflict, recreate the environment using the
-v0.4.0 commands rather than adding the old Databricks bridge packages.
+v0.4.1 commands rather than adding the old Databricks bridge packages.
 
 For an editable checkout and offline regression tests, follow
 [CONTRIBUTING.md](../CONTRIBUTING.md). `scripts/bootstrap.sh` sets up the locked

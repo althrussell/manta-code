@@ -92,6 +92,8 @@ jobs:
           export UV_TOOL_BIN_DIR="$RUNNER_TEMP/manta-upgrade-bin"
           install_tag v0.3.0
           verify_tag v0.3.0
+          install_tag v0.4.0
+          verify_tag v0.4.0
           install_tag "$RELEASE_TAG"
           verify_tag "$RELEASE_TAG"
           "$UV_TOOL_DIR/manta-code/bin/python" -I -c \

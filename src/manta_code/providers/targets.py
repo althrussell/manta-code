@@ -88,7 +88,7 @@ class CapabilityEvidence:
 
     @property
     def profile(self) -> dict[str, Any]:
-        return {k: v for k, v in self.values.items() if v is not None and k not in {"forced_tool_choice", "preferred_api", "stream_usage", "context_window", "max_output_tokens_unary", "service_status"}}
+        return {k: v for k, v in self.values.items() if v is not None and k not in {"forced_tool_choice", "preferred_api", "stream_usage", "tool_schema_dialect", "context_window", "max_output_tokens_unary", "service_status"}}
 
     def for_protocol(self, surface: str, api: str) -> CapabilityEvidence:
         """Apply only evidence established for the effective wire protocol."""
@@ -151,27 +151,34 @@ def curated_capabilities(target: DatabricksTarget) -> CapabilityEvidence:
 
     documented = documented_capabilities(target)
     labs_context = {"profile": "labs", "workspace": "ddedd4c5da027e2a48ba70a105c080c0855c07d44489e08958c648eca8697a41"}
-    if target.name in {"system.ai.gemini-3-7-flash", "system.ai.gemini-4-argon"} and target.kind == TargetKind.SERVICE:
-        source = "Manta labs Unity qualification, 2026-10-20"
-        scope = "unified:chat"
+    qualified_gemini_service = target.name in {"system.ai.gemini-3-7-flash", "system.ai.gemini-4-argon"} and target.kind == TargetKind.SERVICE
+    qualified_legacy_argon = target.name == "databricks-gemini-4-argon" and target.kind == TargetKind.ENDPOINT
+    if qualified_gemini_service or qualified_legacy_argon:
+        checked_at = "2026-10-21" if qualified_legacy_argon else "2026-10-20"
+        source = f"Manta labs {'legacy' if qualified_legacy_argon else 'Unity'} qualification, {checked_at}"
+        scope = "legacy:chat" if qualified_legacy_argon else "unified:chat"
         scoped_values = {"tool_calling": True, "stream_usage": False}
         scoped_sources = {
             "tool_calling": source + ": Chat two-request tool roundtrip passed",
             "stream_usage": source + ": Chat stream_options rejected by Gateway generation_config",
         }
         qualified = ["tool_calling", "stream_usage"]
-        if target.name == "system.ai.gemini-4-argon":
+        if target.name in {"system.ai.gemini-4-argon", "databricks-gemini-4-argon"}:
             scoped_values.update(reasoning_effort_levels=[], reasoning_effort_default=None)
             scoped_sources.update({key: source + ": reasoning_effort rejected in generation_config (HTTP 400)" for key in ("reasoning_effort_levels", "reasoning_effort_default")})
             qualified.extend(["reasoning_effort_levels", "reasoning_effort_default"])
+            scoped_values["tool_schema_dialect"] = "gemini"
+            scoped_sources["tool_schema_dialect"] = "Manta labs Argon qualification, 2026-10-21: exclusive numeric bounds rejected by Chat; normalized coding-tool schemas accepted"
+            qualified.append("tool_schema_dialect")
+            checked_at = "2026-10-21"
         else:
             qualified.append("reasoning_effort_high")
             scoped_sources["reasoning_effort_high"] = source + ": high effort accepted by adapter invocation"
         return merge_capability_evidence(documented, CapabilityEvidence(
-            values={"preferred_api": "chat"},
+            values={"preferred_api": "chat"} if qualified_gemini_service else {},
             scoped_values={scope: scoped_values}, scoped_sources={scope: scoped_sources},
-            sources={"preferred_api": source + ": Chat replays thoughtSignature; Responses rejects raw full-output replay with missing thought_signature"},
-            checked_at="2026-10-20", qualified_features={scope: qualified}, qualification_context={scope: labs_context},
+            sources={"preferred_api": source + ": Chat replays thoughtSignature; Responses rejects raw full-output replay with missing thought_signature"} if qualified_gemini_service else {},
+            checked_at=checked_at, qualified_features={scope: qualified}, qualification_context={scope: labs_context},
         ))
     if target.name in {"system.ai.claude-opus-5-5", "system.ai.claude-sonnet-5-5"} and target.kind == TargetKind.SERVICE:
         source = "Manta labs Unity Responses qualification, 2026-10-20"

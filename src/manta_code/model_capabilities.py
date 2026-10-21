@@ -150,6 +150,7 @@ def format_capability_card(name: str, *, effective_profile: Mapping[str, Any] | 
     limits += f" · Output: {output:,}" if isinstance(output, int) else " · Output: unknown"
     effort = "Effort: " + (" / ".join(levels) if levels else "unavailable on this API" if levels == [] else "not qualified for this API")
     labels = {"tool_calling": "tool roundtrip", "stream_usage": "stream usage constraint",
+              "tool_schema_dialect": "coding-tool schemas",
               "tool_choice": "forced choice unavailable", "forced_tool_choice": "forced choice unavailable",
               "reasoning_effort_levels": "effort controls", "reasoning_effort_default": "effort default constraint",
               "reasoning_effort_low": "low effort", "reasoning_effort_high": "high effort",
